@@ -89,7 +89,46 @@ Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here
   "Tier-2 hub" section above). What remains for your accounts is only the *connector wiring*
   (pointing real Claude/ChatGPT at the MCP endpoint), not the hub logic.
 
-## ChatGPT MCP tunnel — provisioned + running, connector-linking blocked (2026-07-23/24)
+## Tier-2 live cross-provider proof — ✅ ALL THREE LEGS PASS (2026-07-24, real ChatGPT + real MCP)
+
+Stood up the real Tier-2 loop over a genuine (non-sensitive) brain and proved memories
+propagate across providers through the running hub + the **live ChatGPT MCP connector**.
+
+Setup: real brain `main` + `provider/{chatgpt,claude,openclaw}`; ChatGPT reaches it over the
+OpenAI Secure MCP Tunnel connector (created + connected, see below); openclaw reads/writes on
+the filesystem as the hub; Claude reads via an MCP host. Flow per hop is **capture → `brain_merge`
+(ends on `main`) → read** (the shared working tree is single, so hops are sequenced).
+
+| Leg | Claim | How proven | Result |
+|---|---|---|---|
+| (b) | **ChatGPT recites a memory captured in openclaw** | openclaw captured `loreport-tier2-live` (`inbox_ingest.py openclaw`) → merged to `main`. In a real ChatGPT chat, ChatGPT called the connector's `brain_read` and quoted it **verbatim** (date + "bridging ChatGPT, Claude, and openclaw"). | ✅ |
+| (c) | **openclaw recites a memory captured in ChatGPT** | ChatGPT called the connector's `brain_capture` → commit `1d6ce29` on `provider/chatgpt` (git-verified) → merged to `main`. `openclaw agent` had Clawdia read it and recite the content + correctly name `source: chatgpt`. | ✅ |
+| (a) | **Claude reads a memory captured in ChatGPT** | Same ChatGPT-captured memory on `main`. A fresh Claude session (Claude Code MCP host, `mcp__loreport-demo__brain_read`) quoted it **verbatim** and named `source: chatgpt`. | ✅ |
+
+Leg (a) note: proven via the **Claude Code MCP host** (exposure-free), not claude.ai web. The
+claude.ai-web path needs a public HTTPS endpoint (Tailscale Funnel) since claude.ai's custom
+connector takes only a Remote-MCP-URL with no per-connector header field; that path is left for
+the user to exercise if a web-UI proof is wanted (the funnel endpoint would be open-read, so use
+non-sensitive data + tear it down after).
+
+**Two real server bugs found + fixed during this proof (both pushed):**
+1. `0cc3cc8` — **MCP-response conformance.** `tools/call` returned a bare dict (e.g.
+   `{"content": "<string>"}`); MCP requires `result.content` to be an **array of typed content
+   blocks**. `brain_read`/`brain_surface` therefore failed the ChatGPT connector's client-side
+   schema validation even though the server read the item correctly (search half-worked). Fixed
+   with `_as_tool_result()` wrapping every return as `{content:[{type:text,text}], isError}`.
+2. `1f845cb` — **JSON-RPC notifications.** The stdio loop replied to notifications (no `id`, e.g.
+   `notifications/initialized`); the spurious reply desynced the tunnel client and produced the
+   opaque "something went wrong" at connector creation. Fixed with `if "id" not in req: continue`.
+   (Plus the earlier `992a4f2` BrokenPipeError guard.)
+
+**Known design gap (documented, not yet fixed):** `inbox_ingest.commit_block` checks out
+`provider/<name>` and does **not** restore the prior branch, so a capture leaves the single shared
+working tree on a provider branch; since reads use the working tree, concurrent capture+read across
+providers can race. Mitigation today is sequencing (capture → merge → read). A durable fix would
+give the hub its own worktree per operation or restore-branch-after-commit.
+
+## ChatGPT MCP tunnel — provisioned + running, connector CREATED + CONNECTED (2026-07-23/24)
 
 A reference deployment's OpenAI Secure MCP Tunnel was provisioned and brought up
 end-to-end: tunnel created, `tunnel-client` config validated (`doctor` → `ok`), service
@@ -111,19 +150,12 @@ not anywhere in Settings. Once found, the tunnel showed up correctly in the "Ava
 tunnels" picker (only tunnels with a ChatGPT workspace attached appear there — set that
 at tunnel-creation time).
 
-**Two real bugs found while attempting to finish the connector, both server-side:**
-1. **Fixed** — `hub/mcp_server.py`'s stdio transport crashed on `BrokenPipeError` when the
-   tunnel's pipe was torn down (a normal event on reconnect), leaving the tunnel "degraded"
-   (502s) until the whole service was restarted by hand. Now handled gracefully; see the
-   commit that added `_write_response()`.
-2. **Open** — creating the connector with `Authentication: OAuth` fails with a specific,
-   correct error (*"MCP server ... does not implement OAuth"* — true, ours doesn't).
-   Switching to `Authentication: No Auth` (which should be the right mode for a
-   credential-header-based server like this one) instead fails with a generic
-   *"Error creating connector — something went wrong"* with no further detail, even
-   against the fixed server. Root cause not yet isolated — worth revisiting with server
-   access logs at connector-creation time, or an actual OAuth implementation as the
-   alternative fix.
+**Connector now CREATED + CONNECTED (2026-07-24)** via Plugins → Personal → "+" (New Plugin)
+→ Connection: Tunnel → pick the Loreport tunnel → Authentication: **No Auth** → risk-ack →
+Create → Connect ("Loreport is now connected"). The generic "No Auth → something went wrong"
+error that previously blocked creation was **the notification bug (#2 below)** — once the server
+stopped replying to notifications, creation succeeded. All three server bugs are fixed (see the
+"Tier-2 live cross-provider proof" section above for the full list + the end-to-end proof).
 
 ## Known soft notes (non-blocking, future polish)
 - `bootstrap.md` is 891 tokens (808 before the `source`/`captured` provenance grammar +
