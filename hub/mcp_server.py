@@ -219,6 +219,13 @@ def run_stdio(brain_dir, credential):
                                      "error": {"code": -32700, "message": "parse error"}}):
                 break
             continue
+        # JSON-RPC 2.0 notifications (no "id" key) MUST NOT get a response — e.g.
+        # MCP's "notifications/initialized". Replying anyway desyncs the client's
+        # request/response pairing (it starts matching the wrong response to the
+        # wrong pending request), which reads as "invalid request" / a dead
+        # session on the tunnel-client side even though the server is fine.
+        if "id" not in req:
+            continue
         resp = handle_request(brain_dir, credential, req)
         if not _write_response(resp):
             break
