@@ -187,11 +187,30 @@ def handle_request(brain_dir, credential, req):
         }
     elif method == "tools/call":
         tool_name = params.get("name")
-        result = dispatch(brain_dir, credential, tool_name, params.get("arguments"))
+        raw = dispatch(brain_dir, credential, tool_name, params.get("arguments"))
+        result = _as_tool_result(raw)
     else:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"method not found: {method}"}}
 
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _as_tool_result(raw):
+    """Wrap a tool's return dict in the MCP tools/call result shape: a `content`
+    array of typed blocks (+ isError). MCP clients (e.g. the ChatGPT connector)
+    reject a bare dict — `result.content` MUST be an array of {type,text} blocks.
+    Without this, brain_read/brain_surface returned `{"content": "<str>"}` (content
+    as a string, not an array) and failed the client's schema validation, so the
+    model got nothing back even though the server read the item correctly."""
+    is_error = isinstance(raw, dict) and "error" in raw
+    if isinstance(raw, dict) and isinstance(raw.get("content"), str):
+        text = raw["content"]
+    elif isinstance(raw, dict) and "matches" in raw:
+        matches = raw.get("matches") or []
+        text = "\n".join(matches) if matches else "(no matches)"
+    else:
+        text = json.dumps(raw)
+    return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
 def _write_response(payload):
