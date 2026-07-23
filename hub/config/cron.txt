@@ -1,0 +1,14 @@
+# Model-Proof Brain — hub cron entries (design.md §D14, §D16).
+#
+# openclaw's own scheduler is the hub's cron; no separate daemon is required.
+# Install with: crontab hub/config/cron.txt  (after editing the path below).
+#
+# The daily reconciliation always runs merge before publish — brain_merge.py's
+# last step fast-forwards the provider branches, and snapshot_publish.py reads
+# the freshly-merged `main`, so publish must come after merge, never before.
+
+# Daily reconciliation (02:00 local time): tag -> fetch -> merge -> scrub -> reindex -> ff.
+0 2 * * * cd /path/to/brain-repo && python3 hub/brain_merge.py >> hub/logs/merge.log 2>&1
+
+# Republish the pinned packet five minutes later, once the merge has landed.
+5 2 * * * cd /path/to/brain-repo && python3 hub/snapshot_publish.py >> hub/logs/publish.log 2>&1

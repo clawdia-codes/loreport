@@ -1,0 +1,8 @@
+name: distill-source-into-knowledge
+description: Turn any source into a permanent knowledge page
+triggers:
+  - "add this to my brain"
+  - "remember this article"
+  - "distill this"
+  - "remember this doc"
+  - "save this source"

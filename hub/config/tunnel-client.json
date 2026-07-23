@@ -1,0 +1,15 @@
+{
+  "_comment": "OpenAI Secure MCP Tunnel client config — reuses the Portia-pattern setup already proven for this user (design.md §D15 bridge A). The tunnel authenticates outbound to OpenAI's relay; the hub never opens a public listener — mcp_server.py binds 127.0.0.1 only and the tunnel forwards to it locally.",
+  "tunnel_server": "https://mcp-tunnel.openai.com",
+  "local_server": "http://127.0.0.1:8765",
+  "auth_token": "<your-tunnel-auth-token>",
+  "credential": "<your-chatgpt-provider-credential>",
+  "labels": {
+    "service": "model-proof-brain",
+    "provider": "chatgpt"
+  },
+  "_placeholders": [
+    "auth_token — issued by the OpenAI Secure MCP Tunnel dashboard; do not commit the real value",
+    "credential — the per-connection value sent as the X-MPB-Credential header; maps 1:1 to provider/chatgpt in hub/mcp_server.py's CREDENTIAL_PROVIDER_MAP"
+  ]
+}
