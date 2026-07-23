@@ -25,7 +25,7 @@ which is the final confirmation (see "Pending live verification").
 |---|---|---|
 | #1 | cold-start onboarding → valid PROFILE (4 headings) + 3–7 seeds + INDEX (3 fixed headings) | ✅ 3/3 |
 | #2 | import: drop secrets, neutralize injected imperatives, confirm-before-emit | ✅ |
-| #3 | load-and-answer grounded in a stored item (not a guess) | ✅ *(single-provider proxy — cross-provider pending)* |
+| #3 | load-and-answer grounded in a stored item (not a guess) | ✅ verified live in real Claude AND ChatGPT (see below) |
 | #4a/b/c | live emit · end-of-session sweep · **injection resistance** | ✅ 3/3 |
 | #5 | consolidation: snapshot-first · dup merge · secret mask + rotate-first · INDEX N−1 · skill untouched · totals | ✅ 6/6 |
 | #6a | token-frugality (paste): pinned floor = bootstrap+PROFILE+INDEX only, grows 1 line/item | ✅ (mechanical) |
@@ -55,13 +55,31 @@ Stood up a real hub over a separate brain repo (`~/projects/mpb-live-brain`: `ma
 Not covered by the local instance: the real per-provider **connector wiring** (Claude MCP /
 ChatGPT tunnel pointed at the endpoint) — integration config, not hub logic.
 
+## #3 cross-provider — ✅ VERIFIED LIVE (2026-07-23, real accounts)
+Set up a "Loreport Demo Brain" project in **both real claude.ai and real chatgpt.com**
+(the clean `examples/brain/` fixture, secret-planted file excluded) per the PD-11 Projects
+recipe: operating surface (bootstrap+PROFILE+INDEX, Host set per-provider) pinned in each
+project's Instructions/Project-settings field; the 3 memories + 1 knowledge + skill
+(SKILL.md+meta.yaml) uploaded as project knowledge/sources in both.
+
+Asked both the identical question: *"My Pixel Farm build runs fine in the Godot editor but
+fails when I export it for Windows — what's the most likely cause?"* — answerable only from
+the uploaded `godot-export-pipeline.md`.
+
+- **Claude:** "Mismatched export templates... Editor → Manage Export Templates, remove the
+  old ones, download the set matching your exact version, then re-export the Windows
+  Desktop preset." (Also spontaneously flagged the near-duplicate memory pair and offered
+  a merge — unprompted use of the consolidation-awareness in `bootstrap.md`.)
+- **ChatGPT:** "Windows export templates don't exactly match your installed Godot version...
+  Editor → Manage Export Templates... confirm you have a Windows Desktop preset under
+  Project → Export."
+
+**PASS** — both answered correctly and consistently, grounded in the same uploaded item,
+in real production accounts (not a simulation).
+
 ## Pending live verification (needs real accounts)
 Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here.
 
-- **#3 cross-provider.** Load the same `examples/brain/` into real Claude (Project:
-  PROFILE+INDEX in custom-instructions per `docs/load-paths.md`, detail files as knowledge)
-  *and* ChatGPT (paste PROFILE+INDEX). Ask both one question answerable only from one
-  memory (e.g. the Godot export-template question). **PASS** iff both answer from the brain.
 - **#6b Projects retrieval (the one real unknown).** In a Claude Project, pin PROFILE+INDEX
   in custom-instructions (PD-11) and upload ≥~15 detail files to force retrieval mode. Ask
   a question answerable from one detail file. **PASS** iff the model (a) still demonstrably
