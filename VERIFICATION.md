@@ -103,11 +103,27 @@ authenticates there; and sourcing a shared credentials file via the service's
 `EnvironmentFile` let an unrelated env var silently override the tunnel ID — omit
 `EnvironmentFile` when the profile already has literal `tunnel_id`/`api_key` values.
 
-**Blocked (account-level, not a hub issue):** with the tunnel live and authenticated, the
-receiving ChatGPT account had **no "Connectors" or "Developer Mode" entry anywhere in its
-Settings UI** — checked exhaustively. This is an OpenAI-side account eligibility/rollout
-gate, not something fixable from this side; it needs to be resolved directly with the
-ChatGPT account in question.
+**Correction to an earlier note in this file:** custom connectors are **not** gated behind
+a missing account setting — Developer Mode lives under Settings → Security and login →
+Advanced security (easy to miss on a first pass), and the actual "add a custom MCP
+connector" flow is under **Plugins → Personal → "+" (New Plugin) → Connection: Tunnel**,
+not anywhere in Settings. Once found, the tunnel showed up correctly in the "Available
+tunnels" picker (only tunnels with a ChatGPT workspace attached appear there — set that
+at tunnel-creation time).
+
+**Two real bugs found while attempting to finish the connector, both server-side:**
+1. **Fixed** — `hub/mcp_server.py`'s stdio transport crashed on `BrokenPipeError` when the
+   tunnel's pipe was torn down (a normal event on reconnect), leaving the tunnel "degraded"
+   (502s) until the whole service was restarted by hand. Now handled gracefully; see the
+   commit that added `_write_response()`.
+2. **Open** — creating the connector with `Authentication: OAuth` fails with a specific,
+   correct error (*"MCP server ... does not implement OAuth"* — true, ours doesn't).
+   Switching to `Authentication: No Auth` (which should be the right mode for a
+   credential-header-based server like this one) instead fails with a generic
+   *"Error creating connector — something went wrong"* with no further detail, even
+   against the fixed server. Root cause not yet isolated — worth revisiting with server
+   access logs at connector-creation time, or an actual OAuth implementation as the
+   alternative fix.
 
 ## Known soft notes (non-blocking, future polish)
 - `bootstrap.md` is 891 tokens (808 before the `source`/`captured` provenance grammar +
