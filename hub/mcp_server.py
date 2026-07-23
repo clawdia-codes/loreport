@@ -194,6 +194,19 @@ def handle_request(brain_dir, credential, req):
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
 
+def _write_response(payload):
+    """Write one JSON-RPC response line. Returns False if the pipe is gone (the
+    caller should stop reading stdin) instead of letting BrokenPipeError/OSError
+    crash the process — a torn-down pipe from the host's side is normal during
+    reconnects and must not kill the whole stdio session."""
+    try:
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+        return True
+    except (BrokenPipeError, OSError):
+        return False
+
+
 def run_stdio(brain_dir, credential):
     for line in sys.stdin:
         line = line.strip()
@@ -202,13 +215,13 @@ def run_stdio(brain_dir, credential):
         try:
             req = json.loads(line)
         except json.JSONDecodeError:
-            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": None,
-                                         "error": {"code": -32700, "message": "parse error"}}) + "\n")
-            sys.stdout.flush()
+            if not _write_response({"jsonrpc": "2.0", "id": None,
+                                     "error": {"code": -32700, "message": "parse error"}}):
+                break
             continue
         resp = handle_request(brain_dir, credential, req)
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+        if not _write_response(resp):
+            break
 
 
 def make_http_handler(brain_dir):
