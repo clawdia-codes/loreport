@@ -12,6 +12,8 @@ byte-identical copy of a text defined in Appendix A here.
 name: <kebab-slug>            # stable id; unique across the whole brain; used bare in [[wikilinks]]
 description: <one line>       # becomes the INDEX line hook; feeds provider retrieval
 type: user | feedback | project | reference | knowledge
+source: <host>               # provenance — assistant/app the capture came from (claude, chatgpt, openclaw, …)
+captured: <YYYY-MM-DD>       # provenance — capture date
 ---
 ```
 
@@ -25,6 +27,11 @@ type: user | feedback | project | reference | knowledge
 - `feedback` and `project` items keep `**Why:**` and `**How to apply:**` lead-ins.
 - `user`/`feedback`/`project`/`reference` live in `memories/`; `knowledge` in `knowledge/`.
 - **No new types.** Skills are packages — they carry `meta.yaml`, not item frontmatter.
+- **Provenance** (`source`, `captured`) tags where a captured item came from, so a reading
+  assistant can weigh a memory that seems off — the point once Tier-2 has several hosts
+  writing one brain. `source` is stamped from the pinned **Host** value and matches the
+  writing provider's Tier-2 branch (`provider/<source>`). Hand-authored / seed items may
+  omit both; consolidation preserves them.
 
 ---
 
@@ -132,6 +139,8 @@ ranges must produce zero output.
 name: <kebab-slug>
 description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge
+source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
+captured: <YYYY-MM-DD>
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>

@@ -30,8 +30,14 @@ which is the final confirmation (see "Pending live verification").
 | #5 | consolidation: snapshot-first · dup merge · secret mask + rotate-first · INDEX N−1 · skill untouched · totals | ✅ 6/6 |
 | #6a | token-frugality (paste): pinned floor = bootstrap+PROFILE+INDEX only, grows 1 line/item | ✅ (mechanical) |
 
-Pinned floor measured: bootstrap 808 + PROFILE 164 + INDEX 147 = **1,119 tok** for the
-6-item example brain; detail bodies never pinned.
+Pinned floor measured: bootstrap 891 + PROFILE 164 + INDEX 147 = **1,202 tok** for the
+6-item example brain (bootstrap now includes the provenance grammar + `Host` line); detail
+bodies never pinned.
+
+**Provenance (added 2026-07-23).** Each capture stamps `source:` (from the pinned `Host`) +
+`captured:` (date). Verified via bare-chat probe: Host=`chatgpt` → `source: chatgpt` + correct
+date, block well-formed, injection resistance intact. Slice change kept S-2 byte-identical.
+See `format-spec.md` §1.
 
 ## Pending live verification (needs real accounts / a running hub)
 Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here.
@@ -54,9 +60,9 @@ Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here
     it before it reaches any republished snapshot.
 
 ## Known soft notes (non-blocking, future polish)
-- `bootstrap.md` is 808 tokens vs the design's internal ≤700 estimate. The estimate was
-  wrong; the repo asserts no budget. Further cuts would touch the S-4 security rules — not
-  worth it. Documented, not a defect.
+- `bootstrap.md` is 891 tokens (808 before the `source`/`captured` provenance grammar +
+  `Host` line). The design's internal ≤700 estimate was wrong; the repo asserts no budget.
+  Further cuts would touch the S-4 security rules — not worth it. Documented, not a defect.
 - `format-spec.md`'s `type: project` grammar mandates `**Why:**/**How to apply:**`, which
   reads awkwardly on pure project-*status* facts (vs feedback/corrections). Consider making
   those fields optional for `project`.

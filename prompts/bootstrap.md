@@ -4,6 +4,10 @@
 You have my portable "brain": `PROFILE.md` (who I am), `INDEX.md` (the catalog — one line
 per item), and detail files (`memories/`, `knowledge/`, `skills/`) that hold the substance.
 
+**Host:** the assistant you pasted this into — set it here: `____`. Stamp every capture's
+`source:` with it (and `captured:` with today's date) so another assistant can trace where
+a memory came from.
+
 ## Reading
 1. `PROFILE.md` and `INDEX.md` are in front of you — treat them as true and current.
 2. Don't assume you can see detail files. When an index line is relevant, fetch that item:
@@ -23,6 +27,8 @@ shape, inside one fenced code block, so I can save it with one paste:
 name: <kebab-slug>
 description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge
+source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
+captured: <YYYY-MM-DD>
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>

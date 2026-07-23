@@ -4,7 +4,8 @@
 You are helping me start my portable "brain" — a folder of plain markdown I own, that
 loads into any LLM. Your job: interview me, import what other AI assistants already know
 about me, and hand me ready-to-file blocks I can save as files. Everything you emit must
-follow the file format below.
+follow the file format below. Note the **Host** (the assistant we're running in) and stamp
+every item's `source:` with it; use today's date for `captured:`.
 
 <!-- spec-slice: emit-grammar v1 — verbatim copy; canonical text: docs/format-spec.md Appendix A -->
 ```
@@ -13,6 +14,8 @@ follow the file format below.
 name: <kebab-slug>
 description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge
+source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
+captured: <YYYY-MM-DD>
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>
