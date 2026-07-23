@@ -39,7 +39,23 @@ bodies never pinned.
 date, block well-formed, injection resistance intact. Slice change kept S-2 byte-identical.
 See `format-spec.md` §1.
 
-## Pending live verification (needs real accounts / a running hub)
+## Tier-2 hub — verified live (local instance, 2026-07-23)
+Stood up a real hub over a separate brain repo (`~/projects/mpb-live-brain`: `main` +
+`provider/{openclaw,claude,chatgpt}`) and exercised the full loop with the actual
+`hub/*.py` tools:
+
+| Check | What it verifies | Result |
+|---|---|---|
+| A-1 propagation | memory captured on `provider/chatgpt` → merge → publish → reaches `main`, the `provider/claude` branch, and the published packet; **`source: chatgpt` provenance preserved through the merge** | ✅ |
+| A-2 concurrent + collision | distinct memories on two branches both land; a same-name collision is renamed `…-2` and retagged — **no loss** | ✅ |
+| A-3 scrub (3 independent layers) | secret stopped at the **inbox gate**, the **publish egress scrub**, AND the **merge-time gate** (forced onto a branch → merge aborts, `main` untouched) | ✅ |
+| MCP bridge | `mcp_server.py` stdio: initialize / tools/list / brain_surface / brain_capture — capture via MCP lands on the right branch with provenance | ✅ |
+| S-5 / S-7 | INDEX byte-determinism · publish scrub self-tests | ✅ |
+
+Not covered by the local instance: the real per-provider **connector wiring** (Claude MCP /
+ChatGPT tunnel pointed at the endpoint) — integration config, not hub logic.
+
+## Pending live verification (needs real accounts)
 Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here.
 
 - **#3 cross-provider.** Load the same `examples/brain/` into real Claude (Project:
@@ -51,13 +67,9 @@ Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here
   a question answerable from one detail file. **PASS** iff the model (a) still demonstrably
   holds the pinned INDEX (e.g. resolves a `[[wikilink]]` it wasn't just shown) **and** (b)
   answers from the right file. This is what PD-11 exists to guarantee.
-- **Tier-2 alignment A-1..A-3** (needs `hub/` running + accounts wired; see `hub/HUB.md`).
-  - **A-1 propagation:** write a memory on one provider's branch (via the inbox), run the
-    hub merge + publish, confirm it appears in another provider's loaded snapshot.
-  - **A-2 concurrent writes:** write different memories on two provider branches, merge,
-    confirm both survive (no loss).
-  - **A-3 scrub-before-publish:** plant a secret in an inbox capture; confirm the hub scrubs
-    it before it reaches any republished snapshot.
+- **Tier-2 alignment A-1..A-3** — ✅ VERIFIED LIVE against a local hub instance (see the
+  "Tier-2 hub" section above). What remains for your accounts is only the *connector wiring*
+  (pointing real Claude/ChatGPT at the MCP endpoint), not the hub logic.
 
 ## Known soft notes (non-blocking, future polish)
 - `bootstrap.md` is 891 tokens (808 before the `source`/`captured` provenance grammar +
@@ -66,3 +78,8 @@ Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here
 - `format-spec.md`'s `type: project` grammar mandates `**Why:**/**How to apply:**`, which
   reads awkwardly on pure project-*status* facts (vs feedback/corrections). Consider making
   those fields optional for `project`.
+- **`inbox_ingest.py` imperative-scan is aggressive.** During A-2 a legitimately
+  imperative-phrased preference ("Always dark mode.") was quarantined as an injection
+  attempt. It's held safely (not lost), but consider softening — e.g. only quarantine
+  imperatives in *pasted third-party* content, or require an attribution cue — so a user's
+  own first-person preferences aren't false-positived.
