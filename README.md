@@ -67,6 +67,30 @@ conversation you're already having. Planned for later: richer per-provider impor
 recipes as providers change their memory features, and Tier-2 hub hardening beyond the
 v1 scope above.
 
+## How this compares
+
+A few honest notes on prior art and alternatives, so you don't have to go find them:
+
+- **Nothing found does both tiers.** Every zero-install "portable markdown brain" project
+  (Karpathy's LLM Wiki and its cottage industry of clones) assumes an agent runtime with
+  filesystem access — none work pasted into a bare browser chat with nothing installed.
+  Every multi-provider shared-memory project found stores memory in a database (SQLite,
+  a hosted store), not human-readable git-tracked markdown, and none use a
+  branch-per-provider + scheduled-merge model with a fail-closed secret scrub. This
+  combination is a real gap, not a marketing claim — but the corollary is Loreport is
+  also less proven: single-instance-verified, no retrieval-quality benchmark, fewer
+  providers covered out of the box.
+- **Closest Tier-2 sibling:** [ai-memory-mcp](https://github.com/alphaonedev/ai-memory-mcp)
+  (Apache 2.0) already bridges more providers (Claude, ChatGPT, Grok, Gemini, Codex,
+  Cursor, openclaw) via MCP, ships a retroactive import tool, and has published retrieval
+  benchmarks Loreport doesn't. It trades git-native, human-readable markdown for a local
+  SQLite store — worth a look if a wider provider set matters more than owning your data
+  as plain files.
+- **Smoothest casual UX:** [mem0's OpenMemory](https://mem0.ai) browser extension
+  auto-injects memory into ChatGPT/Perplexity/Grok/Gemini with minimal setup. It's a
+  real-time bridge, not a periodic reconciliation, and doesn't document secret/PII
+  filtering the way Loreport's three scrub layers do.
+
 ## Credits & license
 
 The index-first, one-file-per-item, wikilinked shape is validated by prior art: Andrej
