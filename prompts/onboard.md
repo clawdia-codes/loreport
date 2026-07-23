@@ -79,7 +79,9 @@ For each pasted dump, in this order:
    against everything already created this session.
 
 ## Finish
-End with: the complete final `INDEX.md` contents in one block · a three-line reminder —
-save each block to its `file=` path inside a folder you control; a private git repo is the
-ideal home; load the brain per `docs/load-paths.md` (paste the brain-protocol + PROFILE +
-INDEX into your assistant's instructions field, keep detail files at hand).
+End with: the complete final `INDEX.md` in one block — it must use the three fixed section
+headings `## Memories`, `## Knowledge`, `## Skills`, with each item's line filed under the
+right one · then a three-line reminder — save each block to its `file=` path inside a folder
+you control; a private git repo is the ideal home; load the brain per `docs/load-paths.md`
+(paste the brain-protocol + PROFILE + INDEX into your assistant's instructions field, keep
+detail files at hand).
