@@ -1,5 +1,5 @@
 # Brain onboarding — interview + import
-<!-- model-proof-brain v1 · prompts/onboard.md · self-contained: paste this alone -->
+<!-- loreport v1 · prompts/onboard.md · self-contained: paste this alone -->
 
 You are helping me start my portable "brain" — a folder of plain markdown I own, that
 loads into any LLM. Your job: interview me, import what other AI assistants already know

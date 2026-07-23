@@ -8,7 +8,7 @@ Single-file, Python-3-stdlib-only.
 Pipeline:
   1. Build the packet — read from `main`: prompts/bootstrap.md + PROFILE.md +
      INDEX.md, concatenated in that order, with a footer comment
-     `<!-- model-proof-brain packet: main@<short-commit-hash> <date> -->`.
+     `<!-- loreport packet: main@<short-commit-hash> <date> -->`.
      The packet contains EXACTLY these three files, nothing else — no detail
      file bodies, ever.
   2. Fail-closed egress scrub — the same secret-regex patterns as
@@ -82,7 +82,7 @@ def build_packet_text(brain_dir):
 
     commit_hash = get_commit_hash(brain_dir)
     today = date.today().isoformat()
-    footer = f"<!-- model-proof-brain packet: main@{commit_hash} {today} -->\n"
+    footer = f"<!-- loreport packet: main@{commit_hash} {today} -->\n"
 
     return bootstrap + profile + index + footer
 

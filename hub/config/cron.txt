@@ -1,4 +1,4 @@
-# Model-Proof Brain — hub cron entries (design.md §D14, §D16).
+# Loreport — hub cron entries (design.md §D14, §D16).
 #
 # openclaw's own scheduler is the hub's cron; no separate daemon is required.
 # Install with: crontab hub/config/cron.txt  (after editing the path below).

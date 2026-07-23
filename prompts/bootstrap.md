@@ -1,5 +1,5 @@
 # Brain protocol
-<!-- model-proof-brain v1 · prompts/bootstrap.md -->
+<!-- loreport v1 · prompts/bootstrap.md -->
 
 You have my portable "brain": `PROFILE.md` (who I am), `INDEX.md` (the catalog — one line
 per item), and detail files (`memories/`, `knowledge/`, `skills/`) that hold the substance.

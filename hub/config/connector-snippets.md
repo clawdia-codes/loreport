@@ -9,7 +9,7 @@ Every surface below maps to exactly one `provider/*` branch — never to `main` 
 
 1. Start the hub server (localhost only): `python3 hub/mcp_server.py --transport http --port 8765`.
 2. Run the tunnel client with `hub/config/tunnel-client.json` (fill in `auth_token` and
-   `credential` first — the Portia-pattern setup already proven for this user).
+   `credential` first — a standard OpenAI Secure MCP Tunnel client setup).
 3. In ChatGPT's connector settings, add the tunnel's public endpoint as an MCP connector.
    ChatGPT's requests arrive over the tunnel carrying the `chatgpt` credential, so
    `brain_capture` always lands on `provider/chatgpt`.
@@ -40,7 +40,7 @@ Add to your Claude Code MCP settings (e.g. `.mcp.json` or the CLI's MCP config):
 ```json
 {
   "mcpServers": {
-    "model-proof-brain": {
+    "loreport": {
       "command": "python3",
       "args": ["hub/mcp_server.py", "--transport", "stdio", "--credential", "claude-local-dev-token"]
     }

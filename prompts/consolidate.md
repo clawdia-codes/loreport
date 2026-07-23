@@ -1,5 +1,5 @@
 # Brain consolidation — monthly janitor
-<!-- model-proof-brain v1 · prompts/consolidate.md · self-contained: paste this alone -->
+<!-- loreport v1 · prompts/consolidate.md · self-contained: paste this alone -->
 
 I will give you my entire brain (pasted below / attached / readable as files). Audit it
 and produce a **change plan** for me to apply — do not apply anything yourself unless you

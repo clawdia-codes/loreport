@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hub/brain_merge.py — Model-Proof Brain daily reconciliation (design.md §D14, modules.md M13b).
+hub/brain_merge.py — Loreport daily reconciliation (design.md §D14, modules.md M13b).
 
 Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
 
@@ -412,7 +412,7 @@ def default_brain_dir():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Model-Proof Brain daily reconciliation: merge provider branches "
+        description="Loreport daily reconciliation: merge provider branches "
                      "into main and rebuild INDEX.md deterministically."
     )
     parser.add_argument("--brain-dir", default=None,

@@ -1,4 +1,4 @@
-# Verification — Model-Proof Brain v1
+# Verification — Loreport v1
 
 Verified 2026-07-23 (repo `main`). This records what has been checked and exactly what a
 maintainer still needs to run against live provider accounts / a running Tier-2 hub.

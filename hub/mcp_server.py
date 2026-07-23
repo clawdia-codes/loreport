@@ -175,7 +175,7 @@ def handle_request(brain_dir, credential, req):
     if method == "initialize":
         result = {
             "protocolVersion": "2024-11-05",
-            "serverInfo": {"name": "model-proof-brain-hub", "version": "1.0"},
+            "serverInfo": {"name": "loreport-hub", "version": "1.0"},
             "capabilities": {"tools": {}},
         }
     elif method == "tools/list":
@@ -261,7 +261,7 @@ def default_brain_dir():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Model-Proof Brain hub MCP server (bridge A).")
+    parser = argparse.ArgumentParser(description="Loreport hub MCP server (bridge A).")
     parser.add_argument("--brain-dir", default=None,
                         help="Brain repo root (default: inferred from this script's location)")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")

@@ -1,4 +1,4 @@
-# Model-Proof Brain v1 — Format Specification
+# Loreport v1 — Format Specification
 
 This file is the canonical schema. Every embedded slice in `prompts/*.md` is a
 byte-identical copy of a text defined in Appendix A here.

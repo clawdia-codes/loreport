@@ -1,5 +1,5 @@
-Model-Proof Brain v1 — dual license
-2026 Øyvind Theie
+Loreport v1 — dual license
+2026 Clawdia
 
 This repository uses two licenses, scoped by directory as noted below. Prior-art credit:
 the index-first, one-file-per-item, wikilinked shape is adopted from Andrej Karpathy's
@@ -9,7 +9,7 @@ the index-first, one-file-per-item, wikilinked shape is adopted from Andrej Karp
 MIT License — applies to: prompts/, hub/ (Python code)
 ================================================================================
 
-Copyright (c) 2026 Øyvind Theie
+Copyright (c) 2026 Clawdia
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -34,7 +34,7 @@ Creative Commons Attribution 4.0 International (CC BY 4.0) — applies to:
 docs/, brain-template/, examples/
 ================================================================================
 
-Copyright (c) 2026 Øyvind Theie
+Copyright (c) 2026 Clawdia
 
 This work is licensed under the Creative Commons Attribution 4.0 International
 License. To view a copy of this license, visit

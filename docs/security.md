@@ -1,6 +1,6 @@
 # Security
 
-*Threat model and controls for Model-Proof Brain v1. 2026-07-23.*
+*Threat model and controls for Loreport v1. 2026-07-23.*
 
 ---
 

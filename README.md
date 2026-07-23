@@ -1,4 +1,4 @@
-# Model-Proof Brain
+# Loreport
 
 A portable "brain" — your memories, knowledge, and skills as plain markdown files you
 own — that runs in a bare chat box with nothing installed, and imports what your
