@@ -89,6 +89,26 @@ Run these against your actual Claude + ChatGPT + openclaw; record pass/fail here
   "Tier-2 hub" section above). What remains for your accounts is only the *connector wiring*
   (pointing real Claude/ChatGPT at the MCP endpoint), not the hub logic.
 
+## ChatGPT MCP tunnel — provisioned + running, connector-linking blocked (2026-07-23/24)
+
+A reference deployment's OpenAI Secure MCP Tunnel was provisioned and brought up
+end-to-end: tunnel created, `tunnel-client` config validated (`doctor` → `ok`), service
+enabled and active, health/ready endpoints green, and the control-plane connection
+authenticates successfully (no auth errors, correct tunnel identity confirmed in logs).
+
+Two config gotchas surfaced and were resolved (see `hub/config/connector-snippets.md` for
+the corrected guidance): a freshly-created per-tunnel API key was rejected by the
+control-plane API (`401 invalid_api_key`) — only an account-level Runtime-class key
+authenticates there; and sourcing a shared credentials file via the service's
+`EnvironmentFile` let an unrelated env var silently override the tunnel ID — omit
+`EnvironmentFile` when the profile already has literal `tunnel_id`/`api_key` values.
+
+**Blocked (account-level, not a hub issue):** with the tunnel live and authenticated, the
+receiving ChatGPT account had **no "Connectors" or "Developer Mode" entry anywhere in its
+Settings UI** — checked exhaustively. This is an OpenAI-side account eligibility/rollout
+gate, not something fixable from this side; it needs to be resolved directly with the
+ChatGPT account in question.
+
 ## Known soft notes (non-blocking, future polish)
 - `bootstrap.md` is 891 tokens (808 before the `source`/`captured` provenance grammar +
   `Host` line). The design's internal ≤700 estimate was wrong; the repo asserts no budget.
