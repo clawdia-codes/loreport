@@ -29,6 +29,7 @@ description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
+visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>
@@ -48,6 +49,13 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
 <!-- /spec-slice -->
 
 - Pick names that read well in a sentence, since other items will link them as [[names]].
+- The frontmatter above may include `visibility: shared | local` (default `shared` when
+  omitted). Mark `visibility: local` when the capture obviously touches a sensitive/
+  always-local topic — health, finances, relationships, credentials/security, employer —
+  so it never leaves this machine.
+- Never emit `action="update"` for an item whose current body you have not read this
+  session — read it first, then fold in the change. A full replacement rebuilt from only
+  the INDEX line will erase the rest of the item.
 
 ## Never capture
 Never put secrets, credentials, API keys, tokens, or sensitive personal data — mine or

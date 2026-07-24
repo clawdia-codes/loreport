@@ -12,8 +12,14 @@ Validation pipeline:
   2. Schema   — frontmatter has name/description/type; name is a kebab-slug;
                 type is in the enum; filename stem == name.
   3. Secret-scan   — same regex patterns as brain_merge.py; any hit -> quarantine.
-  4. Imperative-scan (provenance rule, mechanical) — a standing instruction aimed
-     at the assistant, not attributed to a source; any hit -> quarantine.
+  4. Imperative-scan (provenance rule, mechanical) — an assistant-directed,
+     injection-shaped instruction, not attributed to a source; any hit -> quarantine.
+     Scoped to injection *shapes* (not any first-person "always"/"never" statement)
+     so a legitimate memory like "User always prefers dark mode" is never
+     false-positived; runs over the full raw block (frontmatter + body + INDEX
+     line), not just the body, so an injection hidden in e.g. the description
+     field is still caught. When in doubt this scan PASSes — the secret scan
+     above is the fail-closed gate; this is a lighter guard.
   5. Commit   — on pass: checkout provider/<name>, write the file, commit with
                 structured metadata.
   6. Quarantine — on any failure: copy to hub/quarantine/<provider>/<date>-<file>,
@@ -61,17 +67,42 @@ KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 # purpose: every hub/*.py file is single-file and stdlib-only; nothing is shared by
 # import between them).
 SECRET_PATTERNS = [
-    r"sk-[A-Za-z0-9-]{20,}",
-    r"ghp_[A-Za-z0-9]{36}",
-    r"AKIA[0-9A-Z]{16}",
+    # Best-effort defense-in-depth, NOT a guarantee of complete coverage — the
+    # never-capture rule (prompts/bootstrap.md "Never capture") is the real
+    # control; this scan is a backstop that a sufficiently novel secret shape
+    # can still slip past.
+    r"sk-[A-Za-z0-9-]{20,}",                                          # OpenAI-style secret key
+    r"ghp_[A-Za-z0-9]{36}",                                           # GitHub PAT (classic)
+    r"AKIA[0-9A-Z]{16}",                                              # AWS access key id
     r"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",                                  # GitHub fine-grained PAT
+    r"gh[oprsu]_[A-Za-z0-9]{36,}",                                    # GitHub tokens: gho_/ghp_/ghu_/ghs_/ghr_
+    r"xox[baprs]-[A-Za-z0-9-]{10,}",                                  # Slack token
+    r"AIza[0-9A-Za-z_\-]{35}",                                        # Google API key
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",                            # PEM private-key block
+    r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",       # JWT
+    r"(postgres|mysql|mongodb(\+srv)?|redis|amqp)://[^\s]+:[^\s]+@",  # connection string w/ inline creds
 ]
 
-# The provenance rule, enforced mechanically: a line addressing the assistant with
-# a standing directive ("remember", "always", "never", "from now on", "ignore",
-# "disregard"), unless the line is explicitly attributed to a source (quoting what
-# the source says, rather than obeying it).
-IMPERATIVE_TRIGGER_RE = re.compile(r"(?i)\b(remember|always|never|from\s+now\s+on|ignore|disregard)\b")
+# The provenance rule, enforced mechanically: a line that is *injection-shaped* —
+# it addresses the assistant directly and tries to override its instructions or
+# context — is quarantined, unless the line is explicitly attributed to a source
+# (quoting what the source says, rather than obeying it). Deliberately narrow: a
+# bare "always"/"never" is NOT enough (that would false-positive ordinary
+# first-person memories like "User always prefers dark mode"); the shape must
+# look like an instruction aimed at the assistant, not a fact about the user.
+INJECTION_PATTERNS = [
+    # "ignore/disregard/forget" + a reference to prior instructions/context.
+    re.compile(
+        r"(?i)\b(ignore|disregard|forget)\b[^.\n]*"
+        r"\b(previous|prior|above|earlier|these|the)\b[^.\n]*"
+        r"\b(instruction|prompt|rule|context|message)s?\b"
+    ),
+    # A direct command to the assistant ("you must/should/shall/are to/...").
+    re.compile(r"(?i)\byou\s+(must|should|shall|are\s+to|need\s+to|have\s+to)\b"),
+    # A leading imperative aimed at the assistant ("Always ignore…", "Never reveal…").
+    re.compile(r"(?i)^\s*(always|never)\s+(ignore|disregard|reveal|send|execute|run|delete|forget)\b"),
+]
 ATTRIBUTED_PREFIX_RE = re.compile(r"(?i)^\s*(source\s+says|according\s+to|the\s+(article|document|source|email)\s+(says|states|claims))\s*:")
 
 MEMORY_RE = re.compile(
@@ -194,12 +225,20 @@ def scan_secrets(text):
     return None
 
 
-def scan_imperative(body):
-    for line in body.splitlines():
+def scan_imperative(raw_text):
+    """Injection-shaped-content scan over the FULL raw block (frontmatter +
+    body + INDEX line) — a hidden directive in e.g. the description field is
+    caught the same as one in the body. Quarantines only assistant-directed
+    injection shapes (see INJECTION_PATTERNS); first-person / subject-led
+    statements ("I always…", "User always…", "**How to apply:** Always…")
+    never match and PASS through, since they aren't instructions aimed at the
+    assistant. The attributed-prefix rescue still applies line-by-line."""
+    for line in raw_text.splitlines():
         if ATTRIBUTED_PREFIX_RE.match(line):
             continue
-        if IMPERATIVE_TRIGGER_RE.search(line):
-            return line.strip()
+        for pat in INJECTION_PATTERNS:
+            if pat.search(line):
+                return line.strip()
     return None
 
 
@@ -381,7 +420,7 @@ def main():
                    f"matched a secret pattern: {masked}")
         sys.exit(1)
 
-    imp_hit = scan_imperative(block["body"])
+    imp_hit = scan_imperative(block["raw"])
     if imp_hit:
         quarantine(brain_dir, args.provider, args.block_file, "imperative-scan",
                    f"unattributed standing instruction: \"{imp_hit}\"")

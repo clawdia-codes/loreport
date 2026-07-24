@@ -35,10 +35,21 @@ from datetime import date
 # Identical secret-regex set to brain_merge.py / inbox_ingest.py (duplicated on
 # purpose — every hub/*.py file is single-file and stdlib-only).
 SECRET_PATTERNS = [
-    r"sk-[A-Za-z0-9-]{20,}",
-    r"ghp_[A-Za-z0-9]{36}",
-    r"AKIA[0-9A-Z]{16}",
+    # Best-effort defense-in-depth, NOT a guarantee of complete coverage — the
+    # never-capture rule (prompts/bootstrap.md "Never capture") is the real
+    # control; this scan is a backstop that a sufficiently novel secret shape
+    # can still slip past.
+    r"sk-[A-Za-z0-9-]{20,}",                                          # OpenAI-style secret key
+    r"ghp_[A-Za-z0-9]{36}",                                           # GitHub PAT (classic)
+    r"AKIA[0-9A-Z]{16}",                                              # AWS access key id
     r"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",                                  # GitHub fine-grained PAT
+    r"gh[oprsu]_[A-Za-z0-9]{36,}",                                    # GitHub tokens: gho_/ghp_/ghu_/ghs_/ghr_
+    r"xox[baprs]-[A-Za-z0-9-]{10,}",                                  # Slack token
+    r"AIza[0-9A-Za-z_\-]{35}",                                        # Google API key
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",                            # PEM private-key block
+    r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",       # JWT
+    r"(postgres|mysql|mongodb(\+srv)?|redis|amqp)://[^\s]+:[^\s]+@",  # connection string w/ inline creds
 ]
 
 

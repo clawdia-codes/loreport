@@ -146,6 +146,7 @@ description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
+visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>
