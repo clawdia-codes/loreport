@@ -10,7 +10,10 @@ Pipeline:
      INDEX.md, concatenated in that order, with a footer comment
      `<!-- loreport packet: main@<short-commit-hash> <date> -->`.
      The packet contains EXACTLY these three files, nothing else — no detail
-     file bodies, ever.
+     file bodies, ever. The INDEX.md portion is filtered: any line referencing
+     a `visibility: local` item is dropped from the packet (the on-disk
+     INDEX.md itself is untouched — only the published packet excludes local
+     items; docs/visibility-design.md §3).
   2. Fail-closed egress scrub — the same secret-regex patterns as
      brain_merge.py, run over the assembled packet. Any hit blocks the ENTIRE
      republish (exit nonzero, alert to stdout, alert written to
@@ -55,6 +58,72 @@ def read_text(path):
     return text
 
 
+# --- visibility filtering (§3/§4 of docs/visibility-design.md) ---------------
+#
+# Duplicated line-scan frontmatter parsing (same style as inbox_ingest.py /
+# mcp_server.py — every hub/*.py file is single-file and stdlib-only, nothing
+# is shared by import between them).
+
+INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def _parse_frontmatter_scalars(text):
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    result = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if not line or line[0] in " \t-":
+            continue
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if v:
+            result[k] = v
+    return result
+
+
+def _locate_item_path(brain_dir, name):
+    for sub in ("memories", "knowledge"):
+        path = os.path.join(brain_dir, sub, f"{name}.md")
+        if os.path.isfile(path):
+            return path
+    skill_path = os.path.join(brain_dir, "skills", name, "SKILL.md")
+    if os.path.isfile(skill_path):
+        return skill_path
+    return None
+
+
+def _item_visibility(brain_dir, name):
+    """Return "local" or "shared" for the named item (absent field, or an
+    unresolvable [[name]] reference, defaults to "shared" — never silently
+    drop a line the filter can't positively identify as local)."""
+    path = _locate_item_path(brain_dir, name)
+    if not path:
+        return "shared"
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    vis = _parse_frontmatter_scalars(text).get("visibility")
+    return vis if vis in ("shared", "local") else "shared"
+
+
+def filter_index_text(brain_dir, index_text):
+    """Drop any INDEX.md line that references a `visibility: local` item.
+    Lines with no [[name]] reference (section headers, blank lines) always
+    pass through unchanged. The on-disk INDEX.md is never modified — this
+    filtering happens only to the in-memory text that goes into the packet."""
+    out_lines = []
+    for line in index_text.splitlines(keepends=True):
+        m = INDEX_ITEM_RE.search(line)
+        if m and _item_visibility(brain_dir, m.group(1)) == "local":
+            continue
+        out_lines.append(line)
+    return "".join(out_lines)
+
+
 def get_commit_hash(brain_dir):
     try:
         r = subprocess.run(["git", "-C", brain_dir, "rev-parse", "--short", "HEAD"],
@@ -78,7 +147,7 @@ def build_packet_text(brain_dir):
 
     bootstrap = read_text(bootstrap_path)
     profile = read_text(profile_path)
-    index = read_text(index_path)
+    index = filter_index_text(brain_dir, read_text(index_path))
 
     commit_hash = get_commit_hash(brain_dir)
     today = date.today().isoformat()

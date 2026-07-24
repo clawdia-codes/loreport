@@ -3,28 +3,42 @@
 hub/mcp_server.py — bridge-A MCP server (design.md §D15 bridge A, §D17;
 modules.md M13e).
 
-Single-file, Python-3-stdlib-only. Exposes four MCP tools over the shared brain:
+Single-file, Python-3-stdlib-only. Exposes six MCP tools over the shared brain,
+all named with the `loreport_<verb>_<noun>` scheme (docs/visibility-design.md §4):
 
-  - brain_capture(block, provider) -> routes the block through the SAME
+  - loreport_save_memory(block, provider) -> routes the block through the SAME
     scan-before-commit gate as hub/inbox_ingest.py (invoked as a subprocess —
     never re-implemented inline), committing to the calling provider's branch.
     Returns {"status": "committed" | "quarantined", "detail": "..."}.
-  - brain_read(name)   -> reads memories/<name>.md, knowledge/<name>.md, or
-    skills/<name>/SKILL.md from the latest `main` checkout.
-  - brain_search(query) -> case-insensitive substring scan over INDEX.md on `main`.
-  - brain_surface()     -> returns hub/published/packet.md (the current pinned
-    bootstrap+PROFILE+INDEX packet).
+  - loreport_read_memory(name) -> reads memories/<name>.md, knowledge/<name>.md,
+    or skills/<name>/SKILL.md from the latest `main` checkout. Refused for a
+    cloud-trust caller if the item's `visibility` is `local`.
+  - loreport_search_memories(query) -> case-insensitive substring scan over
+    INDEX.md on `main`. A cloud-trust caller never sees `local` items in the
+    results.
+  - loreport_load_context() -> returns hub/published/packet.md (the current
+    pinned bootstrap+PROFILE+INDEX packet; already excludes `local` items).
+  - loreport_view_memory_settings() -> lists every item with its visibility.
+    A cloud-trust caller sees `local` items as existence-only (hidden).
+  - loreport_change_memory_settings(name, visibility) -> flips one item's
+    `visibility` field. A cloud-trust caller may only change items it authored.
 
-Security invariants (§D17):
+Security invariants (§D17, §D-visibility):
   - Localhost bind ONLY — the HTTP transport binds 127.0.0.1, never the
     all-interfaces wildcard address and never an empty host string.
   - Credential -> branch mapping: each connection carries a provider identity
-    (an HTTP header, or a --credential value on stdio); brain_capture always
-    uses THAT identity to pick the provider/* branch — a caller-supplied
+    (an HTTP header, or a --credential value on stdio); loreport_save_memory
+    always uses THAT identity to pick the provider/* branch — a caller-supplied
     `provider` argument can never override it, so a stolen ChatGPT credential
     cannot write provider/claude or main. If the connection carries no
-    recognized credential at all, brain_capture fails closed (quarantined)
-    rather than falling back to a caller-supplied `provider` argument.
+    recognized credential at all, loreport_save_memory fails closed
+    (quarantined) rather than falling back to a caller-supplied `provider`
+    argument.
+  - Credential -> trust mapping: each connection also carries a trust tier
+    ("local" or "cloud", from CREDENTIAL_TRUST_MAP; an unrecognized or absent
+    credential defaults to "cloud" — least privilege). `local`-visibility
+    items are refused to cloud-trust readers and hidden from cloud-trust
+    search/settings-list results (docs/visibility-design.md §3).
   - Tools expose brain items only, never arbitrary filesystem paths.
 
 Transports:
@@ -35,6 +49,7 @@ Transports:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -107,7 +122,7 @@ def _load_providers_config():
 PROVIDER_BRANCHES, CREDENTIAL_PROVIDER_MAP, CREDENTIAL_TRUST_MAP = _load_providers_config()
 
 TOOLS = {
-    "brain_capture": {
+    "loreport_save_memory": {
         "description": "Commit an emit-grammar v1 block through the scan-before-commit "
                        "gate to the calling provider's branch.",
         "inputSchema": {
@@ -120,25 +135,157 @@ TOOLS = {
             "required": ["block"],
         },
     },
-    "brain_read": {
+    "loreport_read_memory": {
         "description": "Read one brain item (memory, knowledge page, or skill) by name "
-                       "from the latest main snapshot.",
+                       "from the latest main snapshot. A `local`-visibility item is "
+                       "refused for a cloud-trust caller.",
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
-    "brain_search": {
-        "description": "Case-insensitive substring search over INDEX.md on main.",
+    "loreport_search_memories": {
+        "description": "Case-insensitive substring search over INDEX.md on main. A "
+                       "cloud-trust caller never sees `local`-visibility items in results.",
         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
-    "brain_surface": {
-        "description": "Return the current pinned publish packet (bootstrap + PROFILE + INDEX).",
+    "loreport_load_context": {
+        "description": "Return the current pinned publish packet (bootstrap + PROFILE + "
+                       "INDEX); `local`-visibility items are already excluded.",
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    "loreport_view_memory_settings": {
+        "description": "List every brain item (memories/knowledge/skills) with its "
+                       "visibility setting. A cloud-trust caller sees `local` items as "
+                       "existence-only (hidden), never their type or content.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    "loreport_change_memory_settings": {
+        "description": "Change one item's visibility (shared|local). A cloud-trust "
+                       "caller may only change items it authored (source == its own "
+                       "provider); a local-trust caller may change any item.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "visibility": {"type": "string", "description": "shared | local"},
+            },
+            "required": ["name", "visibility"],
+        },
     },
 }
 
 
+# --- brain item / frontmatter helpers -----------------------------------------
+#
+# Simple line-scan frontmatter parsing (same style as inbox_ingest.py's
+# parse_simple_yaml_scalars — duplicated on purpose: every hub/*.py file is
+# single-file and stdlib-only, nothing is shared by import between them).
+
+def _parse_frontmatter_scalars(text):
+    """Return the scalar key: value pairs from a leading `---`/`---` frontmatter
+    block, or {} if there is no such block (or it's empty/malformed)."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    result = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if not line or line[0] in " \t-":
+            continue
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if v:
+            result[k] = v
+    return result
+
+
+def _locate_item(brain_dir, name):
+    """Locate a brain item by name across memories/, knowledge/, skills/. Returns
+    (path, item_type) or (None, None) if the name is invalid or nothing matches.
+    Brain items only — never an arbitrary filesystem path: path separators in
+    the requested name are rejected so a caller cannot escape memories/
+    knowledge/skills."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return None, None
+    for sub, typ in (("memories", "memory"), ("knowledge", "knowledge")):
+        path = os.path.join(brain_dir, sub, f"{name}.md")
+        if os.path.isfile(path):
+            return path, typ
+    skill_path = os.path.join(brain_dir, "skills", name, "SKILL.md")
+    if os.path.isfile(skill_path):
+        return skill_path, "skill"
+    return None, None
+
+
+def _iter_all_items(brain_dir):
+    """Yield (name, item_type, path) for every brain item across memories/,
+    knowledge/, and skills/."""
+    for sub, typ in (("memories", "memory"), ("knowledge", "knowledge")):
+        d = os.path.join(brain_dir, sub)
+        if not os.path.isdir(d):
+            continue
+        for fname in sorted(os.listdir(d)):
+            if fname.endswith(".md"):
+                yield os.path.splitext(fname)[0], typ, os.path.join(d, fname)
+    skills_dir = os.path.join(brain_dir, "skills")
+    if os.path.isdir(skills_dir):
+        for sub_name in sorted(os.listdir(skills_dir)):
+            skill_path = os.path.join(skills_dir, sub_name, "SKILL.md")
+            if os.path.isfile(skill_path):
+                yield sub_name, "skill", skill_path
+
+
+def _item_visibility(brain_dir, name):
+    """Return "local" or "shared" for the named brain item (absent field
+    defaults to "shared", per docs/visibility-design.md §1), or None if the
+    item doesn't exist."""
+    path, _typ = _locate_item(brain_dir, name)
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    vis = _parse_frontmatter_scalars(text).get("visibility")
+    return vis if vis in ("shared", "local") else "shared"
+
+
+def _set_visibility_field(text, visibility):
+    """Return `text` with its frontmatter `visibility:` line set to `visibility`,
+    inserting the line if absent. Leaves the rest of the file byte-for-byte
+    unchanged. If `text` has no `---`/`---` frontmatter block at all (shouldn't
+    happen for a well-formed item — inbox_ingest.py requires one), a minimal
+    block is prepended defensively rather than corrupting the file."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return f"---\nvisibility: {visibility}\n---\n" + text
+    end_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end_idx = i
+            break
+    if end_idx is None:
+        return text  # malformed frontmatter (no closing ---); leave unchanged
+
+    replaced = False
+    new_fm_lines = []
+    for line in lines[1:end_idx]:
+        key = line.split(":", 1)[0].strip()
+        if key == "visibility":
+            new_fm_lines.append(f"visibility: {visibility}\n")
+            replaced = True
+        else:
+            new_fm_lines.append(line)
+    if not replaced:
+        new_fm_lines.append(f"visibility: {visibility}\n")
+    return lines[0] + "".join(new_fm_lines) + "".join(lines[end_idx:])
+
+
+INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
 # --- tool implementations -----------------------------------------------------
 
-def tool_brain_capture(brain_dir, provider, block):
+def tool_loreport_save_memory(brain_dir, provider, block):
     if provider not in PROVIDER_BRANCHES:
         return {"status": "quarantined", "detail": f"unknown or unauthorized provider '{provider}'"}
     fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="mpb-capture-")
@@ -159,24 +306,20 @@ def tool_brain_capture(brain_dir, provider, block):
             pass
 
 
-def tool_brain_read(brain_dir, name):
-    # Brain items only — never an arbitrary filesystem path. Reject path separators
-    # in the requested name so a caller cannot escape memories/knowledge/skills.
+def tool_loreport_read_memory(brain_dir, name, trust):
     if not name or "/" in name or "\\" in name or ".." in name:
         return {"error": "invalid item name"}
-    for sub in ("memories", "knowledge"):
-        path = os.path.join(brain_dir, sub, f"{name}.md")
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as fh:
-                return {"content": fh.read()}
-    skill_path = os.path.join(brain_dir, "skills", name, "SKILL.md")
-    if os.path.isfile(skill_path):
-        with open(skill_path, "r", encoding="utf-8") as fh:
-            return {"content": fh.read()}
-    return {"error": "not found"}
+    path, _typ = _locate_item(brain_dir, name)
+    if not path:
+        return {"error": "not found"}
+    vis = _item_visibility(brain_dir, name)
+    if vis == "local" and trust != "local":
+        return {"error": "local item — not available to this caller"}
+    with open(path, "r", encoding="utf-8") as fh:
+        return {"content": fh.read()}
 
 
-def tool_brain_search(brain_dir, query):
+def tool_loreport_search_memories(brain_dir, query, trust):
     index_path = os.path.join(brain_dir, "INDEX.md")
     if not os.path.isfile(index_path):
         return {"error": "INDEX.md not found on main"}
@@ -186,10 +329,18 @@ def tool_brain_search(brain_dir, query):
         for line in fh:
             if q in line.lower():
                 matches.append(line.rstrip("\n"))
+    if trust != "local":
+        filtered = []
+        for line in matches:
+            m = INDEX_ITEM_RE.search(line)
+            if m and _item_visibility(brain_dir, m.group(1)) == "local":
+                continue
+            filtered.append(line)
+        matches = filtered
     return {"matches": matches}
 
 
-def tool_brain_surface(brain_dir):
+def tool_loreport_load_context(brain_dir):
     packet_path = os.path.join(brain_dir, "hub", "published", "packet.md")
     if not os.path.isfile(packet_path):
         return {"error": "no published packet yet — run snapshot_publish.py"}
@@ -197,11 +348,59 @@ def tool_brain_surface(brain_dir):
         return {"content": fh.read()}
 
 
+def tool_loreport_view_memory_settings(brain_dir, trust):
+    items = []
+    for name, typ, path in _iter_all_items(brain_dir):
+        with open(path, "r", encoding="utf-8") as fh:
+            fm = _parse_frontmatter_scalars(fh.read())
+        vis = fm.get("visibility")
+        vis = vis if vis in ("shared", "local") else "shared"
+        if vis == "local" and trust != "local":
+            items.append({"name": name, "visibility": "local", "hidden": True})
+        else:
+            items.append({"name": name, "type": typ, "visibility": vis})
+    return {"items": items}
+
+
+def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, provider):
+    if visibility not in ("shared", "local"):
+        return {"error": "visibility must be 'shared' or 'local'"}
+    path, _typ = _locate_item(brain_dir, name)
+    if not path:
+        return {"error": "not found"}
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    source = _parse_frontmatter_scalars(text).get("source")
+
+    if trust == "local":
+        pass  # a local-trust caller may change any item
+    elif trust == "cloud" and provider is not None and source == provider:
+        pass  # a cloud-trust caller may change only the items it authored
+    else:
+        return {"error": "not permitted: a cloud caller may only change memories it authored"}
+
+    new_text = _set_visibility_field(text, visibility)
+    rel_path = os.path.relpath(path, brain_dir)
+
+    def _git(*args):
+        return subprocess.run(["git", "-C", brain_dir] + list(args), capture_output=True, text=True)
+
+    _git("checkout", "main")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
+    _git("add", rel_path)
+    actor = provider if provider else "local"
+    _git("commit", "-m", f"brain(settings): {name} visibility -> {visibility} via {actor}")
+
+    return {"status": "changed", "name": name, "visibility": visibility}
+
+
 def dispatch(brain_dir, credential, name, arguments):
     arguments = arguments or {}
     provider_from_credential = CREDENTIAL_PROVIDER_MAP.get(credential) if credential else None
+    trust = CREDENTIAL_TRUST_MAP.get(credential, "cloud") if credential else "cloud"
 
-    if name == "brain_capture":
+    if name == "loreport_save_memory":
         # The credential's mapped provider always wins over any caller-supplied
         # `provider` argument — a stolen credential cannot pick another branch.
         # If there is no recognized credential at all, fail closed: never fall
@@ -209,13 +408,19 @@ def dispatch(brain_dir, credential, name, arguments):
         if provider_from_credential is None:
             return {"status": "quarantined",
                     "detail": "no recognized credential; refusing to route capture"}
-        return tool_brain_capture(brain_dir, provider_from_credential, arguments.get("block", ""))
-    if name == "brain_read":
-        return tool_brain_read(brain_dir, arguments.get("name", ""))
-    if name == "brain_search":
-        return tool_brain_search(brain_dir, arguments.get("query", ""))
-    if name == "brain_surface":
-        return tool_brain_surface(brain_dir)
+        return tool_loreport_save_memory(brain_dir, provider_from_credential, arguments.get("block", ""))
+    if name == "loreport_read_memory":
+        return tool_loreport_read_memory(brain_dir, arguments.get("name", ""), trust)
+    if name == "loreport_search_memories":
+        return tool_loreport_search_memories(brain_dir, arguments.get("query", ""), trust)
+    if name == "loreport_load_context":
+        return tool_loreport_load_context(brain_dir)
+    if name == "loreport_view_memory_settings":
+        return tool_loreport_view_memory_settings(brain_dir, trust)
+    if name == "loreport_change_memory_settings":
+        return tool_loreport_change_memory_settings(
+            brain_dir, arguments.get("name", ""), arguments.get("visibility", ""),
+            trust, provider_from_credential)
     return {"error": f"unknown tool '{name}'"}
 
 
