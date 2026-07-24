@@ -105,6 +105,32 @@ For each pasted dump, in this order:
    carrying the `visibility:` line the confirmed group implies, deduplicated against
    everything already created this session.
 
+## Phase 3 — Standing instruction (native memory + re-run)
+If this assistant has its own native memory, ask whether I want **parity mode** (keep it
+on, mirror saves into the brain — recommended) or **single-store mode** (turn it off).
+
+For parity mode, output this block verbatim for me to paste into the assistant's
+persistent instructions field (ChatGPT: Project instructions or Settings →
+Personalization → Custom Instructions · Claude: Project instructions or Settings →
+Profile preferences · Gemini: Gem instructions · openclaw/Claude Code: the agent's
+`AGENTS.md`/`CLAUDE.md`) — this is what makes the rule survive into every future chat:
+
+```
+Loreport is my portable memory brain, reachable via the loreport_* tools.
+- Whenever you save something to your own memory, ALSO save it to Loreport
+  (loreport_save_memory). Same judgment, same moment.
+- Prefer your native memory for facts you captured yourself; prefer Loreport for
+  facts from other assistants and anything you don't already hold.
+- When I say "reconcile my memories", fetch the [[memory-reconcile]] skill
+  (loreport_read_memory) and follow it.
+- When I say "sweep", check for anything durable from this chat not yet saved.
+```
+
+Then tell me, in one line each: **re-run onboarding** any time by pasting `onboard.md`
+again (it dedupes — existing items come back as matches, not duplicates), and **re-run
+the diff alone** by saying *"reconcile my memories"* in any assistant that has the
+standing instruction above.
+
 ## Finish
 End with: the complete final `INDEX.md` in one block — it must use the three fixed section
 headings `## Memories`, `## Knowledge`, `## Skills`, with each item's line filed under the
