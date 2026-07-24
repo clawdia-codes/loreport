@@ -8,3 +8,8 @@ hub/quarantine/*
 !hub/quarantine/.gitkeep
 hub/logs/*
 !hub/logs/.gitkeep
+
+# Daily digest artifacts (REVIEW.md #15) are a local report surface (may
+# quote masked scrub-warning hits) regenerated every merge run, not brain
+# content -- never commit them.
+hub/digest-*.md

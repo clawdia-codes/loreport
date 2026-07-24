@@ -1,5 +1,5 @@
 {
-  "_comment": "OpenAI Secure MCP Tunnel client config (design.md §D15 bridge A) — a standard outbound MCP tunnel setup. The tunnel authenticates outbound to OpenAI's relay; the hub never opens a public listener — mcp_server.py binds 127.0.0.1 only and the tunnel forwards to it locally.",
+  "_comment": "OpenAI Secure MCP Tunnel client config for hub/mcp_server.py (see hub/config/connector-snippets.md) — a standard outbound MCP tunnel setup. The tunnel authenticates outbound to OpenAI's relay; the hub never opens a public listener — mcp_server.py binds 127.0.0.1 only and the tunnel forwards to it locally.",
   "tunnel_server": "https://mcp-tunnel.openai.com",
   "local_server": "http://127.0.0.1:8765",
   "auth_token": "<your-tunnel-auth-token>",

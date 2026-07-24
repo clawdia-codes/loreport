@@ -1,7 +1,7 @@
 # Connector snippets
 
-Per-provider connection snippets for `hub/mcp_server.py` (bridge A, design.md §D15).
-Every surface below maps to exactly one `provider/*` branch — never to `main` directly.
+Per-provider connection snippets for `hub/mcp_server.py`. Every surface below maps
+to exactly one `provider/*` branch — never to `main` directly.
 
 ---
 

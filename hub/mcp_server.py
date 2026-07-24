@@ -47,6 +47,8 @@ Transports:
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -187,6 +189,30 @@ TOOLS = {
 
 class GitTimeout(Exception):
     """Raised when a git subprocess used for a main-read exceeds its timeout."""
+
+
+# Same repo-wide lock as inbox_ingest.py / brain_merge.py (identical relative
+# path), so loreport_change_memory_settings' own checkout-main+edit+commit
+# writes can never interleave with a capture or a merge (Phase E; the Phase C
+# flock only covered inbox_ingest.py and brain_merge.py, not this tool's
+# separate git-write path). Single-file/stdlib-only means this is duplicated
+# rather than imported, same as SECRET_PATTERNS-style constants elsewhere.
+LOCK_RELPATH = os.path.join("hub", ".loreport.lock")
+
+
+@contextlib.contextmanager
+def brain_lock(brain_dir):
+    lock_path = os.path.join(brain_dir, LOCK_RELPATH)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 def _run_git(brain_dir, *args, timeout=30):
@@ -434,12 +460,18 @@ def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, pro
     path = os.path.join(brain_dir, relpath)
 
     try:
-        _run_git(brain_dir, "checkout", "main")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(new_text)
-        _run_git(brain_dir, "add", relpath)
-        actor = provider if provider else "local"
-        _run_git(brain_dir, "commit", "-m", f"brain(settings): {name} visibility -> {visibility} via {actor}")
+        # The checkout-main+edit+commit sequence is its own git write against
+        # the shared working tree — same exclusive lock as inbox_ingest.py's
+        # capture and brain_merge.py's merge, so none of the three can ever
+        # interleave (Phase E; this tool previously did its git write
+        # unlocked).
+        with brain_lock(brain_dir):
+            _run_git(brain_dir, "checkout", "main")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new_text)
+            _run_git(brain_dir, "add", relpath)
+            actor = provider if provider else "local"
+            _run_git(brain_dir, "commit", "-m", f"brain(settings): {name} visibility -> {visibility} via {actor}")
     except GitTimeout:
         return {"status": "quarantined", "detail": "git timeout"}
 

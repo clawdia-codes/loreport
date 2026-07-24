@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import date
 
 # Identical secret-regex set to brain_merge.py / inbox_ingest.py (duplicated on
@@ -184,6 +185,29 @@ def write_alert(brain_dir, hit):
         fh.write("- action: rotate the secret, then re-run snapshot_publish.py\n\n")
 
 
+def write_atomic(path, content):
+    """Write `content` to `path` via a same-directory temp file + os.replace,
+    so a crash mid-write can never leave a half-written packet on disk (a
+    reader always sees either the old full file or the new full file, never a
+    partial one) — REVIEW.md LOW-cluster polish item."""
+    d = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=d, prefix=".tmp-publish-")
+    try:
+        # mkstemp creates the temp file 0600 (owner-only); match the normal
+        # 0644 a plain open("w") would have produced, so os.replace doesn't
+        # silently tighten the published packet's permissions.
+        os.chmod(tmp_path, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def default_brain_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -246,10 +270,8 @@ def main():
     published_dir = os.path.join(brain_dir, "hub", "published")
     os.makedirs(published_dir, exist_ok=True)
     today = date.today().isoformat()
-    with open(os.path.join(published_dir, "packet.md"), "w", encoding="utf-8") as fh:
-        fh.write(packet)
-    with open(os.path.join(published_dir, f"packet-{today}.md"), "w", encoding="utf-8") as fh:
-        fh.write(packet)
+    write_atomic(os.path.join(published_dir, "packet.md"), packet)
+    write_atomic(os.path.join(published_dir, f"packet-{today}.md"), packet)
     print(f"Published packet.md ({len(packet)} bytes) and packet-{today}.md")
 
 

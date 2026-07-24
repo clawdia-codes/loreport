@@ -12,8 +12,13 @@ Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
                 derived artifact and must never be hand-merged).
   4. Consolidation-lite — mechanical exact/near-duplicate-key flagging (fuzzy
      semantic dedup is left to `prompts/consolidate.md`, run by a human-in-the-loop).
-  5. Secret-scrub gate — fail-closed: any hit aborts the merge commit; nothing enters
-     `main`.
+  5. Secret-scrub gate — fail-closed for anything egress-critical: a hit in a SHARED
+     item, PROFILE.md, or a skill package aborts the merge commit + resets to the
+     backup tag; nothing bad enters `main`. A hit in a LOCAL-visibility item (never
+     published, never read by a cloud-trust caller) is recorded as a WARNING in the
+     report/digest instead — it does not abort, since local items never reach a
+     cloud provider (the never-capture rule + the private backup are the controls
+     there).
   6. INDEX rebuild — deterministic: same input item set -> same INDEX.md bytes, always.
   7. Fast-forward each provider branch to the new `main`.
 
@@ -241,6 +246,32 @@ def test_scrub():
 
 
 def scan_brain_for_secrets(brain_dir):
+    """Scan the merged-but-not-yet-committed tree for secret-shaped hits, split
+    into two buckets (REVIEW.md P3 #17/egress-scope fix):
+
+      - fail_closed: a hit in a SHARED item (visibility != local, including the
+        no-frontmatter/absent-field default), in `skills/` (no visibility
+        frontmatter exists for skills, so they're always egress-critical), or
+        in PROFILE.md -> cloud egress must stay strictly gated. The FIRST such
+        hit found is returned (same "abort on first hit" contract as before).
+      - warnings: a hit in a LOCAL-visibility item -> never aborts the merge.
+        `local` items never reach a cloud provider (never-capture rule +
+        the private backup are the real controls there; publish/read/search
+        already refuse `local` items to cloud callers), so a secret-shaped
+        false positive in local infra prose ("token: stored in the keyring")
+        must not block SHARED-item propagation to every provider. ALL such
+        hits are collected, not just the first.
+
+    Every egress-critical file is scanned regardless of what's found in
+    local-visibility files first (and vice versa) — a local-hit warning must
+    never short-circuit past a later shared-item hit that has to fail closed.
+
+    Returns (fail_closed_hit_or_None, warnings_list) where fail_closed_hit is
+    (relpath, masked) and warnings_list is a list of (relpath, masked) tuples.
+    """
+    fail_closed = None
+    warnings = []
+
     for sub in ("memories", "knowledge"):
         d = os.path.join(brain_dir, sub)
         if not os.path.isdir(d):
@@ -249,23 +280,83 @@ def scan_brain_for_secrets(brain_dir):
             if not fname.endswith(".md"):
                 continue
             path = os.path.join(d, fname)
-            hit = scan_text_for_secrets(read_file(path))
-            if hit:
-                return os.path.join(sub, fname), mask(hit)
+            text = read_file(path)
+            hit = scan_text_for_secrets(text)
+            if not hit:
+                continue
+            rel = os.path.join(sub, fname)
+            fm, _ = parse_frontmatter(text)
+            visibility = (fm or {}).get("visibility")
+            if visibility == "local":
+                warnings.append((rel, mask(hit)))
+            elif fail_closed is None:
+                fail_closed = (rel, mask(hit))
+
+    # skills/ packages carry no `visibility:` frontmatter at all (§6 of
+    # format-spec.md) -- always treated as shared/egress-critical.
     skills_dir = os.path.join(brain_dir, "skills")
     if os.path.isdir(skills_dir):
         for root, _dirs, files in os.walk(skills_dir):
             for fname in sorted(files):
                 path = os.path.join(root, fname)
                 hit = scan_text_for_secrets(read_file(path))
-                if hit:
-                    return os.path.relpath(path, brain_dir), mask(hit)
+                if hit and fail_closed is None:
+                    fail_closed = (os.path.relpath(path, brain_dir), mask(hit))
+
+    # PROFILE.md is always egress-critical, regardless of any visibility-like
+    # field a user might add to it -- it's the identity file pinned into
+    # every provider's context by snapshot_publish.py.
     profile_path = os.path.join(brain_dir, "PROFILE.md")
     if os.path.isfile(profile_path):
         hit = scan_text_for_secrets(read_file(profile_path))
-        if hit:
-            return "PROFILE.md", mask(hit)
-    return None
+        if hit and fail_closed is None:
+            fail_closed = ("PROFILE.md", mask(hit))
+
+    return fail_closed, warnings
+
+
+def count_quarantine_items(brain_dir):
+    """Count quarantined blocks under hub/quarantine/ (excluding the digest.md
+    log itself) for the daily digest's summary line."""
+    qdir = os.path.join(brain_dir, "hub", "quarantine")
+    count = 0
+    if os.path.isdir(qdir):
+        for _root, _dirs, files in os.walk(qdir):
+            count += sum(1 for f in files if f != "digest.md")
+    return count
+
+
+def write_digest(brain_dir, today, report):
+    """Write hub/digest-<date>.md from the merge report (REVIEW.md #15) --
+    every cycle's outcome as a real file, not just stdout prose nobody reads.
+    hub/digest-*.md is gitignored (like quarantine/logs) since it's a local
+    report artifact, not brain content, and must survive an abort's
+    `git reset --hard` untouched."""
+    lines = [f"# Hub digest — {today}", ""]
+    lines.append(f"- Merged: {', '.join(report['merged']) if report['merged'] else 'none'} -> main")
+    lines.append(f"- Renamed (add/add conflicts): {report['renamed'] if report['renamed'] else 'none'}")
+    lines.append(
+        f"- PROFILE conflicts (human review required): "
+        f"{report['profile_conflicts'] if report['profile_conflicts'] else 'none'}"
+    )
+    lines.append(f"- Near-dupes flagged: {report['near_dupes'] if report['near_dupes'] else 'none'}")
+    lines.append(f"- Secret-scrub: {report['scrub']}")
+    scrub_warnings = report.get("scrub_warnings") or []
+    lines.append(
+        f"- Scrub warnings (local-visibility hits; merge continued): "
+        f"{scrub_warnings if scrub_warnings else 'none'}"
+    )
+    lines.append(f"- Quarantine items pending review: {count_quarantine_items(brain_dir)}")
+    m, k, s = report["index_counts"]
+    lines.append(f"- INDEX rebuilt: {m + k + s} items ({m} memories, {k} knowledge, {s} skills)")
+    lines.append(f"- Fast-forwarded: {', '.join(report['fast_forwarded']) if report['fast_forwarded'] else 'none'}")
+    if report.get("ff_skipped"):
+        lines.append(f"- Fast-forward skipped (CAS): {'; '.join(report['ff_skipped'])}")
+    digest_path = os.path.join(brain_dir, "hub", f"digest-{today}.md")
+    os.makedirs(os.path.dirname(digest_path), exist_ok=True)
+    with open(digest_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return digest_path
 
 
 # --- git plumbing ------------------------------------------------------------
@@ -455,6 +546,7 @@ def do_merge(brain_dir, dry_run):
         "profile_conflicts": [],
         "near_dupes": [],
         "scrub": "PASS",
+        "scrub_warnings": [],
         "index_counts": (0, 0, 0),
         "fast_forwarded": [],
         "ff_skipped": [],
@@ -512,6 +604,8 @@ def do_merge(brain_dir, dry_run):
                     # branch's contributions.
                     report["scrub"] = f"ABORT: merge of {branch} failed to start: {r.stderr.strip()}"
                     print_report(today, report)
+                    if not dry_run:
+                        write_digest(brain_dir, today, report)
                     git(brain_dir, "merge", "--abort", check=False)
                     git(brain_dir, "reset", "--hard", orig_head, check=False)
                     sys.exit(1)
@@ -540,17 +634,24 @@ def do_merge(brain_dir, dry_run):
             # Consolidation-lite: mechanical dedup flags only (semantics -> consolidate.md).
             report["near_dupes"] = find_dupes(brain_dir)
 
-            # Secret-scrub gate — fail-closed. Any hit aborts; nothing bad enters main.
-            hit = scan_brain_for_secrets(brain_dir)
-            if hit:
-                report["scrub"] = f"ABORT: {hit[0]}: {hit[1]} blocked"
+            # Secret-scrub gate — SHARED/PROFILE/skills hits fail closed (abort);
+            # LOCAL-visibility hits warn and the merge continues (see
+            # scan_brain_for_secrets' docstring for the rationale).
+            fail_closed_hit, scrub_warnings = scan_brain_for_secrets(brain_dir)
+            report["scrub_warnings"] = [f"{rel}: {masked}" for rel, masked in scrub_warnings]
+            if fail_closed_hit:
+                report["scrub"] = f"ABORT: {fail_closed_hit[0]}: {fail_closed_hit[1]} blocked"
                 print_report(today, report)
+                if not dry_run:
+                    write_digest(brain_dir, today, report)
                 # Roll back to the pre-merge state — the tag if this was a real
                 # run, the recorded HEAD either way (equivalent commit; the tag
                 # may not exist yet in --dry-run mode, where no commit is meant
                 # to persist regardless).
                 git(brain_dir, "reset", "--hard", orig_head, check=False)
                 sys.exit(1)
+            elif report["scrub_warnings"]:
+                report["scrub"] = "PASS (local-visibility warnings — see scrub_warnings)"
 
             # Deterministic INDEX rebuild.
             index_bytes, m, k, s = build_index_bytes(brain_dir)
@@ -591,6 +692,22 @@ def do_merge(brain_dir, dry_run):
 
     print_report(today, report)
 
+    # --dry-run stays a pure no-op: it plans + prints the report but writes no
+    # digest file and always exits 0, exactly like before this phase. Only a
+    # real run's digest/exit-code reflects what actually landed on `main`.
+    if dry_run:
+        return
+
+    write_digest(brain_dir, today, report)
+
+    # Nonzero exit whenever something needs a human's attention (REVIEW.md
+    # #15): PROFILE conflicts, add/add renames, or scrub warnings. This runs
+    # AFTER the lock is released and outside the try/except above -- it's a
+    # reporting decision on an already-successful merge, never confused with
+    # the fail-closed abort path (which exits 1 from inside the lock, above).
+    if report["profile_conflicts"] or report["renamed"] or report["scrub_warnings"]:
+        sys.exit(1)
+
 
 def print_report(today, r):
     print(f"=== brain_merge report {today} ===")
@@ -603,6 +720,8 @@ def print_report(today, r):
             print(f"  - {note}")
     print(f"Near-dupes flagged: {r['near_dupes'] if r['near_dupes'] else 'none'}")
     print(f"Secret-scrub: {r['scrub']}")
+    if r.get("scrub_warnings"):
+        print(f"Scrub warnings (local-visibility hits, merge continued): {r['scrub_warnings']}")
     m, k, s = r["index_counts"]
     print(f"INDEX rebuilt: {m + k + s} items ({m} memories, {k} knowledge, {s} skills)")
     print(f"Fast-forwarded: {', '.join(r['fast_forwarded']) if r['fast_forwarded'] else 'none'}")

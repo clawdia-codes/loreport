@@ -123,6 +123,26 @@ implementation is `examples/brain/skills/distill-source-into-knowledge/`.
 
 ---
 
+## Archive
+
+The pinned floor (bootstrap + `PROFILE.md` + `INDEX.md`) is fixed-size per session, but
+`INDEX.md` itself still grows one line per item — linear, with a small constant. At a
+large enough item count that starts to matter: on a paste host it eventually crowds a
+custom-instructions character limit; even on a filesystem host it's just more noise to
+scan per session than a genuinely "hot" catalog needs to be.
+
+**Design note (no code ships for this yet):** once the brain is large, split `INDEX.md`
+into a hot/cold pair. Items that haven't been touched (read, updated, or linked from a
+recent capture) in a long while move their INDEX line into `INDEX-ARCHIVE.md`, fetched
+on demand — the same lazy-load pattern detail files already use, one level up. `INDEX.md`
+stays the always-in-context catalog of what's actually active; `INDEX-ARCHIVE.md` is a
+cold shelf the model asks for explicitly ("anything archived about X?") rather than
+something pinned into every session. The cutoff (by age, by explicit "archive this" during
+consolidation, or both) and the exact split mechanics are deferred to whenever a brain
+actually reaches this scale — most brains never will.
+
+---
+
 ## Appendix A — Canonical slice texts
 
 Every embedded slice in `prompts/*.md` is a byte-identical copy of one block below.

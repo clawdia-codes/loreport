@@ -7,11 +7,15 @@ is what always travels with you — fixed-size, always in context. Detail files 
 `knowledge/`, `skills/`) are lazy: fetched when needed, never bulk-uploaded.
 
 Which loading recipe to follow depends on what the host can do, not which product it is.
-`docs/providers.md` maps products to tiers.
+`docs/providers.md` maps products to paths. (Naming note: "path" here — Paste / Filesystem /
+Projects — is a per-host loading-recipe concept, unrelated to the Tier-1/Tier-2 manual-vs-hub
+split used in `README.md` and `hub/HUB.md` for whether you run the opt-in sync hub at all;
+the two taxonomies used to both say "tier" and collide, so this doc no longer uses that word
+for its own three recipes.)
 
 ---
 
-## Tier 1 — Paste
+## The Paste path
 
 **Host capability:** Chat box only; no files, no persistent retrieval.
 
@@ -28,7 +32,7 @@ stay off-context until the model needs them — one paste per item, on demand.
 
 ---
 
-## Tier 2 — Filesystem
+## The Filesystem path
 
 **Host capability:** Agent reads and writes local files (Claude Code, Codex, Cursor,
 Gemini CLI, OpenCode, and any CLI-class host).
@@ -47,12 +51,12 @@ by one. The growth loop is nearly automatic.
 
 ---
 
-## Tier 3 — Projects / Retrieval
+## The Projects path (Projects / Retrieval)
 
 **Host capability:** Persistent workspace with uploaded knowledge and a custom-instructions
 field (Claude Projects, ChatGPT Projects, custom GPTs).
 
-**Setup — PD-11 requirement:**
+**Setup — required, not optional (this is the one rule that breaks the whole model if skipped):**
 
 > **Required:** paste the operating surface (bootstrap + `PROFILE.md` + `INDEX.md`)
 > into the **custom-instructions field**. Upload **only detail files** (`memories/*.md`,
