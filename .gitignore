@@ -1,3 +1,10 @@
 .maestro/
 .sprint/
 BRIEF.md
+
+# Quarantine holds raw, un-scrubbed blocks (may contain plaintext secrets) and
+# logs — never commit their contents. Keep the dir markers only. (REVIEW.md #14)
+hub/quarantine/*
+!hub/quarantine/.gitkeep
+hub/logs/*
+!hub/logs/.gitkeep
