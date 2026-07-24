@@ -25,13 +25,33 @@ CLI:
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 from datetime import date, datetime
 
-PROVIDERS = ("chatgpt", "claude", "openclaw")
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+_FALLBACK_PROVIDERS = ("chatgpt", "claude", "openclaw")
+
+
+def _load_providers():
+    """Derive the list of provider names from hub/config/providers.json (path
+    relative to this script's own dir). Falls back to the hardcoded default
+    tuple above if the file is missing or unparseable, so a broken/absent
+    config can never crash ingest."""
+    config_path = os.path.join(HERE, "config", "providers.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        return tuple(cfg["providers"].keys())
+    except (OSError, ValueError, KeyError, TypeError):
+        return _FALLBACK_PROVIDERS
+
+
+PROVIDERS = _load_providers()
 ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge"}
 KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
@@ -151,6 +171,16 @@ def validate_schema(block):
         return f"schema-invalid: type '{typ}' not in enum {sorted(ITEM_TYPES)}"
     if name != stem:
         return f"schema-invalid: name '{name}' != filename stem '{stem}'"
+
+    # Optional `visibility` field (docs/format-spec.md §1): if the author included
+    # it, it must be exactly "shared" or "local"; if absent, that's fine — it's
+    # treated as shared downstream and is never injected here. commit_block()
+    # writes block["body"] verbatim, so a visibility field the author wrote is
+    # preserved automatically.
+    visibility = fm.get("visibility")
+    if visibility is not None and visibility not in ("shared", "local"):
+        return f"schema-invalid: visibility '{visibility}' must be 'shared' or 'local'"
+
     return None
 
 

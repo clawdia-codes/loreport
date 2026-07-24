@@ -1,0 +1,13 @@
+{
+  "providers": {
+    "openclaw": {"branch": "provider/openclaw", "merge_order": 1},
+    "claude":   {"branch": "provider/claude",   "merge_order": 2},
+    "chatgpt":  {"branch": "provider/chatgpt",  "merge_order": 3}
+  },
+  "credentials": {
+    "MPB_OPENCLAW_TOKEN":     {"provider": "openclaw", "trust": "local", "default": "openclaw-local-dev-token"},
+    "MPB_CLAUDE_LOCAL_TOKEN": {"provider": "claude",   "trust": "local", "default": "claude-local-dev-token"},
+    "MPB_CLAUDE_WEB_TOKEN":   {"provider": "claude",   "trust": "cloud", "default": null},
+    "MPB_CHATGPT_TOKEN":      {"provider": "chatgpt",  "trust": "cloud", "default": "chatgpt-local-dev-token"}
+  }
+}

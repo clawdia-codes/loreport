@@ -14,6 +14,7 @@ description: <one line>       # becomes the INDEX line hook; feeds provider retr
 type: user | feedback | project | reference | knowledge
 source: <host>               # provenance — assistant/app the capture came from (claude, chatgpt, openclaw, …)
 captured: <YYYY-MM-DD>       # provenance — capture date
+visibility: shared | local   # optional — see below; absent = shared
 ---
 ```
 
@@ -32,6 +33,10 @@ captured: <YYYY-MM-DD>       # provenance — capture date
   writing one brain. `source` is stamped from the pinned **Host** value and matches the
   writing provider's Tier-2 branch (`provider/<source>`). Hand-authored / seed items may
   omit both; consolidation preserves them.
+- **`visibility`** (optional) is `shared` or `local`. **`shared`** (the default when the
+  field is absent) participates in the published packet and is readable by all connected
+  providers. **`local`** never leaves this machine — excluded from publish, and cloud
+  provider reads refuse it.
 
 ---
 

@@ -22,6 +22,7 @@ CLI:
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -30,7 +31,27 @@ from datetime import date, datetime
 
 # --- constants -------------------------------------------------------------
 
-PROVIDER_ORDER = ["provider/openclaw", "provider/claude", "provider/chatgpt"]
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+_FALLBACK_PROVIDER_ORDER = ["provider/openclaw", "provider/claude", "provider/chatgpt"]
+
+
+def _load_provider_order():
+    """Derive PROVIDER_ORDER (branch names sorted by merge_order) from
+    hub/config/providers.json (path relative to this script's own dir). Falls
+    back to the hardcoded default list above if the file is missing or
+    unparseable, so a broken/absent config can never crash the merge."""
+    config_path = os.path.join(HERE, "config", "providers.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        ordered = sorted(cfg["providers"].items(), key=lambda kv: kv[1]["merge_order"])
+        return [info["branch"] for _name, info in ordered]
+    except (OSError, ValueError, KeyError, TypeError):
+        return list(_FALLBACK_PROVIDER_ORDER)
+
+
+PROVIDER_ORDER = _load_provider_order()
 ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge"}
 
 # Same secret-regex set used by inbox_ingest.py and snapshot_publish.py (duplicated

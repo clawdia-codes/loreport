@@ -44,19 +44,67 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
 # One credential <=> one provider/* branch. In a real deployment these tokens are
-# injected by the tunnel client / connector per connection (env vars below); a
-# connection never gets to choose its own provider identity.
-PROVIDER_BRANCHES = {
+# injected by the tunnel client / connector per connection (env vars named in
+# hub/config/providers.json); a connection never gets to choose its own provider
+# identity.
+#
+# PROVIDER_BRANCHES, CREDENTIAL_PROVIDER_MAP, and CREDENTIAL_TRUST_MAP are all
+# derived from hub/config/providers.json below (falling back to these same
+# hardcoded values if the config is missing or unparseable, so a broken config
+# file can never crash the server).
+_FALLBACK_PROVIDER_BRANCHES = {
     "chatgpt": "provider/chatgpt",
     "claude": "provider/claude",
     "openclaw": "provider/openclaw",
 }
 
-CREDENTIAL_PROVIDER_MAP = {
+_FALLBACK_CREDENTIAL_PROVIDER_MAP = {
     os.environ.get("MPB_CHATGPT_TOKEN", "chatgpt-local-dev-token"): "chatgpt",
-    os.environ.get("MPB_CLAUDE_TOKEN", "claude-local-dev-token"): "claude",
+    os.environ.get("MPB_CLAUDE_LOCAL_TOKEN", "claude-local-dev-token"): "claude",
     os.environ.get("MPB_OPENCLAW_TOKEN", "openclaw-local-dev-token"): "openclaw",
 }
+
+_FALLBACK_CREDENTIAL_TRUST_MAP = {
+    os.environ.get("MPB_CHATGPT_TOKEN", "chatgpt-local-dev-token"): "cloud",
+    os.environ.get("MPB_CLAUDE_LOCAL_TOKEN", "claude-local-dev-token"): "local",
+    os.environ.get("MPB_OPENCLAW_TOKEN", "openclaw-local-dev-token"): "local",
+}
+
+
+def _load_providers_config():
+    """Read hub/config/providers.json (path relative to this script's own dir) and
+    build (provider_branches, credential_provider_map, credential_trust_map).
+
+    For each entry in `credentials`, the token value is
+    os.environ.get(<env_key>, <default>); if that value is non-null it is added
+    to both maps (token -> provider, token -> trust). credential_provider_map
+    stays a plain token->provider dict (dispatch() is unchanged this phase);
+    credential_trust_map (token->trust) is exposed for a later enforcement phase.
+
+    Falls back to the hardcoded defaults above if providers.json is missing or
+    unparseable, so a broken/absent config file never crashes the server."""
+    config_path = os.path.join(HERE, "config", "providers.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        branches = {name: info["branch"] for name, info in cfg["providers"].items()}
+        cred_map = {}
+        trust_map = {}
+        for env_key, info in cfg["credentials"].items():
+            value = os.environ.get(env_key, info.get("default"))
+            if value is not None:
+                cred_map[value] = info["provider"]
+                trust_map[value] = info["trust"]
+        return branches, cred_map, trust_map
+    except (OSError, ValueError, KeyError, TypeError):
+        return (
+            dict(_FALLBACK_PROVIDER_BRANCHES),
+            dict(_FALLBACK_CREDENTIAL_PROVIDER_MAP),
+            dict(_FALLBACK_CREDENTIAL_TRUST_MAP),
+        )
+
+
+PROVIDER_BRANCHES, CREDENTIAL_PROVIDER_MAP, CREDENTIAL_TRUST_MAP = _load_providers_config()
 
 TOOLS = {
     "brain_capture": {
