@@ -22,7 +22,9 @@ Security invariants (§D17):
     (an HTTP header, or a --credential value on stdio); brain_capture always
     uses THAT identity to pick the provider/* branch — a caller-supplied
     `provider` argument can never override it, so a stolen ChatGPT credential
-    cannot write provider/claude or main.
+    cannot write provider/claude or main. If the connection carries no
+    recognized credential at all, brain_capture fails closed (quarantined)
+    rather than falling back to a caller-supplied `provider` argument.
   - Tools expose brain items only, never arbitrary filesystem paths.
 
 Transports:
@@ -154,8 +156,12 @@ def dispatch(brain_dir, credential, name, arguments):
     if name == "brain_capture":
         # The credential's mapped provider always wins over any caller-supplied
         # `provider` argument — a stolen credential cannot pick another branch.
-        provider = provider_from_credential or arguments.get("provider")
-        return tool_brain_capture(brain_dir, provider, arguments.get("block", ""))
+        # If there is no recognized credential at all, fail closed: never fall
+        # back to a caller-supplied `provider` argument for routing.
+        if provider_from_credential is None:
+            return {"status": "quarantined",
+                    "detail": "no recognized credential; refusing to route capture"}
+        return tool_brain_capture(brain_dir, provider_from_credential, arguments.get("block", ""))
     if name == "brain_read":
         return tool_brain_read(brain_dir, arguments.get("name", ""))
     if name == "brain_search":
@@ -168,6 +174,15 @@ def dispatch(brain_dir, credential, name, arguments):
 # --- JSON-RPC 2.0 / MCP framing -----------------------------------------------
 
 def handle_request(brain_dir, credential, req):
+    # JSON-RPC 2.0 notifications (no "id" key) MUST NOT get a response — e.g.
+    # MCP's "notifications/initialized". Replying anyway desyncs the client's
+    # request/response pairing (it starts matching the wrong response to the
+    # wrong pending request), which reads as "invalid request" / a dead
+    # session on the tunnel-client side even though the server is fine. This
+    # check must apply to every transport (stdio AND http), not just stdio.
+    if "id" not in req:
+        return None
+
     method = req.get("method")
     req_id = req.get("id")
     params = req.get("params") or {}
@@ -238,14 +253,9 @@ def run_stdio(brain_dir, credential):
                                      "error": {"code": -32700, "message": "parse error"}}):
                 break
             continue
-        # JSON-RPC 2.0 notifications (no "id" key) MUST NOT get a response — e.g.
-        # MCP's "notifications/initialized". Replying anyway desyncs the client's
-        # request/response pairing (it starts matching the wrong response to the
-        # wrong pending request), which reads as "invalid request" / a dead
-        # session on the tunnel-client side even though the server is fine.
-        if "id" not in req:
-            continue
         resp = handle_request(brain_dir, credential, req)
+        if resp is None:
+            continue
         if not _write_response(resp):
             break
 
@@ -265,6 +275,12 @@ def make_http_handler(brain_dir):
             # tunnel/connector sets this header per authenticated connection.
             credential = self.headers.get("X-MPB-Credential")
             resp = handle_request(brain_dir, credential, req)
+            if resp is None:
+                # A JSON-RPC notification (no "id") gets no body — only an
+                # Accepted status, same "no response" semantics as stdio.
+                self.send_response(202)
+                self.end_headers()
+                return
             body = json.dumps(resp).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

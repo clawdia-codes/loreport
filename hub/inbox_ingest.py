@@ -119,6 +119,23 @@ def validate_schema(block):
     file_path, action, body = block["file"], block["action"], block["body"]
     if action not in ("new", "update", "delete"):
         return f"schema-invalid: unknown action '{action}'"
+
+    # Path/action allowlist (runs for EVERY action, before any filesystem/git
+    # operation): the emit block's `file="…"` attribute must resolve to a brain
+    # item path, never an arbitrary filesystem location. This blocks traversal
+    # ("../../"), absolute paths, and writes/deletes outside memories/knowledge/
+    # skills — e.g. overwriting prompts/bootstrap.md or deleting PROFILE.md or
+    # hub code.
+    if os.path.isabs(file_path):
+        return f"schema-invalid: absolute path '{file_path}' is not allowed"
+    normalized = os.path.normpath(file_path)
+    if os.path.isabs(normalized) or ".." in normalized.split(os.sep):
+        return f"schema-invalid: path '{file_path}' escapes the brain directory"
+    if not normalized.startswith(("memories/", "knowledge/", "skills/")):
+        return f"schema-invalid: path '{file_path}' is outside the memories/knowledge/skills allowlist"
+    if not normalized.endswith(".md"):
+        return f"schema-invalid: path '{file_path}' does not end in .md"
+
     stem = os.path.splitext(os.path.basename(file_path))[0]
     if action == "delete":
         return None  # no frontmatter required for a delete block
@@ -207,10 +224,11 @@ def commit_block(brain_dir, provider, block):
 
     if block["action"] == "delete":
         name = os.path.splitext(os.path.basename(rel_path))[0]
-        if os.path.exists(abs_path):
-            git(brain_dir, "rm", "-f", rel_path)
-        else:
-            os.makedirs(os.path.dirname(abs_path) or brain_dir, exist_ok=True)
+        if not os.path.exists(abs_path):
+            raise RuntimeError(
+                f"delete target does not exist under brain_dir: {rel_path}"
+            )
+        git(brain_dir, "rm", "-f", rel_path)
     else:
         os.makedirs(os.path.dirname(abs_path) or brain_dir, exist_ok=True)
         with open(abs_path, "w", encoding="utf-8") as fh:
