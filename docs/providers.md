@@ -55,8 +55,16 @@ Phase 2 walks through extracting those facts verbatim, sanitizing them, and conv
 them to portable brain items. Once ported, ChatGPT is loaded via the Projects or Paste
 path recipe.
 
-**Recommendation: disable native memory once Loreport is your memory.** After porting a
-provider's own memory feature (ChatGPT Memory, Gemini's "Saved info", etc.) into the
-brain via `onboard.md`, turn that native feature off for the assistants you've migrated —
-otherwise it keeps re-saving facts back into the provider's silo, silently re-creating
-the lock-in this recipe exists to remove.
+**Native memory: two supported modes** (see ADR-003 in `docs/architecture-decisions.md`).
+
+- **Parity mode (recommended default):** leave the provider's native memory ON and load
+  the `capture-parity` skill — the assistant mirrors every native save into Loreport and
+  recalls native-first for its own facts, Loreport-first for facts from other assistants.
+  You keep native memory's seamless auto-capture; Loreport stays the cross-provider
+  record. Drift (a missed mirror) is repaired any time with the `memory-reconcile` skill
+  ("reconcile my memories").
+- **Single-store mode:** after porting a provider's memory via `onboard.md`, turn the
+  native feature off and use Loreport as the only memory. Simplest possible model — one
+  store, zero divergence — at the cost of the provider's built-in auto-capture reflex,
+  which is more reliable than a mirrored tool call. Prefer this on providers where you
+  rarely capture anything new.

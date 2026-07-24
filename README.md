@@ -14,10 +14,11 @@ no tooling at all.
    This runs the INITIALIZE + BRINGUP one-shot — PORT (bring in what you already have)
    → INTERVIEW (a short, one-question-at-a-time interview) → GRAB + MERGE (extract and
    merge whatever the current provider already holds about you) — and hands you back a
-   set of ready-to-file blocks. Once you've ported a provider's native memory feature
-   (ChatGPT Memory, Gemini's "Saved info", etc.) this way, turn that feature off — Loreport
-   is your memory system now, and a live native-memory feature just keeps re-absorbing
-   facts back into the silo you extracted them from.
+   set of ready-to-file blocks. After porting a provider's native memory feature
+   (ChatGPT Memory, Gemini's "Saved info", etc.) this way, either keep it on **with the
+   `capture-parity` skill** (native saves get mirrored into Loreport; recommended) or turn
+   it off and let Loreport be the only store — see "Native memory: two supported modes"
+   in [`docs/providers.md`](docs/providers.md).
 2. **Save each block to its `file=` path**, inside a folder you control. A private git
    repo is the ideal home — you now have one self-contained brain folder, reloadable
    anywhere.

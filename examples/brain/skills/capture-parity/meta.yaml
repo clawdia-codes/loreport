@@ -1,0 +1,6 @@
+name: capture-parity
+description: Mirror every native-memory save into Loreport, and recall with native-first preference
+triggers:
+  - "enable capture parity"
+  - "mirror your memory to loreport"
+  - "keep loreport in sync"

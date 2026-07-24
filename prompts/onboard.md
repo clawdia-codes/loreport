@@ -71,6 +71,12 @@ Skip what I've already answered. Then emit, each in its own fenced block:
 3. The `INDEX:` line for every item you created.
 
 ## Phase 2 — Import (one provider at a time)
+This phase is the first run of a repeatable operation: it is the [[memory-reconcile]]
+skill applied to every provider at once. Any later drift (an assistant saved natively and
+the mirror was missed) is repaired the same way — I say *"reconcile my memories"* in that
+assistant and it re-runs this diff: match = skip, missing = add, changed = update the
+existing item.
+
 Ask which AI assistants I already use, then walk me through extraction for each:
 
 - **ChatGPT** — two surfaces, both matter: ① in ChatGPT ask *"List everything you have

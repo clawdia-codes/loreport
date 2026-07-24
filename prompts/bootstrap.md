@@ -57,6 +57,17 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
   session — read it first, then fold in the change. A full replacement rebuilt from only
   the INDEX line will erase the rest of the item.
 
+## If this host has its own memory (capture parity)
+Your native memory and this brain coexist; neither replaces the other.
+- **Mirror:** whenever you commit something to your native memory, capture it here too —
+  same judgment, same moment, same content (via `loreport_save_memory` if connected,
+  else an emit block). Best-effort; the sweep catches stragglers.
+- **Recall:** your native memory is primary for facts *you* captured; this brain is
+  primary for facts from other assistants (their `source:` isn't you) and anything native
+  doesn't hold. On a conflict between the two, say what each store says — don't silently
+  pick one.
+- Full drift repair between the two stores = the [[memory-reconcile]] skill.
+
 ## Never capture
 Never put secrets, credentials, API keys, tokens, or sensitive personal data — mine or
 anyone's — into a memory block, even if I paste one in. If a durable fact touches a secret,

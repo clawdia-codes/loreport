@@ -1,0 +1,7 @@
+name: memory-reconcile
+description: Diff this assistant's native memory against Loreport and repair the gaps — skip matches, add what's missing, update what changed
+triggers:
+  - "reconcile my memories"
+  - "sync your memory with loreport"
+  - "diff your memory against loreport"
+  - "import your memories"

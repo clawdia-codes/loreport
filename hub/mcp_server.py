@@ -14,8 +14,11 @@ all named with the `loreport_<verb>_<noun>` scheme (docs/visibility-design.md §
     or skills/<name>/SKILL.md from the latest `main` checkout. Refused for a
     cloud-trust caller if the item's `visibility` is `local`.
   - loreport_search_memories(query) -> case-insensitive substring scan over
-    INDEX.md on `main`. A cloud-trust caller never sees `local` items in the
-    results.
+    INDEX.md on `main`. Each hit is annotated with its capture source (the
+    item's `source:` frontmatter, e.g. "chatgpt"; "unknown" if absent/unresolvable,
+    "—" for skill entries, which carry no item frontmatter) so a calling
+    provider can tell its own captures ("echoes") apart from cross-provider
+    ones. A cloud-trust caller never sees `local` items in the results.
   - loreport_load_context() -> returns hub/published/packet.md (the current
     pinned bootstrap+PROFILE+INDEX packet; already excludes `local` items).
   - loreport_view_memory_settings() -> lists every item with its visibility.
@@ -144,8 +147,11 @@ TOOLS = {
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
     "loreport_search_memories": {
-        "description": "Case-insensitive substring search over INDEX.md on main. A "
-                       "cloud-trust caller never sees `local`-visibility items in results.",
+        "description": "Case-insensitive substring search over INDEX.md on main. Each hit "
+                       "is annotated with its capture source (the item's `source:` "
+                       "frontmatter, e.g. 'chatgpt', or 'unknown'/'—' if not applicable) so "
+                       "a caller can tell its own captures apart from cross-provider ones. "
+                       "A cloud-trust caller never sees `local`-visibility items in results.",
         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
     "loreport_load_context": {
@@ -399,15 +405,39 @@ def tool_loreport_search_memories(brain_dir, query, trust):
         if index_content is None:
             return {"error": "INDEX.md not found on main"}
         q = (query or "").lower()
-        matches = [line for line in index_content.splitlines() if q in line.lower()]
-        if trust != "local":
-            filtered = []
-            for line in matches:
-                m = INDEX_ITEM_RE.search(line)
-                if m and _item_visibility(brain_dir, m.group(1)) == "local":
-                    continue
-                filtered.append(line)
-            matches = filtered
+        raw_matches = [line for line in index_content.splitlines() if q in line.lower()]
+
+        # Annotate every surviving hit with its capture source ("source:"
+        # frontmatter, e.g. "chatgpt") so a calling provider can tell its own
+        # captures ("echoes") apart from cross-provider ones — no filtering
+        # here beyond the existing visibility/trust check below, which stays
+        # unchanged: a cloud-trust caller still never sees a `local` item.
+        #
+        # Visibility check and source lookup share the SAME _locate_item_on_main
+        # read (one `git show` per hit) instead of two, so annotating doesn't
+        # double the git calls the old filter-only loop already made.
+        matches = []
+        for line in raw_matches:
+            m = INDEX_ITEM_RE.search(line)
+            name = m.group(1) if m else None
+
+            if line.rstrip().endswith("(skill)"):
+                # Skills have no item frontmatter to read a `source:` from —
+                # annotate without a file read rather than pretending one exists.
+                matches.append(line + "  [source: —]")
+                continue
+
+            source = "unknown"
+            if name:
+                _relpath, _typ, content = _locate_item_on_main(brain_dir, name)
+                if content is not None:
+                    vis = _visibility_from_text(content)
+                    if vis == "local" and trust != "local":
+                        continue  # unchanged: hidden from cloud-trust search results
+                    fm_source = _parse_frontmatter_scalars(content).get("source")
+                    if fm_source:
+                        source = fm_source
+            matches.append(line + f"  [source: {source}]")
     except GitTimeout:
         return {"error": "git timeout"}
     return {"matches": matches}
