@@ -173,6 +173,83 @@ TOOLS = {
 }
 
 
+# --- git-from-main helpers ------------------------------------------------
+#
+# All reads (loreport_read_memory, loreport_search_memories,
+# loreport_view_memory_settings, and the visibility check used by all of
+# them) go through `git show main:<path>` / `git ls-tree main`, never the
+# checked-out working tree — the shared tree can be parked on any
+# provider/* branch at any moment (a capture in flight), so reading it
+# directly would silently serve un-merged, un-scrubbed, possibly stale
+# content (REVIEW.md #6/H1). Every one of these subprocess calls carries a
+# 30s timeout (REVIEW.md #19); a stuck git process (e.g. index.lock) raises
+# GitTimeout instead of hanging the request forever.
+
+class GitTimeout(Exception):
+    """Raised when a git subprocess used for a main-read exceeds its timeout."""
+
+
+def _run_git(brain_dir, *args, timeout=30):
+    try:
+        return subprocess.run(
+            ["git", "-C", brain_dir] + list(args),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise GitTimeout(f"git {' '.join(args)} timed out")
+
+
+def _read_from_main(brain_dir, relpath):
+    """Return the content of `relpath` as committed on `main`, or None if it
+    doesn't exist there. Raises GitTimeout on a stuck git process."""
+    r = _run_git(brain_dir, "show", f"main:{relpath}")
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def _candidate_relpaths(name):
+    return [
+        (f"memories/{name}.md", "memory"),
+        (f"knowledge/{name}.md", "knowledge"),
+        (f"skills/{name}/SKILL.md", "skill"),
+    ]
+
+
+def _locate_item_on_main(brain_dir, name):
+    """Return (relpath, item_type, content) for the first candidate
+    (memories/<name>.md | knowledge/<name>.md | skills/<name>/SKILL.md) that
+    exists ON MAIN, or (None, None, None) if the name is invalid or nothing
+    matches there — existence is decided by `main`, never by the working
+    tree. Raises GitTimeout."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return None, None, None
+    for relpath, typ in _candidate_relpaths(name):
+        content = _read_from_main(brain_dir, relpath)
+        if content is not None:
+            return relpath, typ, content
+    return None, None, None
+
+
+def _iter_all_items_from_main(brain_dir):
+    """Yield (name, item_type, relpath) for every brain item tracked on
+    `main` (memories/*.md, knowledge/*.md, skills/*/SKILL.md), enumerated
+    via `git ls-tree -r --name-only main` — never a working-tree directory
+    listing. Raises GitTimeout."""
+    r = _run_git(brain_dir, "ls-tree", "-r", "--name-only", "main")
+    if r.returncode != 0:
+        return
+    for relpath in sorted(r.stdout.splitlines()):
+        if relpath.startswith("memories/") and relpath.endswith(".md"):
+            yield os.path.splitext(os.path.basename(relpath))[0], "memory", relpath
+        elif relpath.startswith("knowledge/") and relpath.endswith(".md"):
+            yield os.path.splitext(os.path.basename(relpath))[0], "knowledge", relpath
+        elif relpath.startswith("skills/") and relpath.endswith("/SKILL.md"):
+            parts = relpath.split("/")
+            if len(parts) == 3:
+                yield parts[1], "skill", relpath
+
+
 # --- brain item / frontmatter helpers -----------------------------------------
 #
 # Simple line-scan frontmatter parsing (same style as inbox_ingest.py's
@@ -200,53 +277,19 @@ def _parse_frontmatter_scalars(text):
     return result
 
 
-def _locate_item(brain_dir, name):
-    """Locate a brain item by name across memories/, knowledge/, skills/. Returns
-    (path, item_type) or (None, None) if the name is invalid or nothing matches.
-    Brain items only — never an arbitrary filesystem path: path separators in
-    the requested name are rejected so a caller cannot escape memories/
-    knowledge/skills."""
-    if not name or "/" in name or "\\" in name or ".." in name:
-        return None, None
-    for sub, typ in (("memories", "memory"), ("knowledge", "knowledge")):
-        path = os.path.join(brain_dir, sub, f"{name}.md")
-        if os.path.isfile(path):
-            return path, typ
-    skill_path = os.path.join(brain_dir, "skills", name, "SKILL.md")
-    if os.path.isfile(skill_path):
-        return skill_path, "skill"
-    return None, None
-
-
-def _iter_all_items(brain_dir):
-    """Yield (name, item_type, path) for every brain item across memories/,
-    knowledge/, and skills/."""
-    for sub, typ in (("memories", "memory"), ("knowledge", "knowledge")):
-        d = os.path.join(brain_dir, sub)
-        if not os.path.isdir(d):
-            continue
-        for fname in sorted(os.listdir(d)):
-            if fname.endswith(".md"):
-                yield os.path.splitext(fname)[0], typ, os.path.join(d, fname)
-    skills_dir = os.path.join(brain_dir, "skills")
-    if os.path.isdir(skills_dir):
-        for sub_name in sorted(os.listdir(skills_dir)):
-            skill_path = os.path.join(skills_dir, sub_name, "SKILL.md")
-            if os.path.isfile(skill_path):
-                yield sub_name, "skill", skill_path
+def _visibility_from_text(text):
+    vis = _parse_frontmatter_scalars(text).get("visibility")
+    return vis if vis in ("shared", "local") else "shared"
 
 
 def _item_visibility(brain_dir, name):
-    """Return "local" or "shared" for the named brain item (absent field
-    defaults to "shared", per docs/visibility-design.md §1), or None if the
-    item doesn't exist."""
-    path, _typ = _locate_item(brain_dir, name)
-    if not path:
+    """Return "local" or "shared" for the named brain item, read FROM MAIN
+    (absent field defaults to "shared", per docs/visibility-design.md §1), or
+    None if the item doesn't exist on main. Raises GitTimeout."""
+    _relpath, _typ, content = _locate_item_on_main(brain_dir, name)
+    if content is None:
         return None
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
-    vis = _parse_frontmatter_scalars(text).get("visibility")
-    return vis if vis in ("shared", "local") else "shared"
+    return _visibility_from_text(content)
 
 
 def _set_visibility_field(text, visibility):
@@ -293,10 +336,13 @@ def tool_loreport_save_memory(brain_dir, provider, block):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(block)
         script = os.path.join(HERE, "inbox_ingest.py")
-        r = subprocess.run(
-            [sys.executable, script, provider, tmp_path, "--brain-dir", brain_dir],
-            capture_output=True, text=True,
-        )
+        try:
+            r = subprocess.run(
+                [sys.executable, script, provider, tmp_path, "--brain-dir", brain_dir],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return {"status": "quarantined", "detail": "git timeout"}
         detail = (r.stdout + r.stderr).strip()
         return {"status": "committed" if r.returncode == 0 else "quarantined", "detail": detail}
     finally:
@@ -309,34 +355,35 @@ def tool_loreport_save_memory(brain_dir, provider, block):
 def tool_loreport_read_memory(brain_dir, name, trust):
     if not name or "/" in name or "\\" in name or ".." in name:
         return {"error": "invalid item name"}
-    path, _typ = _locate_item(brain_dir, name)
-    if not path:
-        return {"error": "not found"}
-    vis = _item_visibility(brain_dir, name)
+    try:
+        _relpath, _typ, content = _locate_item_on_main(brain_dir, name)
+        if content is None:
+            return {"error": "not found"}
+        vis = _visibility_from_text(content)
+    except GitTimeout:
+        return {"error": "git timeout"}
     if vis == "local" and trust != "local":
         return {"error": "local item — not available to this caller"}
-    with open(path, "r", encoding="utf-8") as fh:
-        return {"content": fh.read()}
+    return {"content": content}
 
 
 def tool_loreport_search_memories(brain_dir, query, trust):
-    index_path = os.path.join(brain_dir, "INDEX.md")
-    if not os.path.isfile(index_path):
-        return {"error": "INDEX.md not found on main"}
-    q = (query or "").lower()
-    matches = []
-    with open(index_path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            if q in line.lower():
-                matches.append(line.rstrip("\n"))
-    if trust != "local":
-        filtered = []
-        for line in matches:
-            m = INDEX_ITEM_RE.search(line)
-            if m and _item_visibility(brain_dir, m.group(1)) == "local":
-                continue
-            filtered.append(line)
-        matches = filtered
+    try:
+        index_content = _read_from_main(brain_dir, "INDEX.md")
+        if index_content is None:
+            return {"error": "INDEX.md not found on main"}
+        q = (query or "").lower()
+        matches = [line for line in index_content.splitlines() if q in line.lower()]
+        if trust != "local":
+            filtered = []
+            for line in matches:
+                m = INDEX_ITEM_RE.search(line)
+                if m and _item_visibility(brain_dir, m.group(1)) == "local":
+                    continue
+                filtered.append(line)
+            matches = filtered
+    except GitTimeout:
+        return {"error": "git timeout"}
     return {"matches": matches}
 
 
@@ -350,26 +397,30 @@ def tool_loreport_load_context(brain_dir):
 
 def tool_loreport_view_memory_settings(brain_dir, trust):
     items = []
-    for name, typ, path in _iter_all_items(brain_dir):
-        with open(path, "r", encoding="utf-8") as fh:
-            fm = _parse_frontmatter_scalars(fh.read())
-        vis = fm.get("visibility")
-        vis = vis if vis in ("shared", "local") else "shared"
-        if vis == "local" and trust != "local":
-            items.append({"name": name, "visibility": "local", "hidden": True})
-        else:
-            items.append({"name": name, "type": typ, "visibility": vis})
+    try:
+        for name, typ, relpath in _iter_all_items_from_main(brain_dir):
+            content = _read_from_main(brain_dir, relpath)
+            if content is None:
+                continue  # raced with a concurrent write between ls-tree and show; skip
+            vis = _visibility_from_text(content)
+            if vis == "local" and trust != "local":
+                items.append({"name": name, "visibility": "local", "hidden": True})
+            else:
+                items.append({"name": name, "type": typ, "visibility": vis})
+    except GitTimeout:
+        return {"error": "git timeout"}
     return {"items": items}
 
 
 def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, provider):
     if visibility not in ("shared", "local"):
         return {"error": "visibility must be 'shared' or 'local'"}
-    path, _typ = _locate_item(brain_dir, name)
-    if not path:
+    try:
+        relpath, _typ, text = _locate_item_on_main(brain_dir, name)
+    except GitTimeout:
+        return {"status": "quarantined", "detail": "git timeout"}
+    if relpath is None:
         return {"error": "not found"}
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
     source = _parse_frontmatter_scalars(text).get("source")
 
     if trust == "local":
@@ -380,17 +431,17 @@ def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, pro
         return {"error": "not permitted: a cloud caller may only change memories it authored"}
 
     new_text = _set_visibility_field(text, visibility)
-    rel_path = os.path.relpath(path, brain_dir)
+    path = os.path.join(brain_dir, relpath)
 
-    def _git(*args):
-        return subprocess.run(["git", "-C", brain_dir] + list(args), capture_output=True, text=True)
-
-    _git("checkout", "main")
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
-    _git("add", rel_path)
-    actor = provider if provider else "local"
-    _git("commit", "-m", f"brain(settings): {name} visibility -> {visibility} via {actor}")
+    try:
+        _run_git(brain_dir, "checkout", "main")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+        _run_git(brain_dir, "add", relpath)
+        actor = provider if provider else "local"
+        _run_git(brain_dir, "commit", "-m", f"brain(settings): {name} visibility -> {visibility} via {actor}")
+    except GitTimeout:
+        return {"status": "quarantined", "detail": "git timeout"}
 
     return {"status": "changed", "name": name, "visibility": visibility}
 

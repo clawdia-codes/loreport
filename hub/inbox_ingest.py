@@ -25,6 +25,8 @@ CLI:
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -203,11 +205,48 @@ def scan_imperative(body):
 
 # --- git plumbing --------------------------------------------------------------
 
-def git(brain_dir, *args, check=True):
-    result = subprocess.run(["git", "-C", brain_dir] + list(args), capture_output=True, text=True)
+def git(brain_dir, *args, check=True, timeout=30):
+    try:
+        result = subprocess.run(
+            ["git", "-C", brain_dir] + list(args),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {' '.join(args)} timed out")
     if check and result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result
+
+
+# One repo-wide lock, shared with brain_merge.py (same relative path), so a
+# capture and a nightly merge can never interleave their git mutations
+# (REVIEW.md #5). Single-file/stdlib-only means this is duplicated rather
+# than imported, same as SECRET_PATTERNS etc.
+LOCK_RELPATH = os.path.join("hub", ".loreport.lock")
+
+
+@contextlib.contextmanager
+def brain_lock(brain_dir):
+    lock_path = os.path.join(brain_dir, LOCK_RELPATH)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def is_noop_commit(brain_dir):
+    """True if nothing is staged (`git diff --cached --quiet` exit 0) — a
+    re-capture of an identical `update` stages nothing, and `git commit`
+    would fail with "nothing to commit"; that's a clean no-op, not a
+    failure."""
+    r = git(brain_dir, "diff", "--cached", "--quiet", check=False)
+    return r.returncode == 0
 
 
 # --- quarantine / commit --------------------------------------------------------
@@ -247,35 +286,63 @@ def quarantine(brain_dir, provider, block_file, reason, detail):
 
 
 def commit_block(brain_dir, provider, block):
-    branch = f"provider/{provider}"
-    git(brain_dir, "checkout", branch)
-    rel_path = block["file"]
-    abs_path = os.path.join(brain_dir, rel_path)
+    """Commit `block` to provider/<provider>. Returns "committed" or
+    "skipped: no change" (identical content re-captured — not a failure).
 
-    if block["action"] == "delete":
-        name = os.path.splitext(os.path.basename(rel_path))[0]
-        if not os.path.exists(abs_path):
-            raise RuntimeError(
-                f"delete target does not exist under brain_dir: {rel_path}"
+    Wrapped in an exclusive repo lock (REVIEW.md #5) so this can never
+    interleave with brain_merge.py's git mutations. On ANY git failure
+    (including a timeout raised by git()) the working tree is restored to
+    clean (`git checkout -- .` + `git reset`) before the exception
+    propagates, so a failed capture never poisons the next capture or the
+    nightly merge with a half-staged change (REVIEW.md #13). Either way, the
+    branch is restored to `main` on exit so the shared working tree is never
+    left parked on a provider branch (REVIEW.md #3 partial)."""
+    with brain_lock(brain_dir):
+        branch = f"provider/{provider}"
+        try:
+            git(brain_dir, "checkout", branch)
+            rel_path = block["file"]
+            abs_path = os.path.join(brain_dir, rel_path)
+
+            if block["action"] == "delete":
+                name = os.path.splitext(os.path.basename(rel_path))[0]
+                if not os.path.exists(abs_path):
+                    raise RuntimeError(
+                        f"delete target does not exist under brain_dir: {rel_path}"
+                    )
+                git(brain_dir, "rm", "-f", rel_path)
+            else:
+                os.makedirs(os.path.dirname(abs_path) or brain_dir, exist_ok=True)
+                with open(abs_path, "w", encoding="utf-8") as fh:
+                    fh.write(block["body"])
+                git(brain_dir, "add", rel_path)
+                fm, _ = parse_frontmatter(block["body"])
+                name = fm.get("name") if fm else os.path.splitext(os.path.basename(rel_path))[0]
+
+            if is_noop_commit(brain_dir):
+                return "skipped: no change"
+
+            ts = datetime.now().isoformat(timespec="seconds")
+            msg = (
+                f"brain(capture): {name} via {provider} [inbox]\n\n"
+                f"Provider: {provider}\n"
+                f"Action: {block['action']}\n"
+                f"File: {rel_path}\n"
+                f"Ingested-At: {ts}\n"
             )
-        git(brain_dir, "rm", "-f", rel_path)
-    else:
-        os.makedirs(os.path.dirname(abs_path) or brain_dir, exist_ok=True)
-        with open(abs_path, "w", encoding="utf-8") as fh:
-            fh.write(block["body"])
-        git(brain_dir, "add", rel_path)
-        fm, _ = parse_frontmatter(block["body"])
-        name = fm.get("name") if fm else os.path.splitext(os.path.basename(rel_path))[0]
-
-    ts = datetime.now().isoformat(timespec="seconds")
-    msg = (
-        f"brain(capture): {name} via {provider} [inbox]\n\n"
-        f"Provider: {provider}\n"
-        f"Action: {block['action']}\n"
-        f"File: {rel_path}\n"
-        f"Ingested-At: {ts}\n"
-    )
-    git(brain_dir, "commit", "-m", msg)
+            git(brain_dir, "commit", "-m", msg)
+            return "committed"
+        except Exception:
+            # Leave the tree clean rather than poisoning the next
+            # capture/merge with a half-staged change, then let the caller
+            # map this to a real quarantine (not a silent loss).
+            git(brain_dir, "checkout", "--", ".", check=False)
+            git(brain_dir, "reset", check=False)
+            raise
+        finally:
+            # Never leave the shared working tree parked on a provider
+            # branch (REVIEW.md #3 partial).
+            git(brain_dir, "checkout", "main", check=False)
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -320,8 +387,16 @@ def main():
                    f"unattributed standing instruction: \"{imp_hit}\"")
         sys.exit(1)
 
-    commit_block(brain_dir, args.provider, block)
-    print(f"COMMITTED: {block['file']} ({block['action']}) -> provider/{args.provider}")
+    try:
+        result = commit_block(brain_dir, args.provider, block)
+    except Exception as e:
+        quarantine(brain_dir, args.provider, args.block_file, "git-error", str(e))
+        sys.exit(1)
+
+    if result == "skipped: no change":
+        print(f"SKIPPED: {block['file']} ({block['action']}) -> provider/{args.provider} (no change)")
+    else:
+        print(f"COMMITTED: {block['file']} ({block['action']}) -> provider/{args.provider}")
 
 
 if __name__ == "__main__":
