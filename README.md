@@ -43,6 +43,25 @@ Three loops, running on top of one flat folder of markdown:
 - **CLEAN** — run `prompts/consolidate.md` periodically (monthly is a reasonable
   default) to merge near-duplicates, drop stale items, and rebuild `INDEX.md` — see
   `examples/` for a worked example of exactly this.
+- **RECONCILE** — say *"reconcile my memories"* in any assistant that has its own native
+  memory: it diffs that store against the brain and repairs the difference — match =
+  skip, missing = add, changed = **update the existing item** (never a duplicate). This is
+  how a provider's own memory feature and the brain stay coherent instead of drifting
+  apart; it is re-runnable, and a clean second run finds nothing.
+
+## Shared vs. local — what leaves your machine
+
+Every item carries a `visibility`: **`shared`** (the default) syncs to every connected
+provider; **`local`** never leaves your machine — excluded from the published packet, and
+refused outright to a cloud provider that asks for it. Health, finances, credentials,
+employer details, other people's private information: mark them `local` and they stay on
+your disk while remaining fully yours, backed up, and readable by your local agents.
+
+Trust is per-credential, not per-product: a local host (an agent on your own machine) may
+read everything and relabel any item; a cloud host reads only `shared` items and may
+relabel only what it captured itself. Review and change any of it with the
+`loreport_view_memory_settings` / `loreport_change_memory_settings` tools, or by asking
+your assistant. Full spec: [`docs/visibility-design.md`](docs/visibility-design.md).
 
 ## Optional: go live with the sync hub
 
@@ -52,10 +71,27 @@ filing captures, consolidation, `INDEX.md` rebuilds, and republishing your pinne
 across providers. It's a strict superset — a hub outage or never adopting it degrades to
 exactly Tier 1, never to broken. See [`hub/HUB.md`](hub/HUB.md) to set it up.
 
+## Skills that ship with it
+
+Skills are prose packages — they work on any host, and do more where a runtime exists:
+
+- **`loreport-ops`** — the single entry point for operating the brain: status, reconcile,
+  sweep, search, save, settings. Installed as `/loreport` in Claude Code and by name in
+  openclaw; paste it anywhere else.
+- **`capture-parity`** — the standing rule that keeps a provider's native memory and the
+  brain coherent: mirror every native save into Loreport, and recall native-first for your
+  own facts, Loreport-first for other assistants'.
+- **`memory-reconcile`** — the repeatable native → Loreport diff behind "reconcile my
+  memories".
+- **`distill-source-into-knowledge`** — turn a pasted article or doc into one durable
+  knowledge page, treating the source as untrusted.
+
 ## Security note
 
-> Anything in your brain is readable by anyone who can prompt an assistant it's loaded
-> into. The brain is designed to never contain secrets — keep it that way.
+> Anything **shared** in your brain is readable by anyone who can prompt an assistant it's
+> loaded into. The brain is designed to never contain secrets — keep it that way. Items
+> marked `local` never reach a cloud provider at all, but that is a privacy boundary, not
+> a secrets vault: credentials, API keys, and tokens belong in a password manager.
 
 See [`docs/security.md`](docs/security.md) for the full threat model and the controls
 (sanitize-before-confirm, the provenance rule, and the secret-scrub gate on the hub path)
@@ -65,11 +101,13 @@ that back this up.
 
 No embeddings, vector store, or knowledge graph — a flat index plus wikilinks is enough
 at the scale a single person's brain actually reaches, and it stays readable without
-tooling. No hosted service and no account: the brain is a folder you keep, not a product
-you depend on. No separate "append helper" app ships, ever — capture happens inside the
-conversation you're already having. Planned for later: richer per-provider import
-recipes as providers change their memory features, and Tier-2 hub hardening beyond the
-v1 scope above.
+tooling. Both choices are recorded with their reasoning *and the conditions that should
+reopen them* in [`docs/architecture-decisions.md`](docs/architecture-decisions.md) — they
+are decisions taken under today's constraints, not claims about all time. No hosted
+service and no account: the brain is a folder you keep, not a product you depend on. No
+separate "append helper" app ships, ever — capture happens inside the conversation you're
+already having. Planned for later: richer per-provider import recipes as providers change
+their memory features, and Tier-2 hub hardening beyond the v1 scope above.
 
 ## How this compares
 
@@ -108,8 +146,16 @@ Licensed under **MIT** (`prompts/`, `hub/` Python code) and **CC BY 4.0** (`docs
 
 - [`docs/format-spec.md`](docs/format-spec.md) — the canonical item/index/skill schema.
 - [`docs/load-paths.md`](docs/load-paths.md) — loading recipes per host capability.
-- [`docs/providers.md`](docs/providers.md) — which recipe fits which product.
+- [`docs/providers.md`](docs/providers.md) — which recipe fits which product, and the two
+  supported native-memory modes.
 - [`docs/security.md`](docs/security.md) — threat model and controls, in full.
+- [`docs/visibility-design.md`](docs/visibility-design.md) — `shared` vs `local`, trust
+  tiers, and how enforcement works.
+- [`docs/onboarding-runbook.md`](docs/onboarding-runbook.md) — bringing every platform onto
+  one brain, in order.
+- [`docs/architecture-decisions.md`](docs/architecture-decisions.md) — why wikilinks not a
+  knowledge graph, substring search not embeddings, parity not disabling native memory —
+  each with the conditions that should reopen it.
 - [`prompts/`](prompts/) — `bootstrap.md`, `onboard.md`, `consolidate.md`.
 - [`brain-template/`](brain-template/) — an empty skeleton to copy and fill in.
 - [`examples/`](examples/) — a filled fixture brain, with a worked consolidation example.
