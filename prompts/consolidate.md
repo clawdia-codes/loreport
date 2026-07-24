@@ -17,6 +17,13 @@ repaired files are emitted as `<MEMORY file="…" action="update">` blocks holdi
 replacement file, each followed by its `INDEX: replace - [[name]] — hook  (type)` line.
 <!-- /spec-slice -->
 
+**Preserve every frontmatter field you are not deliberately changing** — in particular
+`visibility:`. An item marked `visibility: local` never leaves my machine; if your
+replacement file omits that line the item silently becomes shared, so a private memory
+leaks on the next sync. When merging two items with different visibility, the merged item
+takes the **more restrictive** one (`local` wins) and you say so in the plan. Same care
+for `source:` and `captured:` — carry them through unchanged.
+
 ## Skills are catalogued, not consolidated
 `skills/<name>/` packages appear in the INDEX but are not items: check that every
 `## Skills` line has a matching `skills/<name>/SKILL.md` and every package has its line,
@@ -51,5 +58,7 @@ Open the plan with this line, verbatim:
   replacement block.
 - **Fixes** — lint repairs as `<MEMORY action="update">` blocks.
 - **New INDEX.md** — the complete file in one fenced block.
+- **Visibility changes** — every item whose `visibility` differs from before, with why.
+  If there are none, say "none" — I need to see that explicitly, not infer it.
 - **Untouched** — a count, so I know you saw everything.
 End with one line: items before → items after.

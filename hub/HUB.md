@@ -88,8 +88,8 @@ having to remember to look.
 
 Once a month, run `prompts/consolidate.md` over the full brain — this is the one
 place semantic judgment (near-duplicate merges, rewrites, dangling-link repair)
-belongs, with you and the user reviewing the change plan together per the `docs/
-load-paths.md` apply/rollback ritual. After applying the plan, run one fresh daily
+belongs, with you and the user reviewing the change plan together per the snapshot/apply/rollback
+ritual in `docs/setup.md` (Step 4). After applying the plan, run one fresh daily
 cycle (merge + publish) so the INDEX and the published packet reflect the
 consolidated state everywhere.
 

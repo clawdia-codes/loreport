@@ -71,7 +71,7 @@ any fact you regret) has been stored and later scrubbed, copies may persist in:
 | **Provider memory silos** (facts re-absorbed by ChatGPT / Gemini native memory) | The provider | Delete the corresponding entries in the provider's memory UI |
 | **git history of the brain repo** | You | Rewrite history (`git filter-repo`) or accept the residue — rotate makes this moot |
 | **Provider uploads** (Project knowledge / GPT files hold the pre-scrub copy until replaced) | You | Re-upload the scrubbed files after every consolidation that changed them |
-| **Local backups / snapshots** (including pre-consolidation snapshots from `load-paths.md §Apply/Rollback`) | You | Prune old snapshots after a scrub |
+| **Local backups / snapshots** (including pre-consolidation snapshots from `setup.md` Step 4) | You | Prune old snapshots after a scrub |
 
 **The rule, in order:** a stored secret is a compromised secret — **rotate it first**; then
 scrub the file (using consolidation's redaction block); then chase the residue above as

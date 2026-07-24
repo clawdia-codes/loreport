@@ -13,7 +13,8 @@ work.
 indie game developer** — clearly not the author of this repo, so it's safe to publish
 and safe to run checks against. It has:
 
-- `PROFILE.md` and `INDEX.md` — the operating surface.
+- `PROFILE.md` and `INDEX.md` — the operating surface (`./make-surface.sh` bundles
+  them with the protocol into one pasteable `surface.md`).
 - Four memories (two `feedback`, one `project`, one `reference`).
 - One `knowledge` page, wikilinked from the project memory.
 - One skill package, `skills/distill-source-into-knowledge/`.
@@ -46,7 +47,7 @@ and safe to run checks against. It has:
 
 ## Using this fixture
 
-- To see cross-provider loading behavior, load `examples/brain/` per `docs/load-paths.md`
+- To see cross-provider loading behavior, load `examples/brain/` per `docs/setup.md`
   and ask the model what it knows about "me" — it should describe Alex Rivera, not the
   real user, confirming the operating surface is doing the work.
 - To see consolidation, run `prompts/consolidate.md` against `examples/brain/` and check

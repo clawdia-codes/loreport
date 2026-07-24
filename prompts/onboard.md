@@ -134,7 +134,10 @@ standing instruction above.
 ## Finish
 End with: the complete final `INDEX.md` in one block — it must use the three fixed section
 headings `## Memories`, `## Knowledge`, `## Skills`, with each item's line filed under the
-right one · then a three-line reminder — save each block to its `file=` path inside a folder
-you control; a private git repo is the ideal home; load the brain per `docs/load-paths.md`
-(paste the brain-protocol + PROFILE + INDEX into your assistant's instructions field, keep
-detail files at hand).
+right one · then these three next steps, one line each:
+1. Save every block above to its `file=` path inside a folder you control — a private git
+   repo is the ideal home.
+2. Run `./make-surface.sh` in that folder to assemble `surface.md` (the brain protocol +
+   PROFILE + INDEX), and paste that one file into this assistant's instructions field.
+3. Everything else — other hosts, adding a second assistant, monthly upkeep — is in
+   `docs/setup.md`.
