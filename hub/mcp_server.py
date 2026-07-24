@@ -9,6 +9,12 @@ all named with the `loreport_<verb>_<noun>` scheme (docs/visibility-design.md §
   - loreport_save_memory(block, provider) -> routes the block through the SAME
     scan-before-commit gate as hub/inbox_ingest.py (invoked as a subprocess —
     never re-implemented inline), committing to the calling provider's branch.
+    The credential's `trust` (never caller-supplied) is forwarded to that
+    subprocess's own --trust flag, which enforces ownership there: a
+    cloud-trust caller may always create a new path, but may not update or
+    delete a path whose CURRENT version on `main` is `visibility: local` or
+    whose `source:` belongs to a different provider; a local-trust caller is
+    unrestricted (the cross-provider reconcile flow depends on this).
     Returns {"status": "committed" | "quarantined", "detail": "..."}.
   - loreport_read_memory(name) -> reads memories/<name>.md, knowledge/<name>.md,
     or skills/<name>/SKILL.md from the latest `main` checkout. Refused for a
@@ -310,8 +316,28 @@ def _parse_frontmatter_scalars(text):
 
 
 def _visibility_from_text(text):
-    vis = _parse_frontmatter_scalars(text).get("visibility")
-    return vis if vis in ("shared", "local") else "shared"
+    """Return "shared" or "local" for an item's raw text.
+
+    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
+    as `local`. A false `local` merely hides an item from cloud providers --
+    visible and recoverable. A false `shared` leaks it -- neither.
+    """
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "local"
+    seen = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().lower() != "visibility":
+            continue
+        seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
+    if seen is None:
+        return "shared"
+    return "shared" if seen == "shared" else "local"
 
 
 def _item_visibility(brain_dir, name):
@@ -360,7 +386,7 @@ INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 # --- tool implementations -----------------------------------------------------
 
-def tool_loreport_save_memory(brain_dir, provider, block):
+def tool_loreport_save_memory(brain_dir, provider, block, trust):
     if provider not in PROVIDER_BRANCHES:
         return {"status": "quarantined", "detail": f"unknown or unauthorized provider '{provider}'"}
     fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="mpb-capture-")
@@ -369,8 +395,15 @@ def tool_loreport_save_memory(brain_dir, provider, block):
             fh.write(block)
         script = os.path.join(HERE, "inbox_ingest.py")
         try:
+            # `trust` (from CREDENTIAL_TRUST_MAP, never caller-supplied) is
+            # forwarded to inbox_ingest.py's own --trust flag so its
+            # ownership check (own it, or it doesn't exist on main yet) is
+            # enforced there — this was previously computed here and
+            # discarded, which was the root cause of a cloud credential being
+            # able to overwrite/delete any item regardless of ownership.
             r = subprocess.run(
-                [sys.executable, script, provider, tmp_path, "--brain-dir", brain_dir],
+                [sys.executable, script, provider, tmp_path, "--brain-dir", brain_dir,
+                 "--trust", trust],
                 capture_output=True, text=True, timeout=30,
             )
         except subprocess.TimeoutExpired:
@@ -471,31 +504,32 @@ def tool_loreport_view_memory_settings(brain_dir, trust):
 def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, provider):
     if visibility not in ("shared", "local"):
         return {"error": "visibility must be 'shared' or 'local'"}
-    try:
-        relpath, _typ, text = _locate_item_on_main(brain_dir, name)
-    except GitTimeout:
-        return {"status": "quarantined", "detail": "git timeout"}
-    if relpath is None:
-        return {"error": "not found"}
-    source = _parse_frontmatter_scalars(text).get("source")
-
-    if trust == "local":
-        pass  # a local-trust caller may change any item
-    elif trust == "cloud" and provider is not None and source == provider:
-        pass  # a cloud-trust caller may change only the items it authored
-    else:
-        return {"error": "not permitted: a cloud caller may only change memories it authored"}
-
-    new_text = _set_visibility_field(text, visibility)
-    path = os.path.join(brain_dir, relpath)
 
     try:
-        # The checkout-main+edit+commit sequence is its own git write against
-        # the shared working tree — same exclusive lock as inbox_ingest.py's
-        # capture and brain_merge.py's merge, so none of the three can ever
-        # interleave (Phase E; this tool previously did its git write
-        # unlocked).
+        # The read (_locate_item_on_main), the ownership check derived from
+        # it, and the checkout-main+edit+commit write are ALL inside the same
+        # exclusive lock — same one inbox_ingest.py's capture and
+        # brain_merge.py's merge use — so a concurrent merge can never land
+        # between the read and the write (TOCTOU: previously the read
+        # happened before the lock was taken, so a merge racing in between
+        # could be silently clobbered by a write derived from stale content
+        # even though the tool reported success).
         with brain_lock(brain_dir):
+            relpath, _typ, text = _locate_item_on_main(brain_dir, name)
+            if relpath is None:
+                return {"error": "not found"}
+            source = _parse_frontmatter_scalars(text).get("source")
+
+            if trust == "local":
+                pass  # a local-trust caller may change any item
+            elif trust == "cloud" and provider is not None and source == provider:
+                pass  # a cloud-trust caller may change only the items it authored
+            else:
+                return {"error": "not permitted: a cloud caller may only change memories it authored"}
+
+            new_text = _set_visibility_field(text, visibility)
+            path = os.path.join(brain_dir, relpath)
+
             _run_git(brain_dir, "checkout", "main")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(new_text)
@@ -521,7 +555,7 @@ def dispatch(brain_dir, credential, name, arguments):
         if provider_from_credential is None:
             return {"status": "quarantined",
                     "detail": "no recognized credential; refusing to route capture"}
-        return tool_loreport_save_memory(brain_dir, provider_from_credential, arguments.get("block", ""))
+        return tool_loreport_save_memory(brain_dir, provider_from_credential, arguments.get("block", ""), trust)
     if name == "loreport_read_memory":
         return tool_loreport_read_memory(brain_dir, arguments.get("name", ""), trust)
     if name == "loreport_search_memories":

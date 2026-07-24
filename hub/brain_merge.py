@@ -4,12 +4,21 @@ hub/brain_merge.py — Loreport daily reconciliation (design.md §D14, modules.m
 
 Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
 
-  1. Backup   — tag `main` (`pre-merge/<date>`), the rollback point.
+  1. Backup   — tag `main` (`pre-merge/<date>-<HHMMSS>[-N]`, unique per run, never
+                force-moved), the rollback point.
   2. Fetch    — pull all provider branches.
   3. Merge    — into `main`, fixed order: provider/openclaw -> provider/claude ->
                 provider/chatgpt. INDEX.md is excluded from every merge (deleted from
                 the working tree before each merge, regenerated in step 6 — it is a
                 derived artifact and must never be hand-merged).
+  3b. Provenance gate — for every provider-branch commit not yet on main whose
+      commit message lacks a trusted `Trust: local` trailer (i.e. `Trust: cloud`,
+      or no `Trust:` trailer at all — fail closed, catching a direct `git push`
+      that bypassed `inbox_ingest.py`), any touched `memories/`/`knowledge/` path
+      that main already owns as `visibility: local` or under a different
+      `source:` is reverted to its pre-merge content in a follow-up commit and
+      recorded as a violation. One bad path never aborts the whole merge — every
+      other change still lands.
   4. Consolidation-lite — mechanical exact/near-duplicate-key flagging (fuzzy
      semantic dedup is left to `prompts/consolidate.md`, run by a human-in-the-loop).
   5. Secret-scrub gate — fail-closed for anything egress-critical: a hit in a SHARED
@@ -21,6 +30,9 @@ Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
      there).
   6. INDEX rebuild — deterministic: same input item set -> same INDEX.md bytes, always.
   7. Fast-forward each provider branch to the new `main`.
+
+Exit code is nonzero whenever a human should look: PROFILE conflicts, add/add
+renames, secret-scrub warnings, or provenance-gate violations.
 
 CLI:
     python3 hub/brain_merge.py [--brain-dir PATH] [--test-determinism] [--dry-run]
@@ -115,6 +127,31 @@ def parse_frontmatter(text):
 def read_file(path):
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         return fh.read()
+
+
+def _visibility_from_text(text):
+    """Return "shared" or "local" for an item's raw text.
+
+    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
+    as `local`. A false `local` merely hides an item from cloud providers --
+    visible and recoverable. A false `shared` leaks it -- neither.
+    """
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "local"
+    seen = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().lower() != "visibility":
+            continue
+        seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
+    if seen is None:
+        return "shared"
+    return "shared" if seen == "shared" else "local"
 
 
 # --- deterministic INDEX rebuild --------------------------------------------
@@ -249,11 +286,17 @@ def scan_brain_for_secrets(brain_dir):
     """Scan the merged-but-not-yet-committed tree for secret-shaped hits, split
     into two buckets (REVIEW.md P3 #17/egress-scope fix):
 
-      - fail_closed: a hit in a SHARED item (visibility != local, including the
-        no-frontmatter/absent-field default), in `skills/` (no visibility
-        frontmatter exists for skills, so they're always egress-critical), or
-        in PROFILE.md -> cloud egress must stay strictly gated. The FIRST such
-        hit found is returned (same "abort on first hit" contract as before).
+      - fail_closed: a hit in a SHARED item (per `_visibility_from_text`: an
+        explicit `visibility: shared`, or well-formed frontmatter with no
+        `visibility:` key at all — the documented absent-field default), in
+        `skills/` (no visibility frontmatter exists for skills, so they're
+        always egress-critical), or in PROFILE.md -> cloud egress must stay
+        strictly gated. The FIRST such hit found is returned (same "abort on
+        first hit" contract as before). An item with NO parseable frontmatter
+        at all classifies as `local` (fail-closed toward hiding, not leaking —
+        see `_visibility_from_text`'s docstring), so it lands in warnings
+        below rather than here; such an item is degenerate enough that
+        `build_index_bytes` already excludes it from INDEX/publish entirely.
       - warnings: a hit in a LOCAL-visibility item -> never aborts the merge.
         `local` items never reach a cloud provider (never-capture rule +
         the private backup are the real controls there; publish/read/search
@@ -285,8 +328,7 @@ def scan_brain_for_secrets(brain_dir):
             if not hit:
                 continue
             rel = os.path.join(sub, fname)
-            fm, _ = parse_frontmatter(text)
-            visibility = (fm or {}).get("visibility")
+            visibility = _visibility_from_text(text)
             if visibility == "local":
                 warnings.append((rel, mask(hit)))
             elif fail_closed is None:
@@ -333,11 +375,17 @@ def write_digest(brain_dir, today, report):
     report artifact, not brain content, and must survive an abort's
     `git reset --hard` untouched."""
     lines = [f"# Hub digest — {today}", ""]
+    lines.append(f"- Backup tag: {report.get('backup_tag') or 'none'}")
     lines.append(f"- Merged: {', '.join(report['merged']) if report['merged'] else 'none'} -> main")
     lines.append(f"- Renamed (add/add conflicts): {report['renamed'] if report['renamed'] else 'none'}")
     lines.append(
         f"- PROFILE conflicts (human review required): "
         f"{report['profile_conflicts'] if report['profile_conflicts'] else 'none'}"
+    )
+    provenance_violations = report.get("provenance_violations") or []
+    lines.append(
+        f"- Provenance violations (untrusted commit touched a path it doesn't own, reverted): "
+        f"{provenance_violations if provenance_violations else 'none'}"
     )
     lines.append(f"- Near-dupes flagged: {report['near_dupes'] if report['near_dupes'] else 'none'}")
     lines.append(f"- Secret-scrub: {report['scrub']}")
@@ -449,7 +497,7 @@ def conflict_stages(brain_dir, path):
     return stages
 
 
-def resolve_conflicted_file(brain_dir, branch, f, report, today):
+def resolve_conflicted_file(brain_dir, branch, f, report, tag_name):
     """Classify and resolve one non-PROFILE/non-INDEX conflicted file from
     merging `branch` into main (REVIEW.md #7/F4):
 
@@ -472,7 +520,7 @@ def resolve_conflicted_file(brain_dir, branch, f, report, today):
         discarded = len(theirs_res.stdout.encode("utf-8")) if theirs_res.returncode == 0 else 0
         report["conflict_notes"].append(
             f"concurrent update on {f}: kept ours, discarded {discarded} bytes "
-            f"from {branch} (recover at pre-merge/{today})"
+            f"from {branch} (recover at {tag_name})"
         )
         git(brain_dir, "checkout", "--ours", "--", f, check=False)
         git(brain_dir, "add", f, check=False)
@@ -492,12 +540,14 @@ def resolve_conflicted_file(brain_dir, branch, f, report, today):
             git(brain_dir, "add", f, check=False)
     elif has_base and has_ours and not has_theirs:
         report["conflict_notes"].append(
-            f"modify/delete on {f}: {branch} deleted, ours modified -- deletion wins"
+            f"modify/delete on {f}: {branch} deleted, ours modified -- deletion wins "
+            f"(recover at {tag_name})"
         )
         git(brain_dir, "rm", "-f", f, check=False)
     elif has_base and has_theirs and not has_ours:
         report["conflict_notes"].append(
-            f"modify/delete on {f}: main deleted, {branch} modified -- deletion wins"
+            f"modify/delete on {f}: main deleted, {branch} modified -- deletion wins "
+            f"(recover at {tag_name})"
         )
         git(brain_dir, "rm", "-f", f, check=False)
     else:
@@ -536,6 +586,151 @@ def retag_name(content, new_rel):
     return "\n".join(lines) + "\n" + body
 
 
+# --- provenance gate (merge-side) -------------------------------------------
+#
+# Fixes: a cloud-credentialed provider branch could previously write (or
+# delete) ANY path by name -- including a `visibility: local` item it never
+# captured, or a `source:`-owned item belonging to a different provider -- and
+# an ordinary clean (non-conflicting) merge would take it with no check at
+# all. Scope: only `memories/` and `knowledge/` paths carry `source:` /
+# `visibility:` frontmatter per format-spec.md §1, so only those two
+# directories are gated here. `PROFILE.md` and `INDEX.md` are deliberately
+# excluded -- they carry no `source:`/`visibility:` concept, and
+# `_visibility_from_text` fails closed to "local" for text with no
+# frontmatter at all, which would misclassify them if fed through it (see
+# that function's docstring/caveat). `skills/` packages carry no item
+# frontmatter either (§6), so there is no `source:`/`visibility:` to check
+# there yet -- out of scope for this gate, same as it already is for the
+# secret-scrub's visibility split.
+
+ITEM_PROVENANCE_DIRS = ("memories/", "knowledge/")
+
+# Matches the "Trust: local" / "Trust: cloud" trailer inbox_ingest.py's
+# commit_block() writes into every capture commit message, same line-style as
+# the existing "Provider:" / "Action:" trailers.
+TRUST_TRAILER_RE = re.compile(r"(?m)^Trust:\s*(.*?)\s*$")
+
+
+def _branch_provider_name(branch):
+    """`provider/chatgpt` -> `chatgpt`. Falls back to the whole string for an
+    unexpected branch name rather than raising."""
+    return branch.split("/", 1)[1] if "/" in branch else branch
+
+
+def _commit_trust(message):
+    """Return the lowercased `Trust:` trailer value from a commit message, or
+    None if the trailer is absent or unparseable. Deliberately does NOT
+    default to a trust level -- the caller treats None as untrusted (fail
+    closed), which is what catches a commit that bypassed
+    inbox_ingest.py's commit_block() entirely (e.g. a direct `git push`)."""
+    m = TRUST_TRAILER_RE.search(message)
+    if not m:
+        return None
+    return m.group(1).strip().lower()
+
+
+def _read_ref_path(brain_dir, ref, path):
+    """Return the text content of `path` at git ref `ref`, or None if the
+    path does not exist there. Any other git failure (timeout, corrupt repo)
+    propagates as an exception via `git()`, same fail-closed contract as the
+    rest of this file's plumbing -- a provenance check that can't actually
+    read the prior state must never be silently treated as "no prior state"."""
+    r = git(brain_dir, "show", f"{ref}:{path}", check=False)
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def collect_provenance_violations(brain_dir, orig_head, pre_merge_shas):
+    """Enumerate every commit on each provider branch not yet on `main` (as of
+    `orig_head`, i.e. before this run's merges) and flag any UNTRUSTED
+    commit's touched `memories/`/`knowledge/` path that main already owns
+    under a different provider or as `visibility: local`.
+
+    UNTRUSTED = the commit's `Trust:` trailer says `cloud`, or is missing
+    entirely (fail closed).
+
+    A touched path is a VIOLATION when the `orig_head` version of that path
+    has `visibility: local` (via `_visibility_from_text`), OR has a
+    `source:` that is not this branch's own provider name (including a
+    missing `source:` field, fail closed). A path that did not exist at
+    `orig_head` is always allowed -- new-item creation is never a violation.
+
+    Returns a list of (path, branch, sha, reason) tuples, one per violating
+    path (first offending commit wins per path -- remediation is the same
+    "restore to orig_head" regardless of how many untrusted commits touched
+    it).
+    """
+    violations = {}
+    for branch in PROVIDER_ORDER:
+        if branch not in pre_merge_shas:
+            continue
+        provider = _branch_provider_name(branch)
+        log = git(brain_dir, "log", "--format=%H", f"{orig_head}..{pre_merge_shas[branch]}", check=False)
+        shas = [line for line in log.stdout.splitlines() if line]
+        for sha in shas:
+            msg = git(brain_dir, "log", "-1", "--format=%B", sha, check=False).stdout
+            trust = _commit_trust(msg)
+            if trust == "local":
+                continue  # trusted capture -- no provenance check needed
+
+            paths_r = git(brain_dir, "show", "--name-only", "--format=", sha, check=False)
+            for path in paths_r.stdout.splitlines():
+                if not path or not path.startswith(ITEM_PROVENANCE_DIRS):
+                    continue
+                if path in violations:
+                    continue  # already flagged via an earlier untrusted commit
+                prior = _read_ref_path(brain_dir, orig_head, path)
+                if prior is None:
+                    continue  # new path at orig_head -- always allowed
+
+                visibility = _visibility_from_text(prior)
+                fm, _ = parse_frontmatter(prior)
+                source = fm.get("source") if fm else None
+
+                if visibility == "local":
+                    reason = (
+                        f"{path}: visibility:local item touched by untrusted commit "
+                        f"{sha[:8]} on {branch} (Trust={trust or 'MISSING'})"
+                    )
+                elif source != provider:
+                    reason = (
+                        f"{path}: source:{source or 'MISSING'} item touched by untrusted "
+                        f"commit {sha[:8]} on {branch} claiming provider={provider} "
+                        f"(Trust={trust or 'MISSING'})"
+                    )
+                else:
+                    continue  # untrusted commit, but it's this path's own provider
+                              # touching its own shared item -- not a violation
+
+                violations[path] = (branch, sha, reason)
+    return [(path, branch, sha, reason) for path, (branch, sha, reason) in violations.items()]
+
+
+def apply_provenance_restore(brain_dir, orig_head, violations, report):
+    """Revert every violating path (from `collect_provenance_violations`) to
+    its `orig_head` content and make one follow-up commit describing what was
+    reverted. Never aborts the merge -- rejects only the individual
+    offending paths, everything else that already landed stays landed."""
+    if not violations:
+        return
+    for path, _branch, _sha, reason in violations:
+        prior = _read_ref_path(brain_dir, orig_head, path)
+        if prior is None:
+            # Defensive only -- collect_provenance_violations() never flags a
+            # path that didn't already exist at orig_head.
+            git(brain_dir, "rm", "-f", "--quiet", path, check=False)
+        else:
+            git(brain_dir, "checkout", orig_head, "--", path, check=False)
+            git(brain_dir, "add", path, check=False)
+        report["provenance_violations"].append(reason)
+
+    if has_staged_changes(brain_dir):
+        msg_lines = ["brain(merge): revert provenance-gate violations", ""]
+        msg_lines.extend(f"- {reason}" for _p, _b, _s, reason in violations)
+        git(brain_dir, "commit", "-m", "\n".join(msg_lines), check=False)
+
+
 # --- the merge ----------------------------------------------------------------
 
 def do_merge(brain_dir, dry_run):
@@ -551,6 +746,8 @@ def do_merge(brain_dir, dry_run):
         "fast_forwarded": [],
         "ff_skipped": [],
         "conflict_notes": [],
+        "provenance_violations": [],
+        "backup_tag": None,
     }
 
     # The whole mutating sequence — including the --dry-run branch, which
@@ -560,9 +757,34 @@ def do_merge(brain_dir, dry_run):
     with brain_lock(brain_dir):
         git(brain_dir, "checkout", "main")
         orig_head = git(brain_dir, "rev-parse", "HEAD").stdout.strip()
-        tag_name = f"pre-merge/{today}"
+
+        # Unique-per-run, never force-moved (bug fix: the old `-f` tag was
+        # silently re-pointed on every run, so "recover at pre-merge/<date>"
+        # stopped being true after a second run the same day). Sortable by
+        # construction (date then time); on the vanishingly unlikely chance
+        # two runs start in the same second, `git tag` (no `-f`) refuses the
+        # collision and the loop below picks the next free `-N` suffix rather
+        # than silently overwriting the earlier run's backup.
+        tag_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        tag_name = f"pre-merge/{tag_stamp}"
         if not dry_run:
-            git(brain_dir, "tag", "-f", tag_name, check=False)
+            attempt = 0
+            while True:
+                candidate = tag_name if attempt == 0 else f"{tag_name}-{attempt}"
+                tag_res = git(brain_dir, "tag", candidate, check=False)
+                if tag_res.returncode == 0:
+                    tag_name = candidate
+                    break
+                attempt += 1
+                if attempt > 1000:
+                    # Not a same-second collision -- something is actually
+                    # wrong (permissions, disk, corrupt refs). Fail loudly
+                    # rather than spin forever or silently skip the backup.
+                    raise RuntimeError(
+                        f"could not create backup tag {tag_name!r} after "
+                        f"{attempt} attempts: {tag_res.stderr.strip()}"
+                    )
+            report["backup_tag"] = tag_name
         git(brain_dir, "fetch", "--all", check=False)
 
         # Compare-and-swap fast-forward (REVIEW.md #3/#5): record each
@@ -576,6 +798,14 @@ def do_merge(brain_dir, dry_run):
         for branch in PROVIDER_ORDER:
             if branch_exists(brain_dir, branch):
                 pre_merge_shas[branch] = git(brain_dir, "rev-parse", branch).stdout.strip()
+
+        # Provenance gate (bug fix): figure out, from each provider branch's
+        # not-yet-on-main commits and their Trust: trailers, which
+        # memories/knowledge paths an untrusted commit is not allowed to have
+        # touched. Computed here (read-only, before any merging) against the
+        # fixed `orig_head`/`pre_merge_shas` baseline so it's unaffected by
+        # whatever order the branches get merged in below.
+        provenance_violations = collect_provenance_violations(brain_dir, orig_head, pre_merge_shas)
 
         try:
             # INDEX.md is never a merge input: remove it once, up front, as
@@ -625,11 +855,17 @@ def do_merge(brain_dir, dry_run):
                         elif base == "INDEX.md":
                             git(brain_dir, "rm", "-f", f, check=False)
                         else:
-                            resolve_conflicted_file(brain_dir, branch, f, report, today)
+                            resolve_conflicted_file(brain_dir, branch, f, report, tag_name)
 
                 if has_staged_changes(brain_dir) or merge_in_progress(brain_dir):
                     git(brain_dir, "commit", "--no-edit", "-m", f"brain(merge): {branch} -> main", check=False)
                 report["merged"].append(branch)
+
+            # Provenance gate: revert any path an untrusted commit touched
+            # that main didn't already own (visibility:local, or a different
+            # provider's source:). Rejects only the offending paths -- every
+            # other change from this run stays merged.
+            apply_provenance_restore(brain_dir, orig_head, provenance_violations, report)
 
             # Consolidation-lite: mechanical dedup flags only (semantics -> consolidate.md).
             report["near_dupes"] = find_dupes(brain_dir)
@@ -701,16 +937,23 @@ def do_merge(brain_dir, dry_run):
     write_digest(brain_dir, today, report)
 
     # Nonzero exit whenever something needs a human's attention (REVIEW.md
-    # #15): PROFILE conflicts, add/add renames, or scrub warnings. This runs
-    # AFTER the lock is released and outside the try/except above -- it's a
-    # reporting decision on an already-successful merge, never confused with
-    # the fail-closed abort path (which exits 1 from inside the lock, above).
-    if report["profile_conflicts"] or report["renamed"] or report["scrub_warnings"]:
+    # #15): PROFILE conflicts, add/add renames, scrub warnings, or
+    # provenance-gate violations. This runs AFTER the lock is released and
+    # outside the try/except above -- it's a reporting decision on an
+    # already-successful merge, never confused with the fail-closed abort
+    # path (which exits 1 from inside the lock, above).
+    if (
+        report["profile_conflicts"]
+        or report["renamed"]
+        or report["scrub_warnings"]
+        or report["provenance_violations"]
+    ):
         sys.exit(1)
 
 
 def print_report(today, r):
     print(f"=== brain_merge report {today} ===")
+    print(f"Backup tag: {r.get('backup_tag') or 'none (--dry-run)'}")
     print(f"Merged: {', '.join(r['merged']) if r['merged'] else 'none'} -> main")
     print(f"Conflicts renamed: {r['renamed'] if r['renamed'] else 'none'}")
     print(f"PROFILE conflicts (human review required): {r['profile_conflicts'] if r['profile_conflicts'] else 'none'}")
@@ -718,6 +961,10 @@ def print_report(today, r):
         print("Conflict notes:")
         for note in r["conflict_notes"]:
             print(f"  - {note}")
+    if r.get("provenance_violations"):
+        print(f"Provenance violations (untrusted commit touched a path it doesn't own, reverted): {r['provenance_violations']}")
+    else:
+        print("Provenance violations: none")
     print(f"Near-dupes flagged: {r['near_dupes'] if r['near_dupes'] else 'none'}")
     print(f"Secret-scrub: {r['scrub']}")
     if r.get("scrub_warnings"):

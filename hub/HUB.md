@@ -3,7 +3,7 @@
 You are running the Loreport sync hub — the always-on custodian of the
 canonical brain repo. Every provider surface writes only its own branch
 (`provider/chatgpt`, `provider/claude`, `provider/openclaw`); you are the only writer
-of `main`. Live captures usually arrive through `hub/mcp_server.py`'s `brain_capture`
+of `main`. Live captures usually arrive through `hub/mcp_server.py`'s `loreport_save_memory`
 tool, which itself calls the same `inbox_ingest.py` gate described below — one gate,
 whether the capture came from a paste or a connector. This file is your prose: it tells you *when* to run each ritual and *why*
 the order matters. Every mechanical step below delegates to a Python tool — you never
@@ -55,8 +55,10 @@ links).
 Run once a day (see `hub/config/cron.txt` for the schedule):
 
 1. **Backup tag first, always.** Before anything destructive happens, `brain_merge.py`
-   tags `main` as `pre-merge/<date>`. Every step after this one can be undone by
-   returning to that tag — never skip it, never reorder it later.
+   tags `main` as `pre-merge/<YYYYMMDD-HHMMSS>` — one tag per run, created without
+   `-f` so a rerun can never clobber an earlier run's recovery point. The run's report
+   and digest print the tag it actually created; use that name. Every step after this
+   one can be undone by returning to that tag — never skip it, never reorder it later.
 2. **Fetch** all provider branches.
 3. **Merge into `main` in the fixed order: `openclaw` → `claude` → `chatgpt`.** The
    order is fixed, not timestamp-based, so a conflict outcome is the same every time
@@ -99,7 +101,7 @@ If a merge went wrong — a bad scrub-abort recovery, a conflict resolved badly,
 report that doesn't look right — reset to the day's backup tag and start over:
 
 ```
-git reset --hard pre-merge/<date>
+git reset --hard pre-merge/<the tag from that run's report>
 git push --force-with-lease origin main
 ```
 

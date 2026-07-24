@@ -20,14 +20,26 @@ Validation pipeline:
      line), not just the body, so an injection hidden in e.g. the description
      field is still caught. When in doubt this scan PASSes — the secret scan
      above is the fail-closed gate; this is a lighter guard.
-  5. Commit   — on pass: checkout provider/<name>, write the file, commit with
-                structured metadata.
-  6. Quarantine — on any failure: copy to hub/quarantine/<provider>/<date>-<file>,
+  5. Ownership  — for a `cloud`-trust caller only (a `local`-trust caller is
+     unrestricted — the cross-provider reconcile flow depends on this): may
+     always CREATE a path that doesn't exist on `main`; may NOT update or
+     delete a path whose version ON MAIN has `visibility: local`, or whose
+     `source:` is a provider other than the caller's own. Read from `main`
+     server-side via git — never from the caller-submitted body, which is
+     unvalidated. Any refusal -> quarantine, never a silent drop.
+  6. Commit   — on pass: checkout provider/<name>, write the file, commit with
+                structured metadata (including a `Trust:` trailer consumed by
+                brain_merge.py's merge-side gate; a missing trailer is treated
+                as `cloud`, fail closed).
+  7. Quarantine — on any failure: copy to hub/quarantine/<provider>/<date>-<file>,
                   append a digest entry, exit nonzero. Never commit to any branch.
 
 CLI:
-    python3 hub/inbox_ingest.py <provider> <block-file> [--brain-dir PATH]
+    python3 hub/inbox_ingest.py <provider> <block-file> [--brain-dir PATH] [--trust local|cloud]
     # provider: one of "chatgpt", "claude", "openclaw"
+    # --trust: trust tier of the calling credential; defaults to "cloud" if
+    #          omitted (fail closed — an omitted trust must never be treated
+    #          as the unrestricted "local" tier).
 """
 
 import argparse
@@ -217,6 +229,31 @@ def validate_schema(block):
     return None
 
 
+def _visibility_from_text(text):
+    """Return "shared" or "local" for an item's raw text.
+
+    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
+    as `local`. A false `local` merely hides an item from cloud providers --
+    visible and recoverable. A false `shared` leaks it -- neither.
+    """
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "local"
+    seen = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().lower() != "visibility":
+            continue
+        seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
+    if seen is None:
+        return "shared"
+    return "shared" if seen == "shared" else "local"
+
+
 def scan_secrets(text):
     for pat in SECRET_PATTERNS:
         m = re.search(pat, text)
@@ -255,6 +292,58 @@ def git(brain_dir, *args, check=True, timeout=30):
     if check and result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result
+
+
+class OwnershipError(RuntimeError):
+    """Raised when a cloud-trust caller attempts to write a path whose CURRENT
+    version on `main` it does not own (wrong `source:`) or that is
+    `visibility: local`. Never raised for a local-trust caller (unrestricted)
+    or for a path that doesn't exist on `main` yet (create, always allowed)."""
+
+
+def _read_from_main(brain_dir, relpath):
+    """Return `relpath`'s content as committed on `main`, or None if it
+    doesn't exist there. Reads via `git show main:<path>` — NEVER the
+    caller-submitted block body (unvalidated: a caller can submit any
+    `source:`/`visibility:` it likes) and never the working tree (which may
+    be parked on any provider/* branch mid-capture)."""
+    r = git(brain_dir, "show", f"main:{relpath}", check=False)
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def check_ownership(brain_dir, provider, trust, rel_path):
+    """Enforce per-credential trust for a write (update or delete) to
+    `rel_path`. Returns None if the write is allowed, else a human-readable
+    refusal reason.
+
+    - `local`-trust: unrestricted (the cross-provider reconcile flow — Claude
+      Code updating an item captured by another provider — depends on this).
+    - `cloud`-trust: may always CREATE a path with no version on `main` yet.
+      May NOT update/delete a path whose `main` version is `visibility:
+      local`, or whose `source:` is a provider other than its own. Visibility
+      is decided via the same fail-closed parser as the read path
+      (_visibility_from_text) so a hand-edited/malformed `visibility: local`
+      field can't be used to bypass this check the way it could bypass a
+      naive `== "local"` string compare.
+    """
+    if trust == "local":
+        return None
+    main_text = _read_from_main(brain_dir, rel_path)
+    if main_text is None:
+        return None  # nothing on main yet -> CREATE, always allowed
+    main_visibility = _visibility_from_text(main_text)
+    fm, _rest = parse_frontmatter(main_text)
+    main_source = (fm or {}).get("source")
+    if main_visibility == "local":
+        return (f"cloud-trust caller (provider={provider}) may not update/delete "
+                f"'{rel_path}': its main version is visibility: local")
+    if main_source != provider:
+        return (f"cloud-trust caller (provider={provider}) may not update/delete "
+                f"'{rel_path}': its main version has source: {main_source!r}, not "
+                f"'{provider}'")
+    return None
 
 
 # One repo-wide lock, shared with brain_merge.py (same relative path), so a
@@ -324,23 +413,31 @@ def quarantine(brain_dir, provider, block_file, reason, detail):
     print(f"Quarantine file: {dest}")
 
 
-def commit_block(brain_dir, provider, block):
+def commit_block(brain_dir, provider, block, trust):
     """Commit `block` to provider/<provider>. Returns "committed" or
     "skipped: no change" (identical content re-captured — not a failure).
+    Raises OwnershipError (never touching the working tree) if `trust` is
+    "cloud" and the write fails the ownership check against `main`.
 
     Wrapped in an exclusive repo lock (REVIEW.md #5) so this can never
-    interleave with brain_merge.py's git mutations. On ANY git failure
-    (including a timeout raised by git()) the working tree is restored to
-    clean (`git checkout -- .` + `git reset`) before the exception
-    propagates, so a failed capture never poisons the next capture or the
-    nightly merge with a half-staged change (REVIEW.md #13). Either way, the
-    branch is restored to `main` on exit so the shared working tree is never
-    left parked on a provider branch (REVIEW.md #3 partial)."""
+    interleave with brain_merge.py's git mutations — the ownership check
+    itself also runs inside this lock, so it can't race a concurrent merge
+    that changes what's on `main` between the check and the write. On ANY
+    git failure (including a timeout raised by git()) the working tree is
+    restored to clean (`git checkout -- .` + `git reset`) before the
+    exception propagates, so a failed capture never poisons the next capture
+    or the nightly merge with a half-staged change (REVIEW.md #13). Either
+    way, the branch is restored to `main` on exit so the shared working tree
+    is never left parked on a provider branch (REVIEW.md #3 partial)."""
     with brain_lock(brain_dir):
+        rel_path = block["file"]
+        denial = check_ownership(brain_dir, provider, trust, rel_path)
+        if denial:
+            raise OwnershipError(denial)
+
         branch = f"provider/{provider}"
         try:
             git(brain_dir, "checkout", branch)
-            rel_path = block["file"]
             abs_path = os.path.join(brain_dir, rel_path)
 
             if block["action"] == "delete":
@@ -365,6 +462,7 @@ def commit_block(brain_dir, provider, block):
             msg = (
                 f"brain(capture): {name} via {provider} [inbox]\n\n"
                 f"Provider: {provider}\n"
+                f"Trust: {trust}\n"
                 f"Action: {block['action']}\n"
                 f"File: {rel_path}\n"
                 f"Ingested-At: {ts}\n"
@@ -396,6 +494,10 @@ def main():
     parser.add_argument("block_file")
     parser.add_argument("--brain-dir", default=None,
                          help="Brain repo root (default: inferred from this script's location)")
+    parser.add_argument("--trust", choices=("local", "cloud"), default="cloud",
+                         help="Trust tier of the calling credential (docs/visibility-design.md). "
+                              "Defaults to 'cloud' if omitted -- fail closed, never silently "
+                              "grant the unrestricted 'local' tier.")
     args = parser.parse_args()
 
     brain_dir = args.brain_dir or default_brain_dir()
@@ -427,7 +529,10 @@ def main():
         sys.exit(1)
 
     try:
-        result = commit_block(brain_dir, args.provider, block)
+        result = commit_block(brain_dir, args.provider, block, args.trust)
+    except OwnershipError as e:
+        quarantine(brain_dir, args.provider, args.block_file, "ownership-denied", str(e))
+        sys.exit(1)
     except Exception as e:
         quarantine(brain_dir, args.provider, args.block_file, "git-error", str(e))
         sys.exit(1)

@@ -117,6 +117,15 @@ skills/<name>/
 The prose core in `SKILL.md` alone is the skill; `assets/` is optional (graceful
 degradation). `meta.yaml` feeds tooling and the INDEX line.
 
+**The two `description` fields differ on purpose — do not "fix" them to match.**
+`SKILL.md`'s is a *dispatch trigger*: it tells a host when to invoke the skill, so it
+names the phrases a user might say and runs long. `meta.yaml`'s is a *catalog hook*: it
+becomes the one-line `INDEX.md` entry that sits in context every session, so it must stay
+short. Forcing them identical either bloats the always-loaded index or weakens skill
+triggering. What **must** agree is `name` — the directory name, `SKILL.md`'s `name:`, and
+`meta.yaml`'s `name:` are the same slug, because hosts resolve a skill by its directory
+and the INDEX links it by slug. `scripts/check-docs.sh` enforces that.
+
 **Ingest-skill norm:** any skill that reads third-party content must treat it as
 untrusted — store attributed claims, never instructions to the assistant. The reference
 implementation is `examples/brain/skills/distill-source-into-knowledge/`.

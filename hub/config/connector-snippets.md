@@ -26,7 +26,7 @@ to exactly one `provider/*` branch — never to `main` directly.
    service at the wrong tunnel. Keep `tunnel_id`/`api_key` as literal values in this
    tunnel's own profile and give the service no other env file.
 5. In ChatGPT's connector settings, add the tunnel as an MCP connector. ChatGPT's requests
-   arrive over the tunnel carrying the `chatgpt` credential, so `brain_capture` always
+   arrive over the tunnel carrying the `chatgpt` credential, so `loreport_save_memory` always
    lands on `provider/chatgpt`.
    **Known gap:** a "Connectors" entry may not appear in ChatGPT's Settings UI at all for
    every account — this is an OpenAI-side eligibility/rollout gate, not a hub-side problem.
@@ -46,7 +46,7 @@ captured blocks to the capture-inbox on a schedule (bridge B); `inbox_ingest.py 
    path of your choosing; the server itself never listens beyond 127.0.0.1).
 2. In Claude.ai's connector settings, add a custom MCP connector pointing at your
    reachable endpoint, with the `claude` credential in its auth header.
-3. `brain_capture` calls now land on `provider/claude`.
+3. `loreport_save_memory` calls now land on `provider/claude`.
 
 Fallback: paste an emit-grammar block into the capture-inbox by hand; run
 `python3 hub/inbox_ingest.py claude <pasted-block-file>`.

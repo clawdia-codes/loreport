@@ -50,6 +50,74 @@ if not tmpl.exists():
 elif canon not in tmpl.read_text():
     bad.append("brain-template/prompts/bootstrap.md DRIFTED from prompts/bootstrap.md")
 
+# --- 2b. skill name agreement --------------------------------------------------
+# A host resolves a skill by its DIRECTORY name; the INDEX links it by slug. If the
+# directory, SKILL.md's `name:` and meta.yaml's `name:` disagree, the skill silently
+# fails to resolve. (The two `description` fields are deliberately different — a
+# dispatch trigger vs a one-line catalog hook; see docs/format-spec.md. Not checked.)
+import re as _re
+for skill_dir in sorted(root.glob("*/*/skills/*/")) + sorted(root.glob("*/skills/*/")):
+    if not (skill_dir / "SKILL.md").exists():
+        continue
+    slug = skill_dir.name
+    def _name_of(p):
+        if not p.exists():
+            return None
+        m = _re.search(r'^name:\s*(\S+)', p.read_text(), _re.M)
+        return m.group(1) if m else None
+    s_name = _name_of(skill_dir / "SKILL.md")
+    m_name = _name_of(skill_dir / "meta.yaml")
+    if s_name != slug:
+        bad.append(f"skill {skill_dir}: SKILL.md name '{s_name}' != directory '{slug}'")
+    if (skill_dir / "meta.yaml").exists() and m_name != slug:
+        bad.append(f"skill {skill_dir}: meta.yaml name '{m_name}' != directory '{slug}'")
+
+# --- 2c. duplicated security primitives across the single-file hub scripts -------
+# Each hub/*.py is deliberately standalone (no cross-imports) so it stays auditable
+# in one sitting, which means SECRET_PATTERNS and the visibility parser are copied.
+# Extracting them to shared config would fail OPEN if the config went missing, so the
+# duplication stays -- but drift between copies must not be silent. brain_merge.py is
+# canonical.
+def _block(path, start_marker, end_marker):
+    t = (root / path).read_text()
+    i = t.find(start_marker)
+    if i < 0:
+        return None
+    j = t.find(end_marker, i + len(start_marker))
+    return t[i:j] if j > 0 else None
+
+canon_pat = _block("hub/brain_merge.py", "SECRET_PATTERNS = [", "]")
+for other in ["hub/inbox_ingest.py", "hub/snapshot_publish.py"]:
+    if not (root / other).exists():
+        continue
+    if _block(other, "SECRET_PATTERNS = [", "]") != canon_pat:
+        bad.append(f"{other}: SECRET_PATTERNS DRIFTED from hub/brain_merge.py")
+
+def _func(path, signature):
+    """Extract exactly one top-level function body: from its `def` line until the
+    first non-blank line back at column 0. Do NOT delimit on the next `def` --
+    the following function differs per file, which produces false drift reports."""
+    lines = (root / path).read_text().splitlines()
+    try:
+        i = next(n for n, l in enumerate(lines) if l.startswith(signature))
+    except StopIteration:
+        return None
+    out = [lines[i]]
+    for l in lines[i + 1:]:
+        if l.strip() and not l[:1].isspace():
+            break
+        out.append(l)
+    return "\n".join(out).rstrip()
+
+SIG = "def _visibility_from_text(text):"
+canon_vis = _func("hub/brain_merge.py", SIG)
+if canon_vis is None:
+    bad.append("hub/brain_merge.py: _visibility_from_text not found (privacy parser missing?)")
+else:
+    for other in ["hub/mcp_server.py", "hub/snapshot_publish.py", "hub/inbox_ingest.py"]:
+        if _func(other, SIG) != canon_vis:
+            bad.append(f"{other}: _visibility_from_text DRIFTED from hub/brain_merge.py")
+
 # --- 3. relative links ---------------------------------------------------------
 for f in root.rglob("*.md"):
     if ".maestro" in str(f) or ".git/" in str(f):

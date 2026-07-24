@@ -6,14 +6,24 @@ hub/snapshot_publish.py — pinned-packet build + fail-closed egress scrub
 Single-file, Python-3-stdlib-only.
 
 Pipeline:
-  1. Build the packet — read from `main`: prompts/bootstrap.md + PROFILE.md +
-     INDEX.md, concatenated in that order, with a footer comment
-     `<!-- loreport packet: main@<short-commit-hash> <date> -->`.
+  1. Build the packet — read from `main` (via `git show main:<path>`, NEVER
+     the working tree, which the shared repo can have parked on any
+     provider/* branch at any moment — mid-capture, or between merges):
+     prompts/bootstrap.md + PROFILE.md + INDEX.md, concatenated in that
+     order, with a footer comment
+     `<!-- loreport packet: main@<short-commit-hash> <date> -->` stamped from
+     `main`'s own SHA (never `HEAD`, which may not be `main` at all). Refuses
+     to run (clear error, nonzero exit) if `main` cannot be resolved.
      The packet contains EXACTLY these three files, nothing else — no detail
      file bodies, ever. The INDEX.md portion is filtered: any line referencing
      a `visibility: local` item is dropped from the packet (the on-disk
      INDEX.md itself is untouched — only the published packet excludes local
-     items; docs/visibility-design.md §3).
+     items; docs/visibility-design.md §3). That per-item visibility lookup is
+     the ONLY place the fail-closed visibility parser (_visibility_from_text)
+     is applied — it is never applied to bootstrap.md/PROFILE.md/INDEX.md
+     themselves (none of which carry item frontmatter; running the parser on
+     them would silently empty the packet, since it treats "no `---`
+     frontmatter block" as `local`).
   2. Fail-closed egress scrub — the same secret-regex patterns as
      brain_merge.py, run over the assembled packet. Any hit blocks the ENTIRE
      republish (exit nonzero, alert to stdout, alert written to
@@ -62,9 +72,41 @@ def scan_secrets(text):
     return None
 
 
-def read_text(path):
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
+class MainUnresolvable(RuntimeError):
+    """Raised when `main` cannot be resolved in this repo at all — never
+    silently fall back to the working tree or HEAD in that case."""
+
+
+def _run_git(brain_dir, *args, timeout=30):
+    try:
+        return subprocess.run(
+            ["git", "-C", brain_dir] + list(args),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {' '.join(args)} timed out")
+
+
+def get_main_short_sha(brain_dir):
+    """Return `main`'s short commit SHA, or None if `main` can't be resolved
+    (not a git repo, or no such ref) — the caller must refuse to run rather
+    than silently stamping/building the packet from something else."""
+    r = _run_git(brain_dir, "rev-parse", "--short", "main")
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def read_from_main(brain_dir, relpath):
+    """Return `relpath`'s content as committed on `main`, or None if it
+    doesn't exist there. Reads via `git show main:<path>` — NEVER the working
+    tree, which the shared repo can have parked on any provider/* branch at
+    any moment (mid-capture, or between merges); mcp_server.py's
+    _read_from_main does the same for the same reason."""
+    r = _run_git(brain_dir, "show", f"main:{relpath}")
+    if r.returncode != 0:
+        return None
+    text = r.stdout
     if not text.endswith("\n"):
         text += "\n"
     return text
@@ -79,47 +121,56 @@ def read_text(path):
 INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
-def _parse_frontmatter_scalars(text):
+def _visibility_from_text(text):
+    """Return "shared" or "local" for an item's raw text.
+
+    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
+    as `local`. A false `local` merely hides an item from cloud providers --
+    visible and recoverable. A false `shared` leaks it -- neither.
+    """
+    if text.startswith("﻿"):
+        text = text[1:]
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return {}
-    result = {}
+        return "local"
+    seen = None
     for line in lines[1:]:
         if line.strip() == "---":
             break
-        if not line or line[0] in " \t-":
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().lower() != "visibility":
             continue
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        k, v = k.strip(), v.strip()
-        if v:
-            result[k] = v
-    return result
+        seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
+    if seen is None:
+        return "shared"
+    return "shared" if seen == "shared" else "local"
 
 
-def _locate_item_path(brain_dir, name):
-    for sub in ("memories", "knowledge"):
-        path = os.path.join(brain_dir, sub, f"{name}.md")
-        if os.path.isfile(path):
-            return path
-    skill_path = os.path.join(brain_dir, "skills", name, "SKILL.md")
-    if os.path.isfile(skill_path):
-        return skill_path
-    return None
+def _candidate_item_relpaths(name):
+    return (
+        f"memories/{name}.md",
+        f"knowledge/{name}.md",
+        f"skills/{name}/SKILL.md",
+    )
 
 
 def _item_visibility(brain_dir, name):
-    """Return "local" or "shared" for the named item (absent field, or an
-    unresolvable [[name]] reference, defaults to "shared" — never silently
-    drop a line the filter can't positively identify as local)."""
-    path = _locate_item_path(brain_dir, name)
-    if not path:
-        return "shared"
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
-    vis = _parse_frontmatter_scalars(text).get("visibility")
-    return vis if vis in ("shared", "local") else "shared"
+    """Return "local" or "shared" for the named brain item, read FROM MAIN
+    (never the working tree). An unresolvable [[name]] reference (no
+    memories/knowledge/skills path by that name exists on main) defaults to
+    "shared" — never silently drop an INDEX line the filter can't positively
+    identify as an item at all. Once a path DOES resolve, its visibility is
+    decided by _visibility_from_text, which fails CLOSED (treats anything it
+    can't parse as an explicit `shared` -- including no-frontmatter-at-all --
+    as `local`). This function is only ever called from filter_index_text on
+    resolved memories/knowledge/skills items; it is never applied to
+    bootstrap.md/PROFILE.md/INDEX.md, which carry no item frontmatter and
+    would otherwise be misclassified as local by the fail-closed parser."""
+    for relpath in _candidate_item_relpaths(name):
+        text = read_from_main(brain_dir, relpath)
+        if text is not None:
+            return _visibility_from_text(text)
+    return "shared"
 
 
 def filter_index_text(brain_dir, index_text):
@@ -136,34 +187,37 @@ def filter_index_text(brain_dir, index_text):
     return "".join(out_lines)
 
 
-def get_commit_hash(brain_dir):
-    try:
-        r = subprocess.run(["git", "-C", brain_dir, "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except OSError:
-        pass
-    return "unknown"
-
-
 def build_packet_text(brain_dir):
     """The §D1 operating surface, byte-for-byte: bootstrap + PROFILE + INDEX. Never
-    widened with detail-file bodies (memories/, knowledge/, skills/ are excluded)."""
-    bootstrap_path = os.path.join(brain_dir, "prompts", "bootstrap.md")
-    profile_path = os.path.join(brain_dir, "PROFILE.md")
-    index_path = os.path.join(brain_dir, "INDEX.md")
-    for p in (bootstrap_path, profile_path, index_path):
-        if not os.path.isfile(p):
-            raise FileNotFoundError(p)
+    widened with detail-file bodies (memories/, knowledge/, skills/ are excluded).
 
-    bootstrap = read_text(bootstrap_path)
-    profile = read_text(profile_path)
-    index = filter_index_text(brain_dir, read_text(index_path))
+    Everything is read from `main` via `git show main:<path>` (read_from_main),
+    never the working tree — the shared tree can be parked on any provider/*
+    branch at any moment, and building/stamping the packet from that would
+    silently publish an unmerged, un-scrubbed branch to every connected
+    provider. Refuses to run if `main` can't be resolved at all."""
+    main_sha = get_main_short_sha(brain_dir)
+    if main_sha is None:
+        raise MainUnresolvable(
+            "cannot resolve `main` in this repo (no such ref, or not a git repo) — "
+            "refusing to build a packet from an unknown/ambiguous source"
+        )
 
-    commit_hash = get_commit_hash(brain_dir)
+    bootstrap = read_from_main(brain_dir, "prompts/bootstrap.md")
+    profile = read_from_main(brain_dir, "PROFILE.md")
+    index_raw = read_from_main(brain_dir, "INDEX.md")
+    missing = [p for p, t in (
+        ("prompts/bootstrap.md", bootstrap),
+        ("PROFILE.md", profile),
+        ("INDEX.md", index_raw),
+    ) if t is None]
+    if missing:
+        raise FileNotFoundError(f"missing on main: {', '.join(missing)}")
+
+    index = filter_index_text(brain_dir, index_raw)
+
     today = date.today().isoformat()
-    footer = f"<!-- loreport packet: main@{commit_hash} {today} -->\n"
+    footer = f"<!-- loreport packet: main@{main_sha} {today} -->\n"
 
     return bootstrap + profile + index + footer
 
@@ -220,6 +274,9 @@ def run_test_scrub(brain_dir):
     except FileNotFoundError as e:
         print(f"ERROR: cannot build packet, missing file: {e}")
         sys.exit(1)
+    except MainUnresolvable as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     poisoned = packet + "\nInjected test credential: sk-FAKE-item5-scrubme-0000\n"
     hit = scan_secrets(poisoned)
@@ -254,6 +311,9 @@ def main():
         packet = build_packet_text(brain_dir)
     except FileNotFoundError as e:
         print(f"ERROR: cannot build packet, missing file: {e}")
+        sys.exit(1)
+    except MainUnresolvable as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
     hit = scan_secrets(packet)

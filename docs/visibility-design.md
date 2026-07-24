@@ -38,7 +38,7 @@ hardcoded across three scripts): `{name, token_env, trust, merge_order}` per pro
 
 - **`snapshot_publish.py`** — the published packet + its INDEX include only `shared` items.
   `local` items never appear in anything that a provider can pull.
-- **`brain_read` / `brain_search` / `brain_surface`** — become trust-aware:
+- **`loreport_read_memory` / `loreport_search_memories` / `loreport_load_context`** — become trust-aware:
   - trust=local caller → sees everything.
   - trust=cloud caller → `local` items are refused on read, omitted from search results,
     and absent from the surfaced packet. (INDEX on-disk still lists them for local hosts.)
@@ -79,13 +79,13 @@ to `local` for a capture that obviously touches an always-local topic.
 
 - New captures default `shared` unless sensitive-flagged (per §5) → `local`.
 - Existing brains with no `visibility:` field read as `shared` — no migration required, but
-  a one-shot `brain_set_visibility` pass (or hand-edit) can classify a pre-existing brain.
+  a one-shot `loreport_change_memory_settings` pass (or hand-edit) can classify a pre-existing brain.
 
 ## 7. Verification gates (objective, non-gameable)
 
 1. A `local` item is **unreadable** by a cloud-trust caller via read/search/surface, and
    **absent** from the published packet — but **readable** by a local-trust caller. (proves §3)
-2. A cloud caller's `brain_set_visibility` on an item it does **not** own is refused; on its
+2. A cloud caller's `loreport_change_memory_settings` on an item it does **not** own is refused; on its
    **own** item succeeds. (proves §4 gating)
 3. A shared item still round-trips end-to-end (capture→merge→publish→cloud read). (no regression)
 4. Onboarding run produces items carrying correct `visibility` per the always-local rules,
