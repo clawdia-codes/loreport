@@ -1,0 +1,8 @@
+name: loreport-ops
+description: Operate the Loreport brain — reconcile, sweep, status, search, settings
+triggers:
+  - "loreport"
+  - "reconcile my memories"
+  - "sweep"
+  - "brain status"
+  - "what's in my brain"

@@ -10,6 +10,7 @@
 - [[godot-export-pipeline]] — Godot 4 export pipeline for Windows/Mac/Linux builds  (knowledge)
 
 ## Skills
+- [[loreport-ops]] — operate the brain: reconcile, sweep, status, search, settings  (skill)
 - [[capture-parity]] — mirror every native-memory save into Loreport, recall native-first  (skill)
 - [[memory-reconcile]] — diff native memory against Loreport: skip matches, add missing, update changed  (skill)
 - [[distill-source-into-knowledge]] — turn any source into a permanent knowledge page  (skill)
