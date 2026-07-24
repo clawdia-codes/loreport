@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Assemble the operating surface into ONE file you can copy in a single action.
 #
-#   ./make-surface.sh          -> surface.md   SHARED items only — safe to paste anywhere
-#   ./make-surface.sh --all    -> surface.md   every item, including `local` ones
+#   ./make-surface.sh                    -> surface.md  SHARED items only — safe anywhere
+#   ./make-surface.sh --host ChatGPT     -> also fills the protocol's "Host:" blank, so
+#                                           captures are stamped with where they came from
+#   ./make-surface.sh --all              -> include `local` items (local hosts only)
 #
 # surface.md = the brain protocol + PROFILE.md + INDEX.md. That is the whole
 # always-loaded footprint; detail files stay on disk until something needs them.
@@ -16,7 +18,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 INCLUDE_LOCAL=0
-[ "${1:-}" = "--all" ] && INCLUDE_LOCAL=1
+HOST=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)  INCLUDE_LOCAL=1; shift ;;
+    --host) HOST="${2:-}"; [ -n "$HOST" ] || { echo "make-surface: --host needs a name" >&2; exit 1; }; shift 2 ;;
+    *)      echo "make-surface: unknown option '$1' (use --all, --host NAME)" >&2; exit 1 ;;
+  esac
+done
 
 # The protocol lives in the framework repo. If you copied this template out on its
 # own, drop a copy of prompts/bootstrap.md beside it, or set BOOTSTRAP=/path/to/it.
@@ -64,7 +73,19 @@ index_out=$(
 dropped=${index_out##*__DROPPED__}
 index_out=${index_out%__DROPPED__*}
 
-{ cat "$BOOTSTRAP"; echo; cat PROFILE.md; echo; printf '%s' "$index_out"; } > surface.md
+protocol=$(cat "$BOOTSTRAP")
+if [ -n "$HOST" ]; then
+  # The protocol carries a blank the capturing assistant stamps onto every item's
+  # `source:`. Left empty it files captures as "____", so fill it when we know.
+  protocol=$(printf '%s' "$protocol" | sed "s/set it here: \`____\`/set it here: \`$HOST\`/")
+fi
+
+{ printf '%s\n' "$protocol"; echo; cat PROFILE.md; echo; printf '%s' "$index_out"; } > surface.md
+
+if grep -q 'set it here: `____`' surface.md; then
+  echo "make-surface: NOTE the protocol's Host: blank is unfilled — captures will be" >&2
+  echo "make-surface:      stamped 'source: ____'. Re-run with --host \"ChatGPT\" (etc.)." >&2
+fi
 
 if [ "$INCLUDE_LOCAL" = "1" ]; then
   echo "make-surface: wrote surface.md ($(wc -c < surface.md) bytes) — INCLUDES local items."

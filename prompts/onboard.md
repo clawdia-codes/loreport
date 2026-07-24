@@ -115,6 +115,7 @@ Personalization → Custom Instructions · Claude: Project instructions or Setti
 Profile preferences · Gemini: Gem instructions · openclaw/Claude Code: the agent's
 `AGENTS.md`/`CLAUDE.md`) — this is what makes the rule survive into every future chat:
 
+<!-- spec-slice: standing-instruction v1 — verbatim copy; canonical text: docs/setup.md Step 3a -->
 ```
 Loreport is my portable memory brain, reachable via the loreport_* tools.
 - Whenever you save something to your own memory, ALSO save it to Loreport
@@ -125,6 +126,7 @@ Loreport is my portable memory brain, reachable via the loreport_* tools.
   (loreport_read_memory) and follow it.
 - When I say "sweep", check for anything durable from this chat not yet saved.
 ```
+<!-- /spec-slice -->
 
 Then tell me, in one line each: **re-run onboarding** any time by pasting `onboard.md`
 again (it dedupes — existing items come back as matches, not duplicates), and **re-run

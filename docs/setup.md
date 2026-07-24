@@ -30,18 +30,21 @@ brain/
 └── make-surface.sh    # builds the one file you paste (Step 2)
 ```
 
-**Easiest way to get that folder:** copy [`brain-template/`](../brain-template/) — it's the
-empty skeleton, `make-surface.sh` included. If you create the folders by hand instead, copy
-`brain-template/make-surface.sh` in as well; Step 2 needs it.
+**Easiest way to get that folder:** copy [`brain-template/`](../brain-template/) whole. It's
+the empty skeleton with `make-surface.sh` and the protocol already inside, so it works
+standalone. Doing it by hand instead is
+`mkdir -p brain/{memories,knowledge,skills,prompts}` plus copies of `make-surface.sh` and
+`prompts/bootstrap.md` — Step 2 needs both.
 
 A private git repo is the ideal home — you get history, backup, and sync for free. Add a
 `.gitignore` containing `surface.md`, since that file is generated and can contain private
 items.
 
-**Sensitive topics.** Onboarding asks which topics stay on your machine (health, finances,
-relationships, credentials, employer are the offered defaults). Those items get
-`visibility: local` and never reach a cloud provider. Everything else is `shared`. You can
-change any item's visibility later — see [`visibility-design.md`](visibility-design.md).
+**Sensitive topics.** Onboarding asks which topics stay on your machine, offering these
+five as defaults you can add to or remove from: **health, finances, relationships, credentials/security, employer**.
+Matching items get `visibility: local` and never reach a cloud provider; everything else is
+`shared`. You can change any item's visibility later — see
+[`visibility-design.md`](visibility-design.md).
 
 ---
 
@@ -56,9 +59,14 @@ the per-session cost flat as the brain grows.
 Assemble it into a single file so you only ever copy one thing:
 
 ```
-./make-surface.sh          # writes surface.md — shared items only, safe to paste anywhere
-./make-surface.sh --all    # includes local items — local hosts only, never a cloud chat
+./make-surface.sh --host "ChatGPT"    # shared items only — safe to paste anywhere
+./make-surface.sh --all               # include local items — local hosts only, never a cloud chat
 ```
+
+`--host` names the assistant you're about to paste into. The protocol carries a `Host:`
+blank that stamps every capture's `source:`, so another assistant can later tell where a
+memory came from; leave it out and captures get filed as `source: ____`. The script warns
+you when it's unfilled.
 
 The default withholds every `visibility: local` item from the catalog, and tells you how
 many it dropped. That default is the safe one on purpose: pasting is how the brain reaches
@@ -122,6 +130,7 @@ Two steps, not another interview.
 Paste this into the assistant's persistent instructions field. It is what makes the rule
 survive into every future chat:
 
+<!-- spec-slice: standing-instruction v1 — verbatim copy; canonical text: docs/setup.md Step 3a -->
 ```
 Loreport is my portable memory brain, reachable via the loreport_* tools.
 - Whenever you save something to your own memory, ALSO save it to Loreport
@@ -132,6 +141,7 @@ Loreport is my portable memory brain, reachable via the loreport_* tools.
   (loreport_read_memory) and follow it.
 - When I say "sweep", check for anything durable from this chat not yet saved.
 ```
+<!-- /spec-slice -->
 
 | Platform | Where it goes | What it can see |
 |---|---|---|
@@ -156,8 +166,24 @@ second run finds nothing, which is how you know the loop converged.
 first: they read the brain directly, so any problem shows up where it's cheapest to debug,
 before a cloud host and its trust wall are involved.
 
+| Platform | How to run it | Check it worked |
+|---|---|---|
+| **openclaw** | Say *"reconcile my memories"* — the `loreport-ops` skill is installed in `~/.openclaw/workspace/skills/`. It reads the brain from disk. | An item it added appears in `INDEX.md`. |
+| **Claude Code** | `/loreport reconcile`. Its native memory is a real file store (`~/.claude/projects/*/memory/`), so this is the one platform where the diff is exact rather than a model-recited dump. | `/loreport status` shows the new count. |
+| **ChatGPT** | **Connector must be live first** — check the MCP tunnel service is running, or reconcile silently has nothing to diff against. Then paste the standing instruction into Project instructions and say *"reconcile my memories"*. | It proposes adds/updates, and the wall holds (below). |
+| **Gemini / no connector** | Paste `surface.md` (or `hub/published/packet.md`) into the instructions field. Captures come back as `<MEMORY>` blocks you file by hand. | The blocks are well-formed and you can save them. |
+
 **Verify the wall on the first cloud host.** Ask ChatGPT something only a `local` memory
 could answer. It should come up empty. That is the privacy guarantee working, not a bug.
+
+**What "done" looks like across the round:**
+
+- Every platform carries the standing instruction.
+- Every platform has completed one reconcile, and a **second** reconcile there reports
+  ~all matches and no new adds — proof the loop converges instead of duplicating.
+- `local` items remain invisible to every cloud host.
+- A fact captured in one assistant is readable in another. That is the whole point.
+- If you run the hub: its sync completes clean and the backup is in sync.
 
 ### Native memory: two supported modes
 

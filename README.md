@@ -48,9 +48,10 @@ always-loaded. It grows one line per item, not one file per item.
 
 Every item carries a `visibility`: **`shared`** (the default) syncs to every connected
 provider; **`local`** never leaves your machine — excluded from the published packet, and
-refused outright to a cloud provider that asks for it. Health, finances, credentials,
-employer details, other people's private information: mark them `local` and they stay on
-your disk while remaining fully yours, backed up, and readable by your local agents.
+refused outright to a cloud provider that asks for it. Onboarding offers five always-local topics
+by default — **health, finances, relationships, credentials/security, employer** — and you can add your own.
+Those items stay on your disk while remaining fully yours, backed up, and readable by
+your local agents.
 
 Trust is per-credential, not per-product: a local host (an agent on your own machine) may
 read everything and relabel any item; a cloud host reads only `shared` items and may

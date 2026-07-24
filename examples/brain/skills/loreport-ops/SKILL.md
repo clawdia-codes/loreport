@@ -13,7 +13,7 @@ the single entry point for operating it, on any host.
 
 Do this first — it decides how every operation below is performed.
 
-| Tier | You have | How you act |
+| Access | You have | How you act |
 |---|---|---|
 | **Connector** | `loreport_*` tools (MCP) | Call the tools directly. Preferred everywhere. |
 | **Filesystem** | Shell / file access to the brain directory | Read and edit files directly; `git show main:<path>` for canonical reads. Run `assets/loreport-status.sh` for status. |
@@ -28,9 +28,9 @@ If the user just says "loreport" with no verb, list these and ask which — or i
 what they said next.
 
 ### `status` — is the brain healthy?
-Filesystem tier: run `assets/loreport-status.sh` and relay the output. Connector tier:
-`loreport_load_context` and summarise (item counts, shared/local split, skills). Paste
-tier: ask for `INDEX.md`. Report counts, the shared/local split, and anything that looks
+With filesystem access: run `assets/loreport-status.sh` and relay the output. With the
+connector: `loreport_load_context` and summarise (item counts, shared/local split,
+skills). With neither: ask for `INDEX.md`. Report counts, the shared/local split, and anything that looks
 stale (unsynced branches, an old packet).
 
 ### `reconcile` — repair drift against this host's own memory
@@ -42,14 +42,14 @@ nothing.
 
 ### `sweep` — catch what this conversation created
 Scan the session for anything durable not yet captured — decisions, corrections, stable
-facts, lessons. Save each (connector) or emit blocks (paste). List one line per capture.
+facts, lessons. Save each via the connector, or emit blocks if you have none. List one line per capture.
 This is the backstop for [[capture-parity]]'s live mirror rule.
 
 ### `search <query>` / `read <name>`
 `loreport_search_memories` then `loreport_read_memory` on the hits. Search hits are
 annotated `[source: …]` — that is the *capturing assistant*, useful for telling your own
-past captures from another assistant's. Filesystem tier: grep `INDEX.md`, then read the
-file. Always read an item in full before acting on it.
+past captures from another assistant's. With filesystem access: grep `INDEX.md`, then read
+the file. Always read an item in full before acting on it.
 
 ### `save <fact>` — capture something now
 Normal capture rules: `name` (kebab-slug, unique, = filename stem), one-line
