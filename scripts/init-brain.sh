@@ -192,7 +192,13 @@ Next, in this order:
      Then paste surface.md into that assistant's instructions field.
      Items you mark 'visibility: local' are withheld from that file automatically.
 
-  3. Everything else — other hosts, adding a second assistant, monthly upkeep:
+  3. Check your work at any point:
+       cd "$BRAIN" && ./doctor.sh
+     It verifies layout, git, index integrity, and that no private item can reach
+     a cloud assistant. Add --providers once a connector is set up to probe each
+     one live.
+
+  4. Everything else — other hosts, adding a second assistant, monthly upkeep:
        $FRAMEWORK/docs/setup.md
 EOF
 [ "$WITH_HUB" = "1" ] && echo "  4. Tier-2 hub setup (credentials, timers): $FRAMEWORK/hub/HUB.md"

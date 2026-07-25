@@ -29,6 +29,7 @@ upkeep — is in [`docs/setup.md`](../docs/setup.md).
 | `knowledge/` | One topic or reference page per file. |
 | `skills/` | One package per subdirectory (`SKILL.md` + `meta.yaml` + optional `assets/`). |
 | `make-surface.sh` | Assembles `surface.md` — the one file you paste (shared items only unless `--all`). |
+| `doctor.sh` | Self-test: layout, git, index integrity, and the privacy wall. Run it any time. |
 
 Item and index formats are specified once in [`docs/format-spec.md`](../docs/format-spec.md).
 Mark anything sensitive `visibility: local` in its frontmatter and it never leaves this

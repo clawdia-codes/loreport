@@ -9,6 +9,7 @@ completing a step.
 - **No brain yet** → Step 1.
 - **Brain exists, adding an assistant to it** → skip to Step 3.
 - **Brain exists, just want it loaded in a new chat** → Step 2.
+- **Something feels wrong** → Step 4 runs the self-test.
 
 ---
 
@@ -227,7 +228,34 @@ Reasoning behind this choice: ADR-003 in
 
 ---
 
-## Step 4 — Keep it healthy
+## Step 4 — Check it actually works
+
+Run the self-test inside your brain folder, any time:
+
+```
+./doctor.sh                # layout, git, index integrity, the privacy wall
+./doctor.sh --providers    # also probe each connected provider live
+DOCTOR_VERBOSE=1 ./doctor.sh   # list every finding in full
+```
+
+It checks the things that fail silently: that your backup repo is actually **private**,
+that your brain isn't nested inside another git repo, that every `INDEX.md` line resolves
+to a real file *and* every file has a line, that frontmatter is valid, that `surface.md`
+is gitignored, and — the important one — that **no `local` item appears in `surface.md` or
+the published packet**. It also greps anything shareable for obvious secrets.
+
+With `--providers` it calls the MCP server once per configured credential and asserts the
+wall from the outside: every cloud credential must be able to read a `shared` item and must
+be **refused** a `local` one. That is the guarantee stated as a test rather than a promise.
+
+Four things no script can check — do them once per assistant:
+
+- Ask it something only a **shared** memory answers → it should know.
+- Ask a **cloud** assistant about a `local` topic → it should come up empty.
+- Tell it a durable fact, then say *"sweep"* → it should offer to save it.
+- Say *"reconcile my memories"* twice → the second run should find ~nothing.
+
+## Step 5 — Keep it healthy
 
 **Every session** the assistant captures durable facts as they come up, and sweeps for
 missed ones before you close the tab (say **"sweep"** to force it).
