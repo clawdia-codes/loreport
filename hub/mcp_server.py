@@ -852,6 +852,9 @@ def _report_url():
     already broken. If the report is ever moved to public serving, this must be
     revisited -- at that moment handing out the URL becomes handing out every
     private entry."""
+    env = os.environ.get("LOREPORT_REPORT_URL")
+    if env:
+        return env
     try:
         with open(os.path.join(HERE, "config", "providers.json"), "r", encoding="utf-8") as fh:
             return json.load(fh).get("report_url") or ""

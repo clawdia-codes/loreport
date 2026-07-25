@@ -35,6 +35,6 @@
       "default": "chatgpt-local-dev-token"
     }
   },
-  "report_url": "https://clawdia.tailf125c1.ts.net:8446/",
-  "_report_url_note": "Where the human-readable HTML report is served. Handed to CLOUD callers too: security rests on tailscale auth, never on URL secrecy. CONSTRAINT: if this is ever moved to public serving, revisit that \u2014 giving a cloud provider the URL would then be giving it every private entry."
+  "report_url": "",
+  "_report_url_note": "Where the human-readable HTML report is served, e.g. https://<your-host>.ts.net:8446/ . LEAVE THIS EMPTY IN THE REPO and set the LOREPORT_REPORT_URL environment variable instead \u2014 this file is public, and a tailnet hostname is deployment-specific, not framework config. Handed to CLOUD callers too: security rests on tailscale auth, never on URL secrecy. CONSTRAINT: if the report is ever moved to public serving, revisit that \u2014 giving a cloud provider the URL would then be giving it every private entry."
 }

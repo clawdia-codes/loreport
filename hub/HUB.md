@@ -69,7 +69,7 @@ python3 hub/report_serve.py --file <brain>/hub/published/report.html --port 8446
 tailscale serve --bg --https=8446 http://127.0.0.1:8446
 ```
 
-Set `report_url` in `hub/config/providers.json` and `loreport_status` will hand the URL
+Set `LOREPORT_REPORT_URL` in the environment your MCP server runs under (NOT in `providers.json`, which is public and shared by everyone using this framework) and `loreport_status` will hand the URL
 out — including to cloud callers, since they cannot reach a tailnet address and security
 here rests on tailscale's auth, never on the URL being secret. **If you ever move this to
 public serving, revisit that**: handing a cloud provider the URL would then be handing it
