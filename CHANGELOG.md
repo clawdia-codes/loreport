@@ -6,6 +6,14 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-07-26
+
+### Fixed
+- `report_url` is now read from the `LOREPORT_REPORT_URL` environment variable rather
+  than committed to `hub/config/providers.json`. That file lives in the public framework
+  repo, so a real deployment URL there published personal infrastructure and shipped one
+  user's address as framework config for everyone.
+
 ## [1.3.0] — 2026-07-25
 
 ### Added
