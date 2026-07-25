@@ -10,10 +10,11 @@ no tooling at all.
 
 ## Quickstart
 
-1. **Copy [`prompts/onboard.md`](prompts/onboard.md) into any LLM chat.** It interviews
-   you, pulls in what your existing assistants already know about you, and hands back
-   ready-to-file blocks. Save each block to the path in its `file=` line, inside a folder
-   you control — ideally a private git repo. That folder is your brain.
+1. **Run `./scripts/init-brain.sh`.** It creates your brain folder, initialises git, and
+   optionally sets up a **private** GitHub backup — verifying privacy with the API before
+   it uploads anything. Then **copy [`prompts/onboard.md`](prompts/onboard.md) into any LLM
+   chat**: it interviews you, pulls in what your existing assistants already know about
+   you, and hands back ready-to-file blocks. Save each to the path in its `file=` line.
 2. **Run `./make-surface.sh` in that folder** to assemble `surface.md`, then paste that
    one file into your assistant's instructions field. Done — the brain is loaded. Anything
    you marked `local` is withheld from that file, so it's safe to paste into a cloud chat.
@@ -123,7 +124,8 @@ Licensed under **MIT** (`prompts/`, `hub/` Python code) and **CC BY 4.0** (`docs
 |---|---|
 | [`docs/setup.md`](docs/setup.md) | **The walkthrough** — create, load, add assistants, maintain. |
 | [`prompts/`](prompts/) | The three pasteables: `onboard.md`, `bootstrap.md`, `consolidate.md`. |
-| [`brain-template/`](brain-template/) | Empty skeleton to copy, plus `make-surface.sh`. |
+| [`scripts/init-brain.sh`](scripts/init-brain.sh) | **Start here** — creates a new brain: folder, git repo, private GitHub backup. |
+| [`brain-template/`](brain-template/) | The skeleton it copies, if you'd rather do it by hand. |
 | [`examples/`](examples/) | A filled fixture brain with a worked consolidation example. |
 | [`hub/`](hub/) | The opt-in Tier-2 sync hub. |
 | [`docs/format-spec.md`](docs/format-spec.md) | Canonical item / index / skill schema. |

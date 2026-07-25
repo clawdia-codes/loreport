@@ -18,7 +18,21 @@ Open [`prompts/onboard.md`](../prompts/onboard.md), copy the whole file, and pas
 any LLM chat. It interviews you, imports what your existing assistants already know about
 you, and hands back ready-to-file blocks.
 
-Save each block to the path in its `file=` attribute, inside a folder you control:
+**Fastest path — let the script do it:**
+
+```
+./scripts/init-brain.sh
+```
+
+It asks for a name and a location, copies the skeleton, initialises the git repo, and
+offers to create a **private** GitHub backup. It reads the privacy setting back from the
+GitHub API and refuses to upload anything unless GitHub confirms the repo is private — a
+public brain is the one mistake it will not let you make. Add `--with-hub` if you already
+know you want the Tier-2 sync hub; `--no-github` to stay entirely local. Don't want
+GitHub at all? It prints instructions for any git remote you own, including a bare repo
+on another machine.
+
+Either way, you end up with this, and onboarding fills it:
 
 ```
 brain/
@@ -30,15 +44,10 @@ brain/
 └── make-surface.sh    # builds the one file you paste (Step 2)
 ```
 
-**Easiest way to get that folder:** copy [`brain-template/`](../brain-template/) whole. It's
-the empty skeleton with `make-surface.sh` and the protocol already inside, so it works
-standalone. Doing it by hand instead is
-`mkdir -p brain/{memories,knowledge,skills,prompts}` plus copies of `make-surface.sh` and
-`prompts/bootstrap.md` — Step 2 needs both.
-
-A private git repo is the ideal home — you get history, backup, and sync for free. Add a
-`.gitignore` containing `surface.md`, since that file is generated and can contain private
-items.
+**Prefer to do it by hand?** Copy [`brain-template/`](../brain-template/) whole — it's the
+same skeleton the script uses, with `make-surface.sh` and the protocol already inside, so
+it works standalone. Then `git init`, and add a `.gitignore` containing `surface.md`
+(it's generated and can contain private items). Keep the repo private.
 
 **Sensitive topics.** Onboarding asks which topics stay on your machine, offering these
 five as defaults you can add to or remove from: **health, finances, relationships, credentials/security, employer**.
