@@ -3,7 +3,7 @@
 hub/mcp_server.py — bridge-A MCP server (design.md §D15 bridge A, §D17;
 modules.md M13e).
 
-Single-file, Python-3-stdlib-only. Exposes six MCP tools over the shared brain,
+Single-file, Python-3-stdlib-only. Exposes eight MCP tools over the shared brain,
 all named with the `loreport_<verb>_<noun>` scheme (docs/visibility-design.md §4):
 
   - loreport_save_memory(block, provider) -> routes the block through the SAME
@@ -31,6 +31,20 @@ all named with the `loreport_<verb>_<noun>` scheme (docs/visibility-design.md §
     A cloud-trust caller sees `local` items as existence-only (hidden).
   - loreport_change_memory_settings(name, visibility) -> flips one item's
     `visibility` field. A cloud-trust caller may only change items it authored.
+  - loreport_status() -> tooling version (from VERSION/git in the framework
+    repo root, sibling of hub/, NOT the brain) plus brain freshness in one
+    call: entry counts and shared/local split (read from `main`), and whether
+    the published packet's stamped `main@<sha>` still matches `main`'s
+    current sha — reported as STALE, prominently, the moment it doesn't. A
+    missing packet is reported as missing, never as "current". Read-only.
+  - loreport_whats_changed(days=14) -> two halves: condensed CHANGELOG.md
+    entries (software), and per-provider capture activity on `main` over the
+    window (brain) — entries touched, last-touched, and which entries. EVERY
+    configured provider is listed even with zero activity in the window, so a
+    silently-idle provider is visible rather than indistinguishable from a
+    quiet one. Counts/dates are identical for cloud and local callers; only
+    `local`-visibility entry NAMES are redacted for a cloud-trust caller
+    (rolled into an "N private" count instead). Read-only.
 
 Security invariants (§D17, §D-visibility):
   - Localhost bind ONLY — the HTTP transport binds 127.0.0.1, never the
@@ -57,6 +71,7 @@ Transports:
 
 import argparse
 import contextlib
+import datetime
 import fcntl
 import json
 import os
@@ -182,6 +197,27 @@ TOOLS = {
                 "visibility": {"type": "string", "description": "shared | local"},
             },
             "required": ["name", "visibility"],
+        },
+    },
+    "loreport_status": {
+        "description": "Tooling version AND data freshness in one call: loreport version, "
+                       "brain entry counts (memories/skills/knowledge, shared vs local), and "
+                       "whether the published packet is current with `main` — reported as "
+                       "STALE, prominently, when it is not. Read-only.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    "loreport_whats_changed": {
+        "description": "What changed lately, in two halves: condensed CHANGELOG.md entries "
+                       "(software), and per-provider brain capture activity on `main` over "
+                       "the window (entries touched, last-touched, which entries). Every "
+                       "configured provider is listed even with zero activity. Counts/dates "
+                       "are identical for cloud and local callers; `local`-visibility entry "
+                       "names are redacted for a cloud-trust caller. Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "lookback window in days (default 14)"},
+            },
         },
     },
 }
@@ -383,6 +419,271 @@ def _set_visibility_field(text, visibility):
 
 INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
+# --- loreport_status / loreport_whats_changed helpers -------------------------
+#
+# The framework/tooling repo (VERSION, CHANGELOG.md) is REPO_ROOT — the sibling
+# of hub/ that this script itself lives in — which is a DIFFERENT repo from
+# `brain_dir` (the brain being served, e.g. a user's own loreport-<name> repo).
+# `brain_dir`'s `main` is still read exclusively via `git show`/`git ls-tree`
+# (never the working tree), same as every other read tool above.
+
+# The packet's freshness stamp, written by snapshot_publish.py's build_packet_text
+# (`f"<!-- loreport packet: main@{main_sha} {today} -->\n"`, main_sha itself from
+# `git rev-parse --short main` — the exact same command used below to fetch the
+# brain's current main sha, so the two shorthand forms are always comparable).
+PACKET_STAMP_RE = re.compile(r"^<!-- loreport packet: main@([0-9a-f]+) (\d{4}-\d{2}-\d{2}) -->$")
+
+
+def _packet_is_current(brain_dir, packet_sha, main_sha):
+    """A packet is current if its stamped sha IS `main`'s current tip, OR if
+    every path that changed between the stamp and the tip lives under
+    hub/published/ — snapshot_publish.py itself commits packet.md (and the
+    dated archive copy) onto `main` right after stamping it, which nudges
+    `main` one commit past its own stamp on every single publish (confirmed:
+    two consecutive days of `brain(publish): packet <date>` commits, each
+    touching only hub/published/*). A bare sha== check would call that
+    everyday, no-brain-content-changed state "STALE" — a false positive that
+    would cry wolf on a healthy brain. Any change OUTSIDE hub/published/ in
+    that gap means real content moved past what the packet reflects: that IS
+    stale. Raises GitTimeout."""
+    if packet_sha == main_sha:
+        return True
+    r = _run_git(brain_dir, "diff", "--name-only", packet_sha, main_sha)
+    if r.returncode != 0:
+        return False  # unresolvable diff (e.g. unknown sha) -> fail closed to STALE
+    changed = [p for p in r.stdout.splitlines() if p.strip()]
+    if not changed:
+        return True
+    return all(p.startswith("hub/published/") for p in changed)
+
+# A capture commit's subject, per hub/inbox_ingest.py: "brain(capture): <entry> via <provider> [inbox]".
+CAPTURE_SUBJECT_RE = re.compile(r"^brain\(capture\): (.+) via (\S+) \[inbox\]$")
+
+CHANGELOG_VERSION_RE = re.compile(r"^## \[([^\]]+)\]\s*[—-]\s*(\d{4}-\d{2}-\d{2})\s*$")
+CHANGELOG_CATEGORY_RE = re.compile(r"^### (\w+)")
+CHANGELOG_CATEGORY_ORDER = ("Added", "Fixed", "Changed", "Removed", "Security", "Deprecated")
+
+
+def _configured_provider_trust_pairs():
+    """Return [(provider, trust), ...] for every credential entry configured in
+    hub/config/providers.json, in the file's own order — regardless of whether
+    that credential's env var happens to be set on THIS process (a provider
+    with no live token right now is still a "configured provider" for status/
+    activity reporting purposes). Falls back to one local-trust entry per
+    hardcoded provider if providers.json is missing/unparseable, mirroring
+    _load_providers_config's own fallback so a broken config never crashes
+    either tool."""
+    config_path = os.path.join(HERE, "config", "providers.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        return [(info["provider"], info["trust"]) for info in cfg["credentials"].values()]
+    except (OSError, ValueError, KeyError, TypeError):
+        return [(p, "local") for p in _FALLBACK_PROVIDER_BRANCHES]
+
+
+def _configured_providers_summary():
+    """Render the configured providers as e.g. "openclaw, claude(local),
+    claude(cloud), chatgpt" — a provider with only one configured trust level
+    is shown bare; a provider configured at more than one trust level (e.g.
+    claude has both a local-dev and a cloud/web credential) is shown once per
+    trust level so the two are distinguishable."""
+    trusts_by_provider = {}
+    order = []
+    for provider, trust in _configured_provider_trust_pairs():
+        if provider not in trusts_by_provider:
+            trusts_by_provider[provider] = []
+            order.append(provider)
+        if trust not in trusts_by_provider[provider]:
+            trusts_by_provider[provider].append(trust)
+    parts = []
+    for provider in order:
+        trusts = trusts_by_provider[provider]
+        if len(trusts) == 1:
+            parts.append(provider)
+        else:
+            parts.extend(f"{provider}({t})" for t in trusts)
+    return ", ".join(parts)
+
+
+def _parse_changelog_sections(text):
+    """Yield (version, date_str, {category: [bullet, ...]}) for every dated
+    `## [x.y.z] — YYYY-MM-DD` section in CHANGELOG.md, in the file's own
+    (newest-first) order. `## [Unreleased]` is skipped — it carries no date
+    to key freshness/window-filtering on."""
+    lines = text.splitlines()
+    sections = []
+    i, n = 0, len(lines)
+    while i < n:
+        m = CHANGELOG_VERSION_RE.match(lines[i].rstrip())
+        if not m:
+            i += 1
+            continue
+        version, date_str = m.group(1), m.group(2)
+        i += 1
+        categories = {}
+        current_cat = None
+        while i < n and not lines[i].startswith("## ["):
+            stripped = lines[i].strip()
+            cm = CHANGELOG_CATEGORY_RE.match(stripped)
+            if cm:
+                current_cat = cm.group(1)
+                categories.setdefault(current_cat, [])
+            elif stripped.startswith("- ") and current_cat:
+                categories[current_cat].append(stripped[2:])
+            elif stripped and current_cat and categories.get(current_cat):
+                # A soft-wrapped continuation line of the previous bullet —
+                # this file hand-wraps prose bullets across multiple indented
+                # lines with no leading "- ". Appending it onto the last
+                # bullet (instead of silently dropping it) matters: dropping
+                # it truncated every multi-line bullet mid-sentence, right at
+                # the wrap point, before condensing ever got a real sentence
+                # to cut at.
+                categories[current_cat][-1] += " " + stripped
+            i += 1
+        sections.append((version, date_str, categories))
+    return sections
+
+
+def _condense_bullet(bullet):
+    """Strip markdown emphasis/code markers and cut to the first sentence, so
+    a paragraph-length changelog bullet condenses to one short clause instead
+    of being echoed verbatim (the point of loreport_whats_changed is a quick
+    narrative, not a re-paste of CHANGELOG.md)."""
+    text = bullet.replace("**", "").replace("`", "").strip()
+    idx = text.find(". ")
+    if idx != -1:
+        return text[:idx].strip()
+    return text.rstrip(".")
+
+
+def _format_software_summary(repo_root, days):
+    changelog_path = os.path.join(repo_root, "CHANGELOG.md")
+    try:
+        with open(changelog_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return "software   CHANGELOG.md not found"
+
+    sections = _parse_changelog_sections(text)
+    if not sections:
+        return "software   no dated CHANGELOG.md entries found"
+
+    cutoff_date = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    in_window = [s for s in sections if s[1] >= cutoff_date]
+    chosen = in_window if in_window else sections[:1]  # always show at least the latest
+
+    lines = ["software"]
+    for version, date_str, categories in chosen:
+        lines.append(f"  v{version} ({date_str}):")
+        seen_cats = set()
+        for cat in CHANGELOG_CATEGORY_ORDER + tuple(categories.keys()):
+            if cat in seen_cats or not categories.get(cat):
+                continue
+            seen_cats.add(cat)
+            condensed = "; ".join(_condense_bullet(b) for b in categories[cat])
+            lines.append(f"    {cat}: {condensed}")
+    return "\n".join(lines)
+
+
+def _iter_capture_commits(brain_dir):
+    """Yield (commit_date_iso, entry_name, provider) for every
+    `brain(capture): <entry> via <provider> [inbox]` commit on `main`,
+    newest-first (git log's default order). Raises GitTimeout."""
+    r = _run_git(brain_dir, "log", "--format=%cI%x00%s", "main")
+    if r.returncode != 0:
+        return
+    for line in r.stdout.split("\n"):
+        if not line:
+            continue
+        date_str, sep, subject = line.partition("\x00")
+        if not sep:
+            continue
+        m = CAPTURE_SUBJECT_RE.match(subject.strip())
+        if m:
+            yield date_str, m.group(1), m.group(2)
+
+
+def _format_provider_names(brain_dir, names, trust):
+    """Render the entries a provider touched, redacting `local`-visibility
+    entry NAMES for a cloud-trust caller (rolled into an "N private" count
+    instead) — the count of touched entries itself is unaffected and reported
+    identically to both trust levels by the caller. An entry we fail to
+    resolve (deleted since, or a git hiccup on that one lookup) is treated as
+    `local` and redacted for a cloud caller — fail closed, same convention as
+    _visibility_from_text. A local-trust caller skips the lookup entirely and
+    always sees every name."""
+    if not names:
+        return ""
+    if trust == "local":
+        return ", ".join(names)
+    shown, redacted = [], 0
+    for n in names:
+        try:
+            vis = _item_visibility(brain_dir, n)
+        except GitTimeout:
+            vis = None
+        if vis == "shared":
+            shown.append(n)
+        else:
+            redacted += 1
+    text = ", ".join(shown)
+    if redacted:
+        text = f"{text}, {redacted} private" if text else f"{redacted} private"
+    return text
+
+
+def _format_brain_activity(brain_dir, days, trust):
+    """Return the "brain" half of loreport_whats_changed, or None on a git
+    timeout (the caller turns that into a proper tool error)."""
+    now = datetime.datetime.now().astimezone()
+    cutoff = now - datetime.timedelta(days=days)
+    per_provider = {}
+    try:
+        for date_str, entry_name, provider in _iter_capture_commits(brain_dir):
+            try:
+                dt = datetime.datetime.fromisoformat(date_str)
+            except ValueError:
+                continue
+            info = per_provider.setdefault(provider, {"names": [], "last": None})
+            if info["last"] is None:
+                info["last"] = dt  # git log is newest-first: first hit per provider = most recent
+            if dt >= cutoff:
+                info["names"].append(entry_name)
+    except GitTimeout:
+        return None
+
+    # Every provider CONFIGURED in providers.json is listed, even one with zero
+    # activity in-window (or ever) — a silently-idle provider must be visible,
+    # not indistinguishable from one that's simply quiet this window.
+    providers_order = []
+    for provider, _trust in _configured_provider_trust_pairs():
+        if provider not in providers_order:
+            providers_order.append(provider)
+    for provider in per_provider:
+        if provider not in providers_order:
+            providers_order.append(provider)
+
+    lines = ["brain"]
+    for provider in providers_order:
+        info = per_provider.get(provider, {"names": [], "last": None})
+        unique_names = list(dict.fromkeys(info["names"]))
+        last = info["last"]
+        if last is None:
+            last_str = "no captures yet"
+        else:
+            delta_days = (now - last).days
+            last_str = "today" if delta_days <= 0 else f"{delta_days}d ago"
+        line = f"  {provider:<10s} {len(unique_names)} entries · {last_str}"
+        try:
+            names_display = _format_provider_names(brain_dir, unique_names, trust)
+        except GitTimeout:
+            return None
+        if names_display:
+            line += f" · {names_display}"
+        lines.append(line)
+    return "\n".join(lines)
+
 
 # --- tool implementations -----------------------------------------------------
 
@@ -542,6 +843,128 @@ def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, pro
     return {"status": "changed", "name": name, "visibility": visibility}
 
 
+def _report_url():
+    """The browsable HTML report's URL, from hub/config/providers.json.
+
+    Deliberately returned to CLOUD callers as well: they cannot reach a tailnet
+    address, and security here rests on tailscale's authentication rather than on
+    the URL being unguessable. Anything that depends on a URL staying secret is
+    already broken. If the report is ever moved to public serving, this must be
+    revisited -- at that moment handing out the URL becomes handing out every
+    private entry."""
+    try:
+        with open(os.path.join(HERE, "config", "providers.json"), "r", encoding="utf-8") as fh:
+            return json.load(fh).get("report_url") or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def tool_loreport_status(brain_dir):
+    """loreport version + brain freshness in one call — the gate that matters
+    is packet-vs-main: a version string alone stays green while a provider
+    quietly reads a stale packet, so that comparison is never skipped."""
+    version_path = os.path.join(REPO_ROOT, "VERSION")
+    try:
+        with open(version_path, "r", encoding="utf-8") as fh:
+            version = fh.read().strip()
+    except OSError:
+        version = "unknown"
+
+    try:
+        r = _run_git(REPO_ROOT, "rev-parse", "--short", "HEAD")
+        tooling_sha = r.stdout.strip() if r.returncode == 0 else "unknown"
+        r = _run_git(REPO_ROOT, "log", "-1", "--format=%cd", "--date=short", "HEAD")
+        tooling_date = r.stdout.strip() if r.returncode == 0 else "unknown"
+    except GitTimeout:
+        return {"error": "git timeout (framework repo)"}
+
+    try:
+        memory_count = knowledge_count = skill_count = 0
+        shared_count = local_count = 0
+        for _name, typ, relpath in _iter_all_items_from_main(brain_dir):
+            content = _read_from_main(brain_dir, relpath)
+            if content is None:
+                continue  # raced with a concurrent write between ls-tree and show; skip
+            if typ == "memory":
+                memory_count += 1
+            elif typ == "knowledge":
+                knowledge_count += 1
+            elif typ == "skill":
+                skill_count += 1
+            # The shared/local split is a privacy axis over CONTENT (memories,
+            # knowledge pages) — it deliberately excludes skills. A skill's
+            # frontmatter carries no `visibility:` field at all (it's a
+            # procedure, not personal data), which _visibility_from_text
+            # defaults to "shared"; folding skills into this split would
+            # inflate the shared count by every skill in the brain rather
+            # than reflecting how many actual memories are shareable.
+            if typ == "skill":
+                continue
+            if _visibility_from_text(content) == "shared":
+                shared_count += 1
+            else:
+                local_count += 1
+
+        r = _run_git(brain_dir, "rev-parse", "--short", "main")
+        main_sha = r.stdout.strip() if r.returncode == 0 else None
+    except GitTimeout:
+        return {"error": "git timeout (brain repo)"}
+
+    if main_sha is None:
+        return {"error": "brain repo has no `main` branch"}
+
+    packet_path = os.path.join(brain_dir, "hub", "published", "packet.md")
+    if not os.path.isfile(packet_path):
+        packet_line = "packet     MISSING — no published packet yet (run snapshot_publish.py)"
+    else:
+        with open(packet_path, "r", encoding="utf-8") as fh:
+            packet_lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        last_line = packet_lines[-1].strip() if packet_lines else ""
+        m = PACKET_STAMP_RE.match(last_line)
+        if not m:
+            packet_line = "packet     published, but its freshness stamp is unreadable"
+        else:
+            packet_sha, packet_date = m.group(1), m.group(2)
+            # THE GATE THAT MATTERS: has any BRAIN CONTENT moved past what the
+            # packet reflects? Not "current" => STALE, called out prominently —
+            # never silently folded into a plain "current" status.
+            try:
+                fresh = _packet_is_current(brain_dir, packet_sha, main_sha)
+            except GitTimeout:
+                return {"error": "git timeout (brain repo)"}
+            if fresh:
+                packet_line = f"packet     built {packet_date} from main @ {packet_sha}   ✓ current"
+            else:
+                packet_line = (f"packet     built {packet_date} from main @ {packet_sha}   "
+                                f"✗ STALE — main is now @ {main_sha}")
+
+    text = (
+        f"loreport   {version} ({tooling_sha}, {tooling_date})\n"
+        f"brain      {memory_count} memories · {skill_count} skills · "
+        f"{knowledge_count} knowledge pages · main @ {main_sha}\n"
+        f"           {shared_count} shareable · {local_count} stay on this machine\n"
+        f"{packet_line}\n"
+        f"providers  {_configured_providers_summary()}"
+        + (f"\nreport     {_report_url()}  (tailnet only)" if _report_url() else "")
+    )
+    return {"content": text}
+
+
+def tool_loreport_whats_changed(brain_dir, days, trust):
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 14
+    if days <= 0:
+        days = 14
+
+    software_text = _format_software_summary(REPO_ROOT, days)
+    brain_text = _format_brain_activity(brain_dir, days, trust)
+    if brain_text is None:
+        return {"error": "git timeout (brain repo)"}
+    return {"content": software_text + "\n\n" + brain_text}
+
+
 def dispatch(brain_dir, credential, name, arguments):
     arguments = arguments or {}
     provider_from_credential = CREDENTIAL_PROVIDER_MAP.get(credential) if credential else None
@@ -568,6 +991,10 @@ def dispatch(brain_dir, credential, name, arguments):
         return tool_loreport_change_memory_settings(
             brain_dir, arguments.get("name", ""), arguments.get("visibility", ""),
             trust, provider_from_credential)
+    if name == "loreport_status":
+        return tool_loreport_status(brain_dir)
+    if name == "loreport_whats_changed":
+        return tool_loreport_whats_changed(brain_dir, arguments.get("days", 14), trust)
     return {"error": f"unknown tool '{name}'"}
 
 

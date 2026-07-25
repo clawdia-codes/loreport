@@ -1,13 +1,40 @@
 {
   "providers": {
-    "openclaw": {"branch": "provider/openclaw", "merge_order": 1},
-    "claude":   {"branch": "provider/claude",   "merge_order": 2},
-    "chatgpt":  {"branch": "provider/chatgpt",  "merge_order": 3}
+    "openclaw": {
+      "branch": "provider/openclaw",
+      "merge_order": 1
+    },
+    "claude": {
+      "branch": "provider/claude",
+      "merge_order": 2
+    },
+    "chatgpt": {
+      "branch": "provider/chatgpt",
+      "merge_order": 3
+    }
   },
   "credentials": {
-    "MPB_OPENCLAW_TOKEN":     {"provider": "openclaw", "trust": "local", "default": "openclaw-local-dev-token"},
-    "MPB_CLAUDE_LOCAL_TOKEN": {"provider": "claude",   "trust": "local", "default": "claude-local-dev-token"},
-    "MPB_CLAUDE_WEB_TOKEN":   {"provider": "claude",   "trust": "cloud", "default": null},
-    "MPB_CHATGPT_TOKEN":      {"provider": "chatgpt",  "trust": "cloud", "default": "chatgpt-local-dev-token"}
-  }
+    "MPB_OPENCLAW_TOKEN": {
+      "provider": "openclaw",
+      "trust": "local",
+      "default": "openclaw-local-dev-token"
+    },
+    "MPB_CLAUDE_LOCAL_TOKEN": {
+      "provider": "claude",
+      "trust": "local",
+      "default": "claude-local-dev-token"
+    },
+    "MPB_CLAUDE_WEB_TOKEN": {
+      "provider": "claude",
+      "trust": "cloud",
+      "default": null
+    },
+    "MPB_CHATGPT_TOKEN": {
+      "provider": "chatgpt",
+      "trust": "cloud",
+      "default": "chatgpt-local-dev-token"
+    }
+  },
+  "report_url": "https://clawdia.tailf125c1.ts.net:8446/",
+  "_report_url_note": "Where the human-readable HTML report is served. Handed to CLOUD callers too: security rests on tailscale auth, never on URL secrecy. CONSTRAINT: if this is ever moved to public serving, revisit that \u2014 giving a cloud provider the URL would then be giving it every private entry."
 }

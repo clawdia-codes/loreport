@@ -88,6 +88,21 @@ filing captures, consolidation, `INDEX.md` rebuilds, and republishing your surfa
 across providers. It's a strict superset — a hub outage or never adopting it degrades to
 exactly the manual loop, never to broken. See [`hub/HUB.md`](hub/HUB.md) to set it up.
 
+## Checking in on it
+
+Two things you can ask any connected assistant:
+
+- **`loreport_status`** — the version you're running *and* whether the packet each
+  provider reads is still current with `main`. That second half is the point: a version
+  string alone stays green while a provider quietly reads a stale copy of your memories.
+- **`loreport_whats_changed`** — what happened lately, in both halves: software changes,
+  and per-provider activity. It lists every configured provider even at zero, because a
+  connector that has silently stopped working looks exactly like one you haven't used.
+
+And if you run the hub, a **browsable HTML report** of the whole brain — dashboard,
+search, every entry with a privacy badge — rebuilt daily and served on your own private
+network. See [`hub/HUB.md`](hub/HUB.md).
+
 ## Security note
 
 > Anything **shared** in your brain is readable by anyone who can prompt an assistant it's
@@ -133,6 +148,7 @@ Licensed under **MIT** (`prompts/`, `hub/` Python code) and **CC BY 4.0** (`docs
 | [`brain-template/`](brain-template/) | The skeleton it copies, if you'd rather do it by hand. |
 | [`examples/`](examples/) | A filled fixture brain with a worked consolidation example. |
 | [`hub/`](hub/) | The opt-in Tier-2 sync hub. |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release, written to be read. |
 | [`docs/format-spec.md`](docs/format-spec.md) | Canonical item / index / skill schema. |
 | [`docs/visibility-design.md`](docs/visibility-design.md) | `shared` vs `local`, trust tiers, enforcement. |
 | [`docs/security.md`](docs/security.md) | Threat model and controls, in full. |

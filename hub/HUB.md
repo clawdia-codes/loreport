@@ -50,6 +50,31 @@ links).
    `python3 hub/brain_merge.py --dry-run` followed by `python3 hub/snapshot_publish.py --dry-run`,
    and read the printed report before ever pointing a live connector at the hub.
 
+## The browsable report
+
+`report_build.py` renders the whole brain as ONE self-contained HTML page — dashboard,
+provider activity table, instant search, every entry with a privacy badge. No external
+requests, so it works offline. Rebuild it in your daily cycle:
+
+```
+python3 hub/report_build.py --brain-dir <brain> --out <brain>/hub/published/report.html
+```
+
+**It contains every private entry**, so treat it as private. `tailscale serve <path>`
+needs root, so serve it the way the rest of this host does — a loopback server with
+tailscale proxying to it:
+
+```
+python3 hub/report_serve.py --file <brain>/hub/published/report.html --port 8446
+tailscale serve --bg --https=8446 http://127.0.0.1:8446
+```
+
+Set `report_url` in `hub/config/providers.json` and `loreport_status` will hand the URL
+out — including to cloud callers, since they cannot reach a tailnet address and security
+here rests on tailscale's auth, never on the URL being secret. **If you ever move this to
+public serving, revisit that**: handing a cloud provider the URL would then be handing it
+every private entry.
+
 ## Daily reconciliation ritual
 
 Run once a day (see `hub/config/cron.txt` for the schedule):
