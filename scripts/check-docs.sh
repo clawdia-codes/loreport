@@ -155,5 +155,30 @@ if grep -q 'checkrunner-local' "$tmp/b/surface.md"; then
 fi
 rm -rf "$tmp"
 
+# --- 5. version-bump discipline -------------------------------------------------
+# CHANGELOG.md is curated by hand, which means it drifts unless something checks.
+# Objective rule, no judgement: if any commit AFTER the one that last touched VERSION
+# also touched hub/ or prompts/, then shippable behaviour changed without being
+# recorded. Uses committed history only, so the result is deterministic.
+version_commit=$(git log -1 --format=%H -- VERSION 2>/dev/null || true)
+if [ -z "$version_commit" ]; then
+  echo "check-docs: VERSION not committed yet — skipping the bump gate"
+elif [ ! -f CHANGELOG.md ]; then
+  echo "FAIL: VERSION exists but CHANGELOG.md does not"; fail=1
+else
+  unrecorded=$(git log --format=%h "$version_commit"..HEAD -- hub/ prompts/ 2>/dev/null | wc -l)
+  if [ "$unrecorded" -gt 0 ]; then
+    echo "FAIL: $unrecorded commit(s) changed hub/ or prompts/ since VERSION was last bumped."
+    echo "      Bump VERSION and add a CHANGELOG.md entry, or the change ships unrecorded:"
+    git log --format='        %h %s' "$version_commit"..HEAD -- hub/ prompts/ 2>/dev/null | head -5
+    fail=1
+  fi
+  # The version being shipped must actually appear in the changelog.
+  ver=$(tr -d '[:space:]' < VERSION | sed -E 's/-(dev|rc[0-9]*)$//')
+  if ! grep -q "^## \[$ver\]" CHANGELOG.md; then
+    echo "FAIL: CHANGELOG.md has no '## [$ver]' section for the version in VERSION"; fail=1
+  fi
+fi
+
 if [ "$fail" = "0" ]; then echo "check-docs: PASS"; else echo "check-docs: FAIL"; fi
 exit "$fail"
