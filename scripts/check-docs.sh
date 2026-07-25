@@ -155,6 +155,38 @@ if grep -q 'checkrunner-local' "$tmp/b/surface.md"; then
 fi
 rm -rf "$tmp"
 
+# --- 4b. report_build's visibility parser must AGREE with the canonical one ------
+# report_build.py deliberately returns "private" instead of "local" (human wording),
+# so byte-identity is the wrong check. Equivalence of the CLASSIFICATION is the thing
+# that matters: a disagreement would mislabel an entry's privacy badge and its count.
+python3 - <<'PYEQ' || fail=1
+import importlib.util, sys
+def load(name, path):
+    s = importlib.util.spec_from_file_location(name, path); m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m); return m
+canon = load("bm", "hub/brain_merge.py")
+rep   = load("rb", "hub/report_build.py")
+CASES = ['visibility: local', 'visibility: "local"', "visibility: 'local'", 'visibility: Local',
+         'visibility: LOCAL', 'Visibility: local', 'visibility: local  # note', 'visibility: shared',
+         'visibility: nonsense', 'type: project']
+bad = []
+for line in CASES:
+    text = f"---\nname: x\ndescription: d\ntype: project\n{line}\n---\nbody\n"
+    a = canon._visibility_from_text(text)
+    b = rep.visibility_from_text(text)
+    b_norm = "local" if b == "private" else b
+    if a != b_norm:
+        bad.append(f"  {line!r}: brain_merge={a} report_build={b}")
+for text, label in (('no frontmatter at all', 'bare'), ('---\nname: x\n', 'unterminated')):
+    a = canon._visibility_from_text(text); b = rep.visibility_from_text(text)
+    b_norm = "local" if b == "private" else b
+    if a != b_norm: bad.append(f"  {label}: brain_merge={a} report_build={b}")
+if bad:
+    print("FAIL: report_build.py visibility parser disagrees with hub/brain_merge.py:")
+    print("\n".join(bad)); sys.exit(1)
+print("visibility parsers agree across 12 cases")
+PYEQ
+
 # --- 5. version-bump discipline -------------------------------------------------
 # CHANGELOG.md is curated by hand, which means it drifts unless something checks.
 # Objective rule, no judgement: if any commit AFTER the one that last touched VERSION
