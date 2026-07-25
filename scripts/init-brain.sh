@@ -61,6 +61,31 @@ BRAIN="$PARENT/$NAME"
 [ -e "$BRAIN" ] && [ -n "$(ls -A "$BRAIN" 2>/dev/null)" ] && \
   die "$BRAIN already exists and is not empty — refusing to overwrite it"
 
+# Your brain must be its OWN repository. If the target sits inside an existing git
+# work tree -- most likely this framework clone -- then `git init` would nest one
+# repo inside another and your personal memories could end up committed to, or
+# pushed to, the PUBLIC framework repo. That is the worst outcome this script can
+# produce, so it is a hard stop rather than a warning.
+mkdir -p "$PARENT" 2>/dev/null || die "cannot create $PARENT"
+enclosing=$(git -C "$PARENT" rev-parse --show-toplevel 2>/dev/null || true)
+if [ -n "$enclosing" ]; then
+  cat >&2 <<EOF
+init-brain: refusing to create your brain inside an existing git repository.
+
+  Requested location : $BRAIN
+  Already inside repo: $enclosing
+
+Your brain must be a SEPARATE, PRIVATE repository of your own — not this project,
+not a fork of it, and not a branch inside it. This repo is the public tooling; your
+brain is your private data. They must never be the same repository.
+
+Pick a location outside it, e.g.:
+
+  $0 --name $NAME --path "\$HOME/projects"
+EOF
+  exit 1
+fi
+
 say "Creating $BRAIN"
 mkdir -p "$BRAIN" || die "cannot create $BRAIN"
 cp -r "$TEMPLATE/." "$BRAIN/" || die "copy failed"
@@ -89,8 +114,12 @@ manual_instructions() {
 
   To back it up yourself, on any host you like:
 
-    1. Create a NEW, PRIVATE repository named "$NAME".
-       It must be private — this repo will hold your personal memories.
+    1. Create a BRAND-NEW, PRIVATE, EMPTY repository named "$NAME".
+       - On GitHub: https://github.com/new — set it to Private, and do NOT add a
+         README, .gitignore or licence (your brain already has its own history).
+       - This is YOUR OWN repository. Do NOT fork the Loreport project, and do not
+         push your brain to it — that repo is public tooling, this is private data.
+         Two different repos, and they must stay that way.
     2. Connect and push:
 
        git -C "$BRAIN" remote add origin <your-repo-url>

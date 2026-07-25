@@ -14,6 +14,21 @@ completing a step.
 
 ## Step 1 — Create the brain
 
+### First, the one thing people get wrong: this is two repositories
+
+| | What it is | Who owns it | Visibility |
+|---|---|---|---|
+| **Loreport** (this project) | The tooling — prompts, docs, the optional hub. You cloned or downloaded it. | The project | **Public** |
+| **Your brain** (`loreport-<you>`) | Your memories, knowledge, and skills. Created fresh, by you. | You | **Private** |
+
+Your brain is a **brand-new private repository of your own**. It is *not* a fork of this
+project, *not* a branch inside it, and *not* a folder committed into your clone of it.
+Mixing them is how personal memories end up in a public repo — so `init-brain.sh` refuses
+outright to create your brain inside any existing git work tree, including this one.
+
+Nothing you write ever needs to go back to the Loreport project.
+
+
 Open [`prompts/onboard.md`](../prompts/onboard.md), copy the whole file, and paste it into
 any LLM chat. It interviews you, imports what your existing assistants already know about
 you, and hands back ready-to-file blocks.

@@ -23,6 +23,11 @@ Everything past that (which recipe suits your host, adding a second assistant, m
 upkeep) is one file: **[`docs/setup.md`](docs/setup.md)**. You shouldn't need to open a
 third.
 
+> **This repo is the tooling; your brain is a separate, private repo of your own.**
+> Not a fork of this one, not a branch in it. `init-brain.sh` creates it fresh and
+> refuses to place it inside any existing git repository. Nothing you capture ever
+> comes back here.
+
 ## How it works
 
 Four loops, running on top of one flat folder of markdown:
