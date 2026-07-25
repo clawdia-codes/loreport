@@ -721,8 +721,14 @@ def main():
                         help="Brain repo root (default: inferred from this script's location)")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=8765, help="HTTP transport port (localhost only)")
-    parser.add_argument("--credential", default=None,
-                        help="stdio-mode credential identifying the calling provider")
+    # Prefer the environment. A credential passed in argv is world-readable via
+    # `ps aux` to every local user, and HUB.md tells operators to generate a real
+    # random token per connection -- so argv would leak an actual secret. The flag
+    # stays for compatibility with existing units and manual invocations.
+    parser.add_argument("--credential", default=os.environ.get("LOREPORT_CREDENTIAL"),
+                        help="stdio-mode credential identifying the calling provider. "
+                             "Prefer LOREPORT_CREDENTIAL in the environment; a value "
+                             "passed here is visible in the process list.")
     args = parser.parse_args()
 
     brain_dir = args.brain_dir or default_brain_dir()

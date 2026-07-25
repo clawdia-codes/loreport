@@ -140,8 +140,17 @@ localn=$(grep -lx 'visibility: local' memories/*.md knowledge/*.md 2>/dev/null |
 ok "$localn item(s) marked local, $((items-localn)) shared"
 # Rebuilding surface.md is the only way to test the wall end to end. Preserve any
 # existing one so a doctor run never destroys the file the user is about to paste.
-[ -f surface.md ] && cp surface.md "/tmp/.doctor-surface.$$" 2>/dev/null
-if ./make-surface.sh >/tmp/.doctor.$$ 2>&1; then
+# mktemp, never a predictable /tmp/<name>.$PID: a world-writable directory plus a
+# guessable name lets a local attacker pre-place a symlink, which would redirect the
+# capture below and -- worse -- let the restore step move attacker-controlled content
+# INTO the brain.
+_dtmp=$(mktemp "${TMPDIR:-/tmp}/loreport-doctor.XXXXXX") || { echo "doctor: cannot create a temp file" >&2; exit 1; }
+_dsurf=""
+if [ -f surface.md ]; then
+  _dsurf=$(mktemp "${TMPDIR:-/tmp}/loreport-surface.XXXXXX") || { echo "doctor: cannot create a temp file" >&2; exit 1; }
+  cp surface.md "$_dsurf"
+fi
+if ./make-surface.sh >"$_dtmp" 2>&1; then
   leaked=0
   while read -r n; do
     [ -z "$n" ] && continue
@@ -152,11 +161,11 @@ if ./make-surface.sh >/tmp/.doctor.$$ 2>&1; then
   [ "$leaked" = "0" ] && ok "surface.md contains no local item (safe to paste into a cloud assistant)"
   grep -q 'set it here: `____`' surface.md && hmm "surface.md's Host: blank is unfilled — use ./make-surface.sh --host \"ChatGPT\""
 else
-  no "make-surface.sh failed: $(tail -1 /tmp/.doctor.$$)"
+  no "make-surface.sh failed: $(tail -1 "$_dtmp")"
 fi
-rm -f /tmp/.doctor.$$ surface.md 2>/dev/null
-if [ -f "/tmp/.doctor-surface.$$" ]; then
-  mv "/tmp/.doctor-surface.$$" surface.md
+rm -f "$_dtmp" surface.md 2>/dev/null
+if [ -n "$_dsurf" ] && [ -f "$_dsurf" ]; then
+  mv "$_dsurf" surface.md
 fi
 
 # obvious secrets in anything that can leave the machine
@@ -196,9 +205,11 @@ if [ "$PROBE_PROVIDERS" = "1" ]; then
   else
     LOC=$(grep -lx 'visibility: local' memories/*.md 2>/dev/null | head -1 | xargs -r -n1 basename | sed 's/\.md$//')
     SHA=$(grep -Lx 'visibility: local' memories/*.md 2>/dev/null | head -1 | xargs -r -n1 basename | sed 's/\.md$//')
-    probe() { # probe <credential> <item>  -> prints "ok" or "refused" or "error"
+    # The credential goes in the ENVIRONMENT, never argv: an argv value is readable
+    # by any local user via `ps aux` for as long as the probe runs.
+    probe() { # probe <credential> <item>  -> prints "ok" or "refused"
       printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"loreport_read_memory","arguments":{"name":"%s"}}}\n' "$2" \
-        | timeout 25 python3 "$FW/hub/mcp_server.py" --brain-dir "$BRAIN" --credential "$1" 2>/dev/null \
+        | LOREPORT_CREDENTIAL="$1" timeout 25 python3 "$FW/hub/mcp_server.py" --brain-dir "$BRAIN" 2>/dev/null \
         | grep -q '"isError": true' && echo refused || echo ok
     }
     creds=$(python3 -c "
