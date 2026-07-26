@@ -6,6 +6,12 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-07-27
+
+### Fixed
+- Connector examples now keep provider credentials in `LOREPORT_CREDENTIAL`, and the
+  OpenClaw example invokes the non-executable MCP server through `python3`.
+
 ## [1.4.0] — 2026-07-26
 
 ### Added
