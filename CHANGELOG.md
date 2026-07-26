@@ -6,6 +6,15 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.3.3] — 2026-07-26
+
+### Fixed
+- The tracked report churned on every sync. Stamping it with `main`'s last commit created
+  a feedback loop: each sync commits a rebuilt index and packet, which moves `main`, which
+  rewrites the stamp, which commits the report again — one 800KB commit per sync with
+  nothing changed. Both the timestamp and the identifier now come from the last commit
+  that touched your actual entries, so publishing activity no longer moves them.
+
 ## [1.3.2] — 2026-07-26
 
 ### Changed

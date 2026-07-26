@@ -558,18 +558,25 @@ JS = """
 
 
 def brain_committed_at(brain_dir):
-    """Timestamp of `main`'s last commit, as an aware UTC datetime.
+    """(timestamp, short sha) of the last commit that changed the user's ENTRIES.
 
     Falls back to the epoch rather than to `now` if git cannot answer: a wrong-but-
     stable timestamp keeps the output deterministic, whereas falling back to the
     clock would silently reintroduce the daily churn this exists to prevent."""
-    r = _run_git(brain_dir, "log", "-1", "--format=%cI", "main")
+    # Restrict to CONTENT paths. Deriving this from main's last commit of ANY path
+    # creates a feedback loop: every sync commits the rebuilt INDEX and packet, which
+    # moves main, which changes this stamp, which rewrites the report, which commits
+    # again -- one 800KB commit per sync forever, with nothing having changed. Only a
+    # real change to the user's entries should move it.
+    r = _run_git(brain_dir, "log", "-1", "--format=%cI%x09%h", "main", "--",
+                 "memories", "knowledge", "skills", "PROFILE.md")
     if r.returncode == 0 and r.stdout.strip():
+        iso, _, sha = r.stdout.strip().partition("\t")
         try:
-            return datetime.fromisoformat(r.stdout.strip()).astimezone(timezone.utc)
+            return datetime.fromisoformat(iso).astimezone(timezone.utc), sha
         except ValueError:
             pass
-    return datetime.fromtimestamp(0, timezone.utc)
+    return datetime.fromtimestamp(0, timezone.utc), "unknown"
 
 
 def build_html(version, main_short_sha, providers, activity, entries, now):
@@ -600,7 +607,7 @@ def build_html(version, main_short_sha, providers, activity, entries, now):
     parts.append('<header class="top">')
     parts.append(f"<h1>Loreport <span style=\"color:var(--muted);font-weight:400;\">v{html.escape(version)}</span></h1>")
     parts.append(
-        f'<p class="sub">Generated {html.escape(generated)} &middot; brain@main '
+        f'<p class="sub">As of {html.escape(generated)} &middot; entries@'
         f'<code>{html.escape(main_short_sha)}</code></p>'
     )
     parts.append("</header>")
@@ -736,9 +743,9 @@ def main(argv=None):
     # their memories changed. Deriving it from `main` makes the output a pure
     # function of brain content: same brain in, byte-identical file out, so it is
     # only committed when something actually changed. (Same rule INDEX.md follows.)
-    now = brain_committed_at(brain_dir)
+    now, content_sha = brain_committed_at(brain_dir)
 
-    doc = build_html(version, short_sha, providers, activity, entries, now)
+    doc = build_html(version, content_sha, providers, activity, entries, now)
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
