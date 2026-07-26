@@ -6,6 +6,20 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-07-26
+
+### Changed
+- The HTML report is now **tracked in your brain repo** rather than treated as a throwaway
+  artifact — it is part of the brain, so it travels and restores with it.
+- To make that affordable, the report is stamped with your brain's **last commit time**
+  instead of the build time. Same brain in, byte-identical file out, so it is committed
+  when your memories change and not once a day for nothing.
+- Where the report is reachable from outside your machine now defaults to
+  `NEEDS_TO_BE_SETUP`, and `loreport_status` reports that verbatim rather than hiding the
+  line. Hosting is genuinely optional — but not-set-up should be visible, not silent. The
+  tool description tells assistants to offer help finishing it.
+- Onboarding asks whether to publish the report, and makes clear that "later" is fine.
+
 ## [1.3.1] — 2026-07-26
 
 ### Fixed

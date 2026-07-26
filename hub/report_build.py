@@ -557,8 +557,23 @@ JS = """
 """
 
 
+def brain_committed_at(brain_dir):
+    """Timestamp of `main`'s last commit, as an aware UTC datetime.
+
+    Falls back to the epoch rather than to `now` if git cannot answer: a wrong-but-
+    stable timestamp keeps the output deterministic, whereas falling back to the
+    clock would silently reintroduce the daily churn this exists to prevent."""
+    r = _run_git(brain_dir, "log", "-1", "--format=%cI", "main")
+    if r.returncode == 0 and r.stdout.strip():
+        try:
+            return datetime.fromisoformat(r.stdout.strip()).astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(0, timezone.utc)
+
+
 def build_html(version, main_short_sha, providers, activity, entries, now):
-    generated = now.strftime("%Y-%m-%d %H:%M UTC")
+    generated = now.strftime("%Y-%m-%d %H:%M UTC")  # brain's last commit, not build time
 
     memories_n = sum(1 for e in entries if e["kind"] == "memory")
     knowledge_n = sum(1 for e in entries if e["kind"] == "knowledge")
@@ -715,7 +730,13 @@ def main(argv=None):
     providers = load_providers(brain_dir, script_dir)
     activity = load_provider_activity(brain_dir, providers.keys())
     entries = load_entries(brain_dir)
-    now = datetime.now(timezone.utc)
+    # Stamp the report with the BRAIN's last-commit time, never the wall clock.
+    # This file is tracked in the user's repo, so a wall-clock stamp would rewrite
+    # ~800KB on every rebuild and churn the history daily even when nothing about
+    # their memories changed. Deriving it from `main` makes the output a pure
+    # function of brain content: same brain in, byte-identical file out, so it is
+    # only committed when something actually changed. (Same rule INDEX.md follows.)
+    now = brain_committed_at(brain_dir)
 
     doc = build_html(version, short_sha, providers, activity, entries, now)
 

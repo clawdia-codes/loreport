@@ -35,6 +35,6 @@
       "default": "chatgpt-local-dev-token"
     }
   },
-  "report_url": "",
-  "_report_url_note": "Where the human-readable HTML report is served, e.g. https://<your-host>.ts.net:8446/ . LEAVE THIS EMPTY IN THE REPO and set the LOREPORT_REPORT_URL environment variable instead \u2014 this file is public, and a tailnet hostname is deployment-specific, not framework config. Handed to CLOUD callers too: security rests on tailscale auth, never on URL secrecy. CONSTRAINT: if the report is ever moved to public serving, revisit that \u2014 giving a cloud provider the URL would then be giving it every private entry."
+  "report_url": "NEEDS_TO_BE_SETUP",
+  "_report_url_note": "Where the HTML report is reachable from outside this machine. Leave as NEEDS_TO_BE_SETUP here \u2014 this file is public and the address is deployment-specific \u2014 and set LOREPORT_REPORT_URL in the environment your MCP server runs under. Until then loreport_status reports NEEDS_TO_BE_SETUP verbatim, and assistants are told to offer help finishing it. Handed to CLOUD callers too: security rests on the network auth in front of it, never on URL secrecy. CONSTRAINT: if the report is ever exposed publicly, revisit that \u2014 the URL would then be every private entry."
 }

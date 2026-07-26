@@ -201,9 +201,13 @@ TOOLS = {
     },
     "loreport_status": {
         "description": "Tooling version AND data freshness in one call: loreport version, "
-                       "brain entry counts (memories/skills/knowledge, shared vs local), and "
-                       "whether the published packet is current with `main` — reported as "
-                       "STALE, prominently, when it is not. Read-only.",
+                       "brain entry counts (memories/skills/knowledge, shared vs private), "
+                       "and whether the published packet is current with `main` — reported "
+                       "as STALE, prominently, when it is not. Also reports `report`, the "
+                       "address of the browsable HTML view of the brain. If that reads "
+                       "NEEDS_TO_BE_SETUP, the report exists but is not reachable from "
+                       "outside the user's machine yet: offer to walk them through "
+                       "publishing it rather than staying silent about it. Read-only.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     "loreport_whats_changed": {
@@ -843,6 +847,9 @@ def tool_loreport_change_memory_settings(brain_dir, name, visibility, trust, pro
     return {"status": "changed", "name": name, "visibility": visibility}
 
 
+UNCONFIGURED_REPORT_URL = "NEEDS_TO_BE_SETUP"
+
+
 def _report_url():
     """The browsable HTML report's URL, from hub/config/providers.json.
 
@@ -857,9 +864,14 @@ def _report_url():
         return env
     try:
         with open(os.path.join(HERE, "config", "providers.json"), "r", encoding="utf-8") as fh:
-            return json.load(fh).get("report_url") or ""
+            configured = json.load(fh).get("report_url")
     except (OSError, ValueError):
-        return ""
+        configured = None
+    # Never return an empty string: an absent line reads as "no such feature",
+    # whereas the literal sentinel is an actionable instruction the assistant can
+    # act on. Hosting is genuinely optional, so not-set-up is a normal state, not
+    # an error -- it just should not be a silent one.
+    return configured or UNCONFIGURED_REPORT_URL
 
 
 def tool_loreport_status(brain_dir):
@@ -948,7 +960,7 @@ def tool_loreport_status(brain_dir):
         f"           {shared_count} shareable · {local_count} stay on this machine\n"
         f"{packet_line}\n"
         f"providers  {_configured_providers_summary()}"
-        + (f"\nreport     {_report_url()}  (tailnet only)" if _report_url() else "")
+        + f"\nreport     {_report_url()}"
     )
     return {"content": text}
 

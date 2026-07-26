@@ -133,6 +133,16 @@ again (it dedupes — existing items come back as matches, not duplicates), and 
 the diff alone** by saying *"reconcile my memories"* in any assistant that has the
 standing instruction above.
 
+## Phase 4 — Publishing the browsable report (optional, but ask)
+If they run the sync hub, their brain also renders as a single browsable HTML page —
+dashboard, search, every entry. It is generated into their own repo automatically. What
+is *not* automatic is making it reachable from another device: that needs a URL, and it
+must never be a public one, because the page contains every private entry.
+
+Tell them plainly: until they set this up, `loreport_status` will report the address as
+`NEEDS_TO_BE_SETUP`, and any assistant can offer to help finish it. Ask whether they want
+to do it now or later — later is a perfectly good answer, and nothing else depends on it.
+
 ## Finish
 End with: the complete final `INDEX.md` in one block — it must use the three fixed section
 headings `## Memories`, `## Knowledge`, `## Skills`, with each item's line filed under the
