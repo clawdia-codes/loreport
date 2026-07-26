@@ -6,6 +6,16 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-26
+
+### Added
+- **Codex** is now a supported provider (`provider/codex`, `trust: local` — it's a local
+  CLI host). Added to the fixed merge order and the capture gate; connector setup is in
+  `hub/config/connector-snippets.md`.
+- ADR-004 records the retrieval **graduation ladder** — the concrete, measurable trigger
+  and the rung-by-rung path (derived link-graph → SQLite FTS5 → embeddings) for if/when the
+  brain outgrows flat-index search. Documentation only; no retrieval code changed.
+
 ## [1.3.3] — 2026-07-26
 
 ### Fixed
