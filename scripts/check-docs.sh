@@ -10,6 +10,7 @@
 #      ships a copy so a copied skeleton works standalone).
 #   3. Every relative markdown link resolves to a real file.
 #   4. make-surface.sh actually runs against the example brain and withholds `local`.
+#   5. Connector snippets keep provider credentials out of process arguments.
 #
 # Exits nonzero on any failure. No dependencies beyond python3 + bash.
 set -uo pipefail
@@ -128,6 +129,13 @@ for f in root.rglob("*.md"):
             continue
         if not (f.parent / link).resolve().exists():
             bad.append(f"broken link in {f}: {link}")
+
+# --- 3b. connector credentials stay out of argv -------------------------------
+snippets = (root / "hub/config/connector-snippets.md").read_text()
+if "--credential" in snippets:
+    bad.append("hub/config/connector-snippets.md: credential exposed in process arguments")
+if snippets.count("LOREPORT_CREDENTIAL") < 4:
+    bad.append("hub/config/connector-snippets.md: every connector must show LOREPORT_CREDENTIAL")
 
 for b in bad:
     print("FAIL:", b)

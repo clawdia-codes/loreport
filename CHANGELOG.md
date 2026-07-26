@@ -6,6 +6,13 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-07-26
+
+### Fixed
+- Connector setup examples now pass provider credentials through
+  `LOREPORT_CREDENTIAL` instead of process arguments, preventing tokens from appearing
+  in `ps` output.
+
 ## [1.4.0] — 2026-07-26
 
 ### Added
