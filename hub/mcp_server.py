@@ -96,18 +96,21 @@ REPO_ROOT = os.path.dirname(HERE)
 _FALLBACK_PROVIDER_BRANCHES = {
     "chatgpt": "provider/chatgpt",
     "claude": "provider/claude",
+    "codex": "provider/codex",
     "openclaw": "provider/openclaw",
 }
 
 _FALLBACK_CREDENTIAL_PROVIDER_MAP = {
     os.environ.get("MPB_CHATGPT_TOKEN", "chatgpt-local-dev-token"): "chatgpt",
     os.environ.get("MPB_CLAUDE_LOCAL_TOKEN", "claude-local-dev-token"): "claude",
+    os.environ.get("MPB_CODEX_TOKEN", "codex-local-dev-token"): "codex",
     os.environ.get("MPB_OPENCLAW_TOKEN", "openclaw-local-dev-token"): "openclaw",
 }
 
 _FALLBACK_CREDENTIAL_TRUST_MAP = {
     os.environ.get("MPB_CHATGPT_TOKEN", "chatgpt-local-dev-token"): "cloud",
     os.environ.get("MPB_CLAUDE_LOCAL_TOKEN", "claude-local-dev-token"): "local",
+    os.environ.get("MPB_CODEX_TOKEN", "codex-local-dev-token"): "local",
     os.environ.get("MPB_OPENCLAW_TOKEN", "openclaw-local-dev-token"): "local",
 }
 
@@ -155,7 +158,7 @@ TOOLS = {
             "type": "object",
             "properties": {
                 "block": {"type": "string", "description": "the emit-grammar v1 block text"},
-                "provider": {"type": "string", "description": "chatgpt | claude | openclaw "
+                "provider": {"type": "string", "description": "chatgpt | claude | codex | openclaw "
                             "(ignored if the connection already carries a credential)"},
             },
             "required": ["block"],

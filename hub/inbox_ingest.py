@@ -36,7 +36,7 @@ Validation pipeline:
 
 CLI:
     python3 hub/inbox_ingest.py <provider> <block-file> [--brain-dir PATH] [--trust local|cloud]
-    # provider: one of "chatgpt", "claude", "openclaw"
+    # provider: one of "chatgpt", "claude", "codex", "openclaw"
     # --trust: trust tier of the calling credential; defaults to "cloud" if
     #          omitted (fail closed — an omitted trust must never be treated
     #          as the unrestricted "local" tier).
@@ -54,7 +54,7 @@ from datetime import date, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-_FALLBACK_PROVIDERS = ("chatgpt", "claude", "openclaw")
+_FALLBACK_PROVIDERS = ("chatgpt", "claude", "codex", "openclaw")
 
 
 def _load_providers():

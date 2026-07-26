@@ -8,7 +8,7 @@ Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
                 force-moved), the rollback point.
   2. Fetch    — pull all provider branches.
   3. Merge    — into `main`, fixed order: provider/openclaw -> provider/claude ->
-                provider/chatgpt. INDEX.md is excluded from every merge (deleted from
+                provider/codex -> provider/chatgpt. INDEX.md is excluded from every merge (deleted from
                 the working tree before each merge, regenerated in step 6 — it is a
                 derived artifact and must never be hand-merged).
   3b. Provenance gate — for every provider-branch commit not yet on main whose
@@ -52,7 +52,9 @@ from datetime import date, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-_FALLBACK_PROVIDER_ORDER = ["provider/openclaw", "provider/claude", "provider/chatgpt"]
+_FALLBACK_PROVIDER_ORDER = [
+    "provider/openclaw", "provider/claude", "provider/codex", "provider/chatgpt"
+]
 
 
 def _load_provider_order():

@@ -8,9 +8,13 @@
       "branch": "provider/claude",
       "merge_order": 2
     },
+    "codex": {
+      "branch": "provider/codex",
+      "merge_order": 3
+    },
     "chatgpt": {
       "branch": "provider/chatgpt",
-      "merge_order": 3
+      "merge_order": 4
     }
   },
   "credentials": {
@@ -28,6 +32,11 @@
       "provider": "claude",
       "trust": "cloud",
       "default": null
+    },
+    "MPB_CODEX_TOKEN": {
+      "provider": "codex",
+      "trust": "local",
+      "default": "codex-local-dev-token"
     },
     "MPB_CHATGPT_TOKEN": {
       "provider": "chatgpt",

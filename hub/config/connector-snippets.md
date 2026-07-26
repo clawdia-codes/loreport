@@ -74,6 +74,26 @@ on the same branch and are reconciled by the next daily merge.
 
 ---
 
+## Codex — MCP config
+
+Add a local stdio server to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.loreport]
+command = "python3"
+args = [
+  "/absolute/path/to/loreport/hub/mcp_server.py",
+  "--brain-dir", "/absolute/path/to/your-brain",
+  "--transport", "stdio",
+  "--credential", "codex-local-dev-token",
+]
+```
+
+The credential maps the connection to local-trust `provider/codex`; caller-supplied
+provider names are ignored. Restart Codex after changing its global config.
+
+---
+
 ## openclaw — native
 
 openclaw *is* the hub; it needs no bridge. It reads and writes `main` and

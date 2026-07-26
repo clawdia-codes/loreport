@@ -2,7 +2,7 @@
 
 You are running the Loreport sync hub — the always-on custodian of the
 canonical brain repo. Every provider surface writes only its own branch
-(`provider/chatgpt`, `provider/claude`, `provider/openclaw`); you are the only writer
+(`provider/chatgpt`, `provider/claude`, `provider/codex`, `provider/openclaw`); you are the only writer
 of `main`. Live captures usually arrive through `hub/mcp_server.py`'s `loreport_save_memory`
 tool, which itself calls the same `inbox_ingest.py` gate described below — one gate,
 whether the capture came from a paste or a connector. This file is your prose: it tells you *when* to run each ritual and *why*
@@ -22,20 +22,21 @@ links).
 
 1. **Prereqs.** Python 3 (stdlib only — nothing to `pip install`), `git`, and this
    repo cloned as the canonical brain. Decide which providers you're actually
-   bridging (`openclaw`, `claude`, `chatgpt`) — you don't need all three.
+   bridging (`openclaw`, `claude`, `codex`, `chatgpt`) — you don't need all four.
 2. **Create the `provider/*` branches from `main`.** Each connected provider writes
    only its own branch; the hub is the only writer of `main`.
    ```
    git checkout main
    git branch provider/openclaw
    git branch provider/claude
+   git branch provider/codex
    git branch provider/chatgpt
    ```
    Skip branches for providers you aren't bridging yet — `brain_merge.py` silently
    skips any `provider/*` branch that doesn't exist.
 3. **Set the `MPB_*` credential tokens.** Every credential in `hub/config/providers.json`
    maps to an environment variable (e.g. `MPB_OPENCLAW_TOKEN`, `MPB_CLAUDE_LOCAL_TOKEN`,
-   `MPB_CLAUDE_WEB_TOKEN`, `MPB_CHATGPT_TOKEN`) and carries both a provider and a trust
+   `MPB_CLAUDE_WEB_TOKEN`, `MPB_CODEX_TOKEN`, `MPB_CHATGPT_TOKEN`) and carries both a provider and a trust
    tier (`local` or `cloud`) — read that file before wiring anything up. Generate a real
    random token per provider connection and export it in the environment `mcp_server.py`
    runs under; never ship with the in-source dev-token defaults for a real deployment.
@@ -85,7 +86,7 @@ Run once a day (see `hub/config/cron.txt` for the schedule):
    and digest print the tag it actually created; use that name. Every step after this
    one can be undone by returning to that tag — never skip it, never reorder it later.
 2. **Fetch** all provider branches.
-3. **Merge into `main` in the fixed order: `openclaw` → `claude` → `chatgpt`.** The
+3. **Merge into `main` in the fixed order: `openclaw` → `claude` → `codex` → `chatgpt`.** The
    order is fixed, not timestamp-based, so a conflict outcome is the same every time
    you or anyone else re-runs it — openclaw first because it's the highest-trust,
    highest-volume writer, then the rest alphabetically.

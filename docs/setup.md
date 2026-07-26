@@ -172,6 +172,7 @@ Loreport is my portable memory brain, reachable via the loreport_* tools.
 |---|---|---|
 | openclaw | `~/.openclaw/workspace/AGENTS.md` | everything; may relabel any item |
 | Claude Code | `~/.claude/CLAUDE.md`, or per-project | everything; may relabel any item |
+| Codex | `AGENTS.md`, with the local Loreport MCP server in `~/.codex/config.toml` | everything; may relabel any item |
 | ChatGPT | Project instructions, or Settings → Personalization → Custom Instructions | **`shared` only**; may relabel only its own items |
 | claude.ai | Project instructions, or Settings → Profile preferences | **`shared` only**; same |
 | Gemini | Gem instructions | paste recipe — no connector |
@@ -187,7 +188,7 @@ against the brain, and repairs the difference: match = skip, missing = add, chan
 **update the existing item** (never a duplicate). It is re-runnable by design — a clean
 second run finds nothing, which is how you know the loop converged.
 
-**Do platforms in this order: openclaw → Claude Code → ChatGPT → Gemini.** Local hosts
+**Do platforms in this order: openclaw → Claude Code → Codex → ChatGPT → Gemini.** Local hosts
 first: they read the brain directly, so any problem shows up where it's cheapest to debug,
 before a cloud host and its trust wall are involved.
 
@@ -195,6 +196,7 @@ before a cloud host and its trust wall are involved.
 |---|---|---|
 | **openclaw** | Say *"reconcile my memories"* — the `loreport-ops` skill is installed in `~/.openclaw/workspace/skills/`. It reads the brain from disk. | An item it added appears in `INDEX.md`. |
 | **Claude Code** | `/loreport reconcile`. Its native memory is a real file store (`~/.claude/projects/*/memory/`), so this is the one platform where the diff is exact rather than a model-recited dump. | `/loreport status` shows the new count. |
+| **Codex** | Say *"reconcile my memories"* after configuring the local Loreport MCP server. | `loreport_status` includes `codex`, and a capture lands on `provider/codex`. |
 | **ChatGPT** | **Connector must be live first** — check the MCP tunnel service is running, or reconcile silently has nothing to diff against. Then paste the standing instruction into Project instructions and say *"reconcile my memories"*. | It proposes adds/updates, and the wall holds (below). |
 | **Gemini / no connector** | Paste `surface.md` (or `hub/published/packet.md`) into the instructions field. Captures come back as `<MEMORY>` blocks you file by hand. | The blocks are well-formed and you can save them. |
 

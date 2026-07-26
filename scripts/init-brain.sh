@@ -104,8 +104,8 @@ git -C "$BRAIN" -c user.email="$(git config user.email 2>/dev/null || echo brain
 echo "  ✓ git repo initialised on main"
 
 if [ "$WITH_HUB" = "1" ]; then
-  for p in openclaw claude chatgpt; do git -C "$BRAIN" branch "provider/$p"; done
-  echo "  ✓ provider/{openclaw,claude,chatgpt} branches created (Tier-2 hub)"
+  for p in openclaw claude codex chatgpt; do git -C "$BRAIN" branch "provider/$p"; done
+  echo "  ✓ provider/{openclaw,claude,codex,chatgpt} branches created (Tier-2 hub)"
 fi
 
 # --- 3. GitHub backup (private, verified) --------------------------------------
