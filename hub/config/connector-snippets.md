@@ -17,7 +17,7 @@ to exactly one `provider/*` branch — never to `main` directly.
 3. **Configure the tunnel client** (`hub/config/tunnel-client.json` or an equivalent
    `tunnel-client` YAML profile) with that `tunnel_id` + Runtime key, and point its
    `mcp.commands` at the **stdio** transport directly:
-   `python3 hub/mcp_server.py --transport stdio --credential <per-provider-token>`
+   `LOREPORT_CREDENTIAL=<per-provider-token> python3 hub/mcp_server.py --transport stdio`
    — `tunnel-client` spawns this as a subprocess itself; you do **not** need to separately
    run `mcp_server.py --transport http` and have the tunnel connect to it.
 4. If you run the tunnel client as a systemd (or similar) service, **don't** source a
@@ -62,7 +62,8 @@ Add to your Claude Code MCP settings (e.g. `.mcp.json` or the CLI's MCP config):
   "mcpServers": {
     "loreport": {
       "command": "python3",
-      "args": ["hub/mcp_server.py", "--transport", "stdio", "--credential", "claude-local-dev-token"]
+      "args": ["hub/mcp_server.py", "--transport", "stdio"],
+      "env": {"LOREPORT_CREDENTIAL": "claude-local-dev-token"}
     }
   }
 }
@@ -81,11 +82,11 @@ Add a local stdio server to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.loreport]
 command = "python3"
+env = { LOREPORT_CREDENTIAL = "codex-local-dev-token" }
 args = [
   "/absolute/path/to/loreport/hub/mcp_server.py",
   "--brain-dir", "/absolute/path/to/your-brain",
   "--transport", "stdio",
-  "--credential", "codex-local-dev-token",
 ]
 ```
 
@@ -99,5 +100,5 @@ provider names are ignored. Restart Codex after changing its global config.
 openclaw *is* the hub; it needs no bridge. It reads and writes `main` and
 `provider/openclaw` directly on the filesystem, runs `brain_merge.py` and
 `snapshot_publish.py` from cron (`hub/config/cron.txt`), and can also run
-`hub/mcp_server.py --transport stdio --credential openclaw-local-dev-token` if it
-prefers to go through the same tool surface as the other providers for auditability.
+`LOREPORT_CREDENTIAL=openclaw-local-dev-token python3 hub/mcp_server.py --transport stdio`
+if it prefers to go through the same tool surface as the other providers for auditability.
