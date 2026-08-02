@@ -1,0 +1,7 @@
+[Unit]
+Description=Loreport weekly health check (design-08)
+ConditionPathExists=%h/.local/bin/loreport-health
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/loreport-health
