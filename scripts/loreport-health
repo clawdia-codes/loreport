@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# Loreport health check — consumer of last resort (design-08).
+# Read-only checks; set -uo pipefail without -e so every check runs.
+set -uo pipefail
+
+BRAIN="${LOREPORT_BRAIN_DIR:-/home/nvidia/projects/loreport-oyvind-theie}"
+FRAMEWORK="${LOREPORT_FRAMEWORK_DIR:-/home/nvidia/projects/loreport}"
+BANNER="${HOME}/.config/clawdia/loreport-health-report"
+HEALTH_STATE="${BRAIN}/hub/health-state.json"
+MANIFEST="${BRAIN}/hub/projection-manifest.json"
+TG_NOTIFY="/home/nvidia/bin/tg-notify.sh"
+NOW=$(date +%s)
+
+failures=()
+fixes=()
+
+note_failure() {
+  failures+=("$1")
+  fixes+=("$2")
+}
+
+tg_notify() {
+  local msg="$1"
+  shift || true
+  [ -x "$TG_NOTIFY" ] && "$TG_NOTIFY" "$msg" "$@" >/dev/null 2>&1 || true
+}
+
+index_item_count() {
+  grep -c '\[\[[^]]\+\]\]' "$BRAIN/INDEX.md" 2>/dev/null || echo 0
+}
+
+json_get() {
+  python3 - "$HEALTH_STATE" "$1" <<'PY'
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    print("")
+    raise SystemExit(0)
+cur = data
+for part in key.split("."):
+    if not isinstance(cur, dict) or part not in cur:
+        print("")
+        raise SystemExit(0)
+    cur = cur[part]
+print(cur if cur is not None else "")
+PY
+}
+
+json_set_pasted() {
+  local surface="$BRAIN/hub/surface-chatgpt.md"
+  python3 - "$HEALTH_STATE" "$surface" <<'PY'
+import hashlib, json, os, sys, time
+
+state_path, surface_path = sys.argv[1], sys.argv[2]
+begin = "<!-- loreport:begin -->"
+end = "<!-- loreport:end -->"
+try:
+    with open(surface_path, encoding="utf-8") as fh:
+        text = fh.read()
+except OSError:
+    print("error: cannot read surface", file=sys.stderr)
+    raise SystemExit(1)
+if begin in text and end in text:
+    _, rest = text.split(begin, 1)
+    inner, _ = rest.split(end, 1)
+    payload = inner.strip("\n") + "\n"
+else:
+    payload = text
+digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["chatgpt_pasted"] = {
+    "region_hash": f"sha256:{digest}",
+    "recorded_epoch": int(time.time()),
+}
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+print(f"recorded ChatGPT paste hash sha256:{digest}")
+PY
+}
+
+region_hash_file() {
+  local path="$1" mode="$2"
+  python3 - "$path" "$mode" "$FRAMEWORK/hub" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[3])
+from project import region_hash
+path, mode = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as fh:
+    text = fh.read()
+print(region_hash(text, mode))
+PY
+}
+
+if [ "${1:-}" = "--pasted" ]; then
+  json_set_pasted
+  exit 0
+fi
+
+# --- 1. Sync ran recently ----------------------------------------------------
+last_main_ct=$(git -C "$BRAIN" log -1 --format=%ct main 2>/dev/null || echo 0)
+if [ "$last_main_ct" -eq 0 ] || [ $((NOW - last_main_ct)) -gt $((48 * 3600)) ]; then
+  note_failure "brain sync stale ≥2 days" "run or inspect loreport-brain-sync.service / sync.sh"
+fi
+
+# --- 2. Sync succeeded -------------------------------------------------------
+sync_result=$(systemctl --user show loreport-brain-sync.service -p Result --value 2>/dev/null || echo unknown)
+if [ "$sync_result" != "success" ]; then
+  note_failure "last sync FAILED" "journalctl --user -u loreport-brain-sync.service -n 80"
+fi
+
+# --- 3–4. Projection fresh + no hand-edits -----------------------------------
+main_sha=$(git -C "$BRAIN" rev-parse main 2>/dev/null || echo "")
+if [ -f "$MANIFEST" ] && [ -n "$main_sha" ]; then
+  python3 - "$MANIFEST" "$BRAIN" "$main_sha" "$FRAMEWORK/hub" <<'PY' | while IFS=$'\t' read -r kind target fix; do
+import json, os, sys
+sys.path.insert(0, sys.argv[4])
+from project import region_hash, resolve_target_path
+
+manifest_path, brain, main_sha, _ = sys.argv[1:5]
+with open(manifest_path, encoding="utf-8") as fh:
+    manifest = json.load(fh)
+for entry in manifest.get("targets", []):
+    rel = entry.get("path", "")
+    mode = entry.get("mode", "block")
+    path = resolve_target_path(brain, rel)
+    label = entry.get("provider") or rel
+    if not os.path.isfile(path):
+        print(f"stale\tprojection stale/missing: {label}\tproject.py live run or inspect permissions on {rel}")
+        continue
+    mtime = os.path.getmtime(path)
+    recorded = entry.get("mtime")
+    if recorded is not None and mtime + 1 < float(recorded):
+        print(f"stale\tprojection stale/missing: {label}\tre-run projection after editing {rel}")
+    if entry.get("sha") != main_sha:
+        print(f"stale\tprojection stale/missing: {label}\twait for nightly sync or run hub/project.py")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    current = region_hash(text, mode)
+    if entry.get("region_hash") and current != entry["region_hash"]:
+        print(f"edit\thand-edit inside generated region: {label} — edits will be lost tonight\trevert hand-edits in {rel} or accept overwrite tonight")
+PY
+    [ -n "${kind:-}" ] || continue
+    if [ "$kind" = "stale" ]; then
+      note_failure "$target" "$fix"
+    elif [ "$kind" = "edit" ]; then
+      note_failure "$target" "$fix"
+    fi
+  done
+elif [ ! -f "$MANIFEST" ]; then
+  note_failure "projection manifest missing" "run hub/project.py once projection is activated"
+fi
+
+# --- 5. Capture alive (14-day INDEX count) -----------------------------------
+count_now=$(index_item_count)
+baseline_count=$(json_get "index_count_baseline.count")
+baseline_epoch=$(json_get "index_count_baseline.recorded_epoch")
+if [ -z "$baseline_epoch" ] || [ $((NOW - baseline_epoch)) -ge $((14 * 86400)) ]; then
+  python3 - "$HEALTH_STATE" "$count_now" "$NOW" <<'PY'
+import json, os, sys
+state_path, count, now = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["index_count_baseline"] = {"count": count, "recorded_epoch": now}
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+elif [ -n "$baseline_count" ] && [ "$count_now" -eq "$baseline_count" ]; then
+  note_failure "no new memories in 14 days — capture is dead again" "capture via Loreport MCP or emit-blocks; check provider branches"
+fi
+
+# --- 5b. Per-provider capture alive ------------------------------------------
+for branch in provider/openclaw provider/claude provider/codex provider/chatgpt; do
+  last_ct=$(git -C "$BRAIN" log -1 --format=%ct "$branch" 2>/dev/null || echo 0)
+  if [ "$last_ct" -eq 0 ] || [ $((NOW - last_ct)) -gt $((30 * 86400)) ]; then
+    note_failure "provider/${branch#provider/} silent 30+ days" "capture on ${branch#provider/} or inspect branch health"
+  fi
+done
+
+# --- 6. Merge hygiene --------------------------------------------------------
+latest_digest=$(ls -1 "$BRAIN"/hub/digest-*.md 2>/dev/null | sort | tail -1 || true)
+if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
+  if grep -qiE 'quarantine items pending review: [1-9]' "$latest_digest"; then
+    note_failure "merge digest needs review" "open $latest_digest and resolve quarantine items"
+  elif grep -qiE 'secret-scrub: FAIL' "$latest_digest"; then
+    note_failure "merge digest needs review" "secret-scrub failed — inspect $latest_digest"
+  elif ! grep -qi 'PROFILE conflicts (human review required): none' "$latest_digest"; then
+    note_failure "merge digest needs review" "PROFILE conflict in $latest_digest"
+  fi
+fi
+
+# --- 7. ChatGPT surface staleness (monthly nag max) ----------------------------
+chatgpt_surface="$BRAIN/hub/surface-chatgpt.md"
+pasted_hash=$(json_get "chatgpt_pasted.region_hash")
+pasted_epoch=$(json_get "chatgpt_pasted.recorded_epoch")
+last_nag=$(json_get "chatgpt_last_nag.recorded_epoch")
+if [ -f "$chatgpt_surface" ] && [ -n "$pasted_hash" ]; then
+  current_hash=$(region_hash_file "$chatgpt_surface" block)
+  if [ "$current_hash" != "$pasted_hash" ]; then
+    if [ -z "$last_nag" ] || [ $((NOW - last_nag)) -ge $((30 * 86400)) ]; then
+      note_failure "ChatGPT surface changed since last paste" "re-paste hub/surface-chatgpt.md into ChatGPT, then loreport-health --pasted"
+      python3 - "$HEALTH_STATE" "$NOW" <<'PY'
+import json, os, sys
+state_path, now = sys.argv[1], int(sys.argv[2])
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["chatgpt_last_nag"] = {"recorded_epoch": now}
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+    fi
+  fi
+fi
+
+# --- outcome -----------------------------------------------------------------
+if [ "${#failures[@]}" -gt 0 ]; then
+  mkdir -p "$(dirname "$BANNER")"
+  {
+    echo "=== Loreport health ($(date '+%Y-%m-%d %H:%M %Z')) ==="
+    echo
+    for i in "${!failures[@]}"; do
+      echo "✗ ${failures[$i]}"
+      echo "  fix: ${fixes[$i]}"
+      echo
+    done
+    echo "When healthy, this file is removed automatically."
+  } >"$BANNER"
+  msg="🧠 Loreport health FAIL: ${failures[0]}"
+  if [ "${#failures[@]}" -gt 1 ]; then
+    msg="$msg (+$(( ${#failures[@]} - 1 )) more)"
+  fi
+  tg_notify "$msg"
+  exit 1
+fi
+
+rm -f "$BANNER"
+
+last_hb=$(json_get "last_heartbeat_epoch")
+if [ -z "$last_hb" ] || [ $((NOW - last_hb)) -ge $((7 * 86400)) ]; then
+  mem_count=$(index_item_count)
+  proj_date=$(python3 - "$MANIFEST" <<'PY' 2>/dev/null || echo "unknown"
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(json.load(fh).get("projected_at", "unknown"))
+except Exception:
+    print("unknown")
+PY
+)
+  tg_notify "🧠 brain OK — ${mem_count} memories, projected ${proj_date}" --silent
+  python3 - "$HEALTH_STATE" "$NOW" <<'PY'
+import json, os, sys
+state_path, now = sys.argv[1], int(sys.argv[2])
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["last_heartbeat_epoch"] = now
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+fi
+
+exit 0
