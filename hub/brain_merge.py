@@ -73,7 +73,12 @@ def _load_provider_order():
 
 
 PROVIDER_ORDER = _load_provider_order()
-ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge"}
+ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
+
+HUMAN_REGION_RE = re.compile(
+    r"<!--\s*human:start\s*-->(.*?)<!--\s*human:end\s*-->",
+    re.DOTALL,
+)
 
 # Same secret-regex set used by inbox_ingest.py and snapshot_publish.py (duplicated
 # on purpose — every hub/*.py file is single-file and stdlib-only, so nothing is
@@ -223,6 +228,107 @@ def build_index_bytes(brain_dir):
 
 
 # --- consolidation-lite: mechanical dedup flags -----------------------------
+
+def extract_human_regions(text):
+    """Return human-region bodies in document order (pairwise start/end markers)."""
+    return [m.group(1) for m in HUMAN_REGION_RE.finditer(text)]
+
+
+def human_region_violation(main_text, incoming_text):
+    """Return a reason string when `incoming_text` drops or alters any human
+    region present in `main_text`, else None. Region bodies are compared as
+    multisets so a reorder with verbatim content passes; a file with no human
+    regions on main is never a violation."""
+    main_regions = extract_human_regions(main_text)
+    if not main_regions:
+        return None
+    incoming_regions = extract_human_regions(incoming_text)
+    if len(incoming_regions) < len(main_regions):
+        return "dropped human region(s)"
+    main_counts = {}
+    for region in main_regions:
+        main_counts[region] = main_counts.get(region, 0) + 1
+    incoming_counts = {}
+    for region in incoming_regions:
+        incoming_counts[region] = incoming_counts.get(region, 0) + 1
+    for region, count in main_counts.items():
+        if incoming_counts.get(region, 0) < count:
+            if len(incoming_regions) >= len(main_regions):
+                return "altered human region"
+            return "dropped human region(s)"
+    return None
+
+
+def quarantine_merge_update(brain_dir, provider, rel_path, reason, detail, incoming_text):
+    """Park a rejected merge update under hub/quarantine/ and log to digest.md."""
+    qdir = os.path.join(brain_dir, "hub", "quarantine", provider)
+    os.makedirs(qdir, exist_ok=True)
+    today = date.today().isoformat()
+    safe_name = rel_path.replace(os.sep, "__")
+    dest = os.path.join(qdir, f"{today}-{safe_name}")
+    n = 1
+    root_dest = dest
+    while os.path.exists(dest):
+        n += 1
+        dest = f"{root_dest}.{n}"
+    with open(dest, "w", encoding="utf-8") as fh:
+        fh.write(incoming_text)
+
+    digest_path = os.path.join(brain_dir, "hub", "quarantine", "digest.md")
+    os.makedirs(os.path.dirname(digest_path), exist_ok=True)
+    is_new = not os.path.isfile(digest_path)
+    ts = datetime.now().isoformat(timespec="seconds")
+    with open(digest_path, "a", encoding="utf-8") as fh:
+        if is_new:
+            fh.write("# Quarantine digest\n\n"
+                     "Rejected captures and merge updates land here — nothing is "
+                     "silently dropped.\n\n")
+        fh.write(f"## {ts} — QUARANTINE ({provider})\n")
+        fh.write(f"- file: {os.path.relpath(dest, brain_dir)}\n")
+        fh.write(f"- reason: {reason}\n")
+        fh.write(f"- detail: {detail}\n\n")
+
+
+def files_changed_between(brain_dir, old_ref, new_ref):
+    """Return memory/knowledge paths that differ between two git refs."""
+    r = git(brain_dir, "diff", "--name-only", old_ref, new_ref, check=False)
+    changed = []
+    for path in r.stdout.splitlines():
+        if path.startswith(ITEM_PROVENANCE_DIRS):
+            changed.append(path)
+    return changed
+
+
+def apply_human_region_guard(brain_dir, head_before, branch, report):
+    """After one provider branch lands on main, reject any update to an existing
+    item that drops or alters a human region present before the merge."""
+    head_after = git(brain_dir, "rev-parse", "HEAD").stdout.strip()
+    if head_before == head_after:
+        return
+    provider = _branch_provider_name(branch)
+    violations = []
+    for path in files_changed_between(brain_dir, head_before, head_after):
+        prior = _read_ref_path(brain_dir, head_before, path)
+        if prior is None:
+            continue  # new file — human regions pass through untouched
+        current = read_file(os.path.join(brain_dir, path))
+        reason = human_region_violation(prior, current)
+        if not reason:
+            continue
+        detail = f"{path}: {reason} from {branch} merge (kept pre-merge copy)"
+        quarantine_merge_update(
+            brain_dir, provider, path, "human-region-guard", detail, current
+        )
+        git(brain_dir, "checkout", head_before, "--", path, check=False)
+        git(brain_dir, "add", path, check=False)
+        violations.append(detail)
+    if violations:
+        report["human_region_violations"].extend(violations)
+        if has_staged_changes(brain_dir):
+            msg_lines = ["brain(merge): revert human-region-guard violations", ""]
+            msg_lines.extend(f"- {detail}" for detail in violations)
+            git(brain_dir, "commit", "-m", "\n".join(msg_lines), check=False)
+
 
 def find_dupes(brain_dir):
     """Mechanical-only dedup flags (fuzzy/semantic merge is consolidate.md's job):
@@ -395,6 +501,11 @@ def write_digest(brain_dir, today, report):
     lines.append(
         f"- Scrub warnings (local-visibility hits; merge continued): "
         f"{scrub_warnings if scrub_warnings else 'none'}"
+    )
+    human_violations = report.get("human_region_violations") or []
+    lines.append(
+        f"- Human-region violations (incoming update quarantined, main kept): "
+        f"{human_violations if human_violations else 'none'}"
     )
     lines.append(f"- Quarantine items pending review: {count_quarantine_items(brain_dir)}")
     m, k, s = report["index_counts"]
@@ -749,6 +860,7 @@ def do_merge(brain_dir, dry_run):
         "ff_skipped": [],
         "conflict_notes": [],
         "provenance_violations": [],
+        "human_region_violations": [],
         "backup_tag": None,
     }
 
@@ -827,6 +939,8 @@ def do_merge(brain_dir, dry_run):
                 if not branch_exists(brain_dir, branch):
                     continue
 
+                head_before_branch = git(brain_dir, "rev-parse", "HEAD").stdout.strip()
+
                 r = git(brain_dir, "merge", "--no-commit", "--no-ff", branch, check=False)
 
                 if r.returncode != 0 and not merge_in_progress(brain_dir):
@@ -861,6 +975,7 @@ def do_merge(brain_dir, dry_run):
 
                 if has_staged_changes(brain_dir) or merge_in_progress(brain_dir):
                     git(brain_dir, "commit", "--no-edit", "-m", f"brain(merge): {branch} -> main", check=False)
+                apply_human_region_guard(brain_dir, head_before_branch, branch, report)
                 report["merged"].append(branch)
 
             # Provenance gate: revert any path an untrusted commit touched
@@ -949,6 +1064,7 @@ def do_merge(brain_dir, dry_run):
         or report["renamed"]
         or report["scrub_warnings"]
         or report["provenance_violations"]
+        or report["human_region_violations"]
     ):
         sys.exit(1)
 
@@ -967,6 +1083,10 @@ def print_report(today, r):
         print(f"Provenance violations (untrusted commit touched a path it doesn't own, reverted): {r['provenance_violations']}")
     else:
         print("Provenance violations: none")
+    if r.get("human_region_violations"):
+        print(f"Human-region violations (incoming update quarantined, main kept): {r['human_region_violations']}")
+    else:
+        print("Human-region violations: none")
     print(f"Near-dupes flagged: {r['near_dupes'] if r['near_dupes'] else 'none'}")
     print(f"Secret-scrub: {r['scrub']}")
     if r.get("scrub_warnings"):

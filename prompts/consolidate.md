@@ -9,7 +9,7 @@ can actually write files and I say so.
 <!-- spec-slice: rules-compact v1 — verbatim copy; canonical text: docs/format-spec.md Appendix A -->
 Every item: YAML frontmatter with `name` (kebab-slug, unique across the whole brain,
 equal to the filename stem), `description` (one line), `type` (one of
-`user | feedback | project | reference | knowledge`); body in plain markdown;
+`user | feedback | project | reference | knowledge | person | decision`); body in plain markdown;
 `[[wikilinks]]` are bare slugs naming other items. `INDEX.md` holds exactly one line per
 item — `- [[name]] — hook  (type)` — under `## Memories` / `## Knowledge`, plus one line
 per skill package — `- [[skill-name]] — hook  (skill)` — under `## Skills`. Changed or

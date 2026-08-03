@@ -72,7 +72,7 @@ def _load_providers():
 
 
 PROVIDERS = _load_providers()
-ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge"}
+ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
 KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 # Identical secret-regex set to brain_merge.py / snapshot_publish.py (duplicated on

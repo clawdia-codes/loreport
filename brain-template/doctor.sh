@@ -68,7 +68,7 @@ fi
 
 # --------------------------------------------------------------- 3. items ----
 head_ "Items"
-TYPES="user feedback project reference knowledge"
+TYPES="user feedback project reference knowledge person decision"
 items=0; bad_fm=0
 for f in memories/*.md knowledge/*.md; do
   [ -f "$f" ] || continue
@@ -103,20 +103,42 @@ for f in memories/*.md knowledge/*.md; do
 done
 [ "$missing_file" = "0" ] && [ "$missing_line" = "0" ] && ok "INDEX matches the files on disk, both directions"
 
-# Dangling wikilinks. A link to an item you haven't written yet is FINE by design --
-# it marks something worth writing later. So these are reported as one summary line,
-# not one warning per link. The exception worth acting on is a link that would
-# resolve if underscores were hyphens: that is a naming-migration leftover, not an
-# intentional forward reference.
-dangling=0; slugfix=0
+# Dangling and ambiguous wikilinks. A link to an item you haven't written yet is FINE
+# by design — it marks something worth writing later. Report dangling and ambiguous
+# links as summary lines (not one line per link). Ambiguous = the slug resolves to
+# more than one of memories/<name>.md, knowledge/<name>.md, skills/<name>/SKILL.md.
+resolve_link() {
+  local name="$1"
+  local hits=0 hit=""
+  for candidate in "memories/${name}.md" "knowledge/${name}.md" "skills/${name}/SKILL.md"; do
+    if [ -f "$candidate" ]; then
+      hits=$((hits+1))
+      hit="$candidate"
+    fi
+  done
+  if [ "$hits" -eq 1 ]; then
+    printf '%s' "$hit"
+  elif [ "$hits" -gt 1 ]; then
+    printf 'ambiguous'
+  fi
+}
+
+dangling=0; ambiguous=0; slugfix=0
 for f in memories/*.md knowledge/*.md skills/*/SKILL.md; do
   [ -f "$f" ] || continue
   while read -r l; do
     [ -z "$l" ] && continue
-    if [ ! -f "memories/$l.md" ] && [ ! -f "knowledge/$l.md" ] && [ ! -f "skills/$l/SKILL.md" ]; then
+    target=$(resolve_link "$l")
+    if [ "$target" = "ambiguous" ]; then
+      ambiguous=$((ambiguous+1))
+      [ "${DOCTOR_VERBOSE:-0}" = "1" ] && echo "      $f: [[$l]] resolves ambiguously"
+      continue
+    fi
+    if [ -z "$target" ]; then
       dangling=$((dangling+1))
       alt=$(printf '%s' "$l" | tr '_' '-')
-      if [ -f "memories/$alt.md" ] || [ -f "knowledge/$alt.md" ] || [ -f "skills/$alt/SKILL.md" ]; then
+      alt_target=$(resolve_link "$alt")
+      if [ -n "$alt_target" ] && [ "$alt_target" != "ambiguous" ]; then
         slugfix=$((slugfix+1))
         [ "${DOCTOR_VERBOSE:-0}" = "1" ] && echo "      $f: [[$l]] -> [[$alt]]"
       else
@@ -129,10 +151,14 @@ if [ "$slugfix" -gt 0 ]; then
   no "$slugfix wikilink(s) use underscores where the item uses hyphens — a naming-migration leftover"
   echo "      Re-run with DOCTOR_VERBOSE=1 to list them."
 fi
+if [ "$ambiguous" -gt 0 ]; then
+  no "$ambiguous ambiguous [[wikilink]](s) — slug matches more than one item path"
+  echo "      Re-run with DOCTOR_VERBOSE=1 to list them."
+fi
 if [ "$((dangling-slugfix))" -gt 0 ]; then
   ok "$((dangling-slugfix)) forward reference(s) to items not written yet (fine by design)"
 fi
-[ "$dangling" = "0" ] && ok "no dangling [[wikilinks]]"
+[ "$dangling" = "0" ] && [ "$ambiguous" = "0" ] && ok "no dangling or ambiguous [[wikilinks]]"
 
 # ------------------------------------------------------- 4. the privacy wall --
 head_ "Privacy wall"

@@ -11,7 +11,7 @@ byte-identical copy of a text defined in Appendix A here.
 ---
 name: <kebab-slug>            # stable id; unique across the whole brain; used bare in [[wikilinks]]
 description: <one line>       # becomes the INDEX line hook; feeds provider retrieval
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host>               # provenance — assistant/app the capture came from (claude, chatgpt, openclaw, …)
 captured: <YYYY-MM-DD>       # provenance — capture date
 visibility: shared | local   # optional — see below; absent = shared
@@ -172,7 +172,7 @@ ranges must produce zero output.
 ---
 name: <kebab-slug>
 description: <one line — this becomes the index line>
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
 visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
@@ -216,7 +216,7 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
 <!-- spec-slice: rules-compact v1 — verbatim copy; canonical text: docs/format-spec.md Appendix A -->
 Every item: YAML frontmatter with `name` (kebab-slug, unique across the whole brain,
 equal to the filename stem), `description` (one line), `type` (one of
-`user | feedback | project | reference | knowledge`); body in plain markdown;
+`user | feedback | project | reference | knowledge | person | decision`); body in plain markdown;
 `[[wikilinks]]` are bare slugs naming other items. `INDEX.md` holds exactly one line per
 item — `- [[name]] — hook  (type)` — under `## Memories` / `## Knowledge`, plus one line
 per skill package — `- [[skill-name]] — hook  (skill)` — under `## Skills`. Changed or

@@ -13,7 +13,7 @@ every item's `source:` with it; use today's date for `captured:`.
 ---
 name: <kebab-slug>
 description: <one line — this becomes the index line>
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
 visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine

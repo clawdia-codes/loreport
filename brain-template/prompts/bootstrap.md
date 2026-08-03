@@ -29,7 +29,7 @@ shape, inside one fenced code block, so I can save it with one paste:
 ---
 name: <kebab-slug>
 description: <one line — this becomes the index line>
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
 visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
@@ -58,7 +58,10 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
   so it never leaves this machine.
 - Never emit `action="update"` for an item whose current body you have not read this
   session — read it first, then fold in the change. A full replacement rebuilt from only
-  the INDEX line will erase the rest of the item.
+  the INDEX line will erase the rest of the item. Every existing
+  `<!-- human:start -->…<!-- human:end -->` region in that body must pass through
+  verbatim; if you cannot see the current body, do not claim `action="update"`.
+- `type: person` defaults to `visibility: local` (entities — family, colleagues, partners).
 
 ## If this host has its own memory (capture parity)
 Your native memory and this brain coexist; neither replaces the other.
