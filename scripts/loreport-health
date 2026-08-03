@@ -120,7 +120,9 @@ fi
 # --- 3–4. Projection fresh + no hand-edits -----------------------------------
 main_sha=$(git -C "$BRAIN" rev-parse main 2>/dev/null || echo "")
 if [ -f "$MANIFEST" ] && [ -n "$main_sha" ]; then
-  python3 - "$MANIFEST" "$BRAIN" "$main_sha" "$FRAMEWORK/hub" <<'PY' | while IFS=$'\t' read -r kind target fix; do
+  # Capture first, loop after: `python3 ... | while` would run the loop in a subshell
+  # and every note_failure inside it would be discarded when the subshell exits.
+  projection_out=$(python3 - "$MANIFEST" "$BRAIN" "$main_sha" "$FRAMEWORK/hub" <<'PY'
 import json, os, sys
 sys.path.insert(0, sys.argv[4])
 from project import region_hash, resolve_target_path
@@ -148,13 +150,13 @@ for entry in manifest.get("targets", []):
     if entry.get("region_hash") and current != entry["region_hash"]:
         print(f"edit\thand-edit inside generated region: {label} — edits will be lost tonight\trevert hand-edits in {rel} or accept overwrite tonight")
 PY
+)
+  while IFS=$'\t' read -r kind target fix; do
     [ -n "${kind:-}" ] || continue
-    if [ "$kind" = "stale" ]; then
-      note_failure "$target" "$fix"
-    elif [ "$kind" = "edit" ]; then
-      note_failure "$target" "$fix"
-    fi
-  done
+    case "$kind" in
+      stale|edit) note_failure "$target" "$fix" ;;
+    esac
+  done <<< "$projection_out"
 elif [ ! -f "$MANIFEST" ]; then
   note_failure "projection manifest missing" "run hub/project.py once projection is activated"
 fi
@@ -163,6 +165,13 @@ fi
 count_now=$(index_item_count)
 baseline_count=$(json_get "index_count_baseline.count")
 baseline_epoch=$(json_get "index_count_baseline.recorded_epoch")
+# Alarm only once the baseline is genuinely 14 days old AND the count has not moved;
+# then re-baseline. A fresh (or missing) baseline is recorded silently — comparing a
+# 7-day-old baseline would cry "dead for 14 days" after a single quiet week.
+if [ -n "$baseline_epoch" ] && [ $((NOW - baseline_epoch)) -ge $((14 * 86400)) ] \
+   && [ -n "$baseline_count" ] && [ "$count_now" -eq "$baseline_count" ]; then
+  note_failure "no new memories in 14 days — capture is dead again" "capture via Loreport MCP or emit-blocks; check provider branches"
+fi
 if [ -z "$baseline_epoch" ] || [ $((NOW - baseline_epoch)) -ge $((14 * 86400)) ]; then
   python3 - "$HEALTH_STATE" "$count_now" "$NOW" <<'PY'
 import json, os, sys
@@ -178,17 +187,61 @@ with open(state_path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, indent=2, sort_keys=True)
     fh.write("\n")
 PY
-elif [ -n "$baseline_count" ] && [ "$count_now" -eq "$baseline_count" ]; then
-  note_failure "no new memories in 14 days — capture is dead again" "capture via Loreport MCP or emit-blocks; check provider branches"
 fi
 
 # --- 5b. Per-provider capture alive ------------------------------------------
-for branch in provider/openclaw provider/claude provider/codex provider/chatgpt; do
-  last_ct=$(git -C "$BRAIN" log -1 --format=%ct "$branch" 2>/dev/null || echo 0)
-  if [ "$last_ct" -eq 0 ] || [ $((NOW - last_ct)) -gt $((30 * 86400)) ]; then
-    note_failure "provider/${branch#provider/} silent 30+ days" "capture on ${branch#provider/} or inspect branch health"
-  fi
-done
+# NOT `git log -1 provider/<p>`: brain_merge.py fast-forwards every provider branch to
+# main after each merge, so all four branch tips share main's timestamp and that check
+# can never fire. The durable per-provider signal is the items themselves — each carries
+# `source:` (the capturing host) and `captured:` (the date) in its frontmatter.
+# A provider with zero captures ever is "not onboarded", not "dying", so it is skipped.
+provider_out=$(python3 - "$BRAIN" "$NOW" <<'PY'
+import os, re, sys, time
+
+brain, now = sys.argv[1], int(sys.argv[2])
+# source: value -> provider branch it belongs to
+SOURCE_MAP = {
+    "claude": "claude", "claude-code": "claude", "claude.ai": "claude",
+    "codex": "codex",
+    "openclaw": "openclaw", "clawdia": "openclaw",
+    "chatgpt": "chatgpt",
+}
+newest = {}
+for sub in ("memories", "knowledge"):
+    d = os.path.join(brain, sub)
+    if not os.path.isdir(d):
+        continue
+    for fn in os.listdir(d):
+        if not fn.endswith(".md"):
+            continue
+        src = cap = None
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("---") and src is not None:
+                        break
+                    m = re.match(r"^source:\s*(\S+)", line)
+                    if m:
+                        src = m.group(1).strip().lower()
+                    m = re.match(r"^captured:\s*(\d{4}-\d{2}-\d{2})", line)
+                    if m:
+                        cap = m.group(1)
+        except OSError:
+            continue
+        prov = SOURCE_MAP.get(src or "")
+        if prov and cap:
+            newest[prov] = max(newest.get(prov, ""), cap)
+
+for prov, cap in sorted(newest.items()):
+    age_days = (now - time.mktime(time.strptime(cap, "%Y-%m-%d"))) / 86400
+    if age_days > 30:
+        print(f"provider/{prov} silent 30+ days\tlast capture {cap} — check the {prov} capture path (MCP connector / emit-blocks)")
+PY
+)
+while IFS=$'\t' read -r target fix; do
+  [ -n "${target:-}" ] || continue
+  note_failure "$target" "$fix"
+done <<< "$provider_out"
 
 # --- 6. Merge hygiene --------------------------------------------------------
 latest_digest=$(ls -1 "$BRAIN"/hub/digest-*.md 2>/dev/null | sort | tail -1 || true)

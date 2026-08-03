@@ -227,11 +227,9 @@ def build_surface_body(brain_dir, target, short_sha):
     if not body.endswith("\n"):
         body += "\n"
 
-    if len(body) > budget:
-        body = body[:budget]
-        if not body.endswith("\n"):
-            body += "\n"
-
+    # PROFILE (and the header/protocol around it) is never truncated: if the fixed
+    # part alone blows the budget we go over rather than ship a half-sentence
+    # identity. Only whole INDEX lines are ever dropped, above.
     return body, vis_dropped, budget_dropped
 
 
@@ -332,6 +330,8 @@ def project_one(brain_dir, target, main_sha, short_sha, dry_run):
         "dropped": vis_dropped + budget_dropped,
         "dropped_visibility": vis_dropped,
         "dropped_budget": budget_dropped,
+        "budget_chars": int(target["budget_chars"]),
+        "over_budget": len(generated) > int(target["budget_chars"]),
         "mtime": mtime,
         "region_hash": region_hash(written, mode),
     }
