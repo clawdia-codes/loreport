@@ -305,8 +305,12 @@ fi
 
 rm -f "$BANNER"
 
+# 6 days, not 7, against a weekly timer. Two consecutive Monday 09:05 firings are
+# exactly 7.00 days apart, so a 7-day threshold loses a slot to any manual run,
+# Persistent= catch-up, or DST shift — and a silently-skipped heartbeat reads as
+# "the brain died", which is the one false signal this check must never send.
 last_hb=$(json_get "last_heartbeat_epoch")
-if [ -z "$last_hb" ] || [ $((NOW - last_hb)) -ge $((7 * 86400)) ]; then
+if [ -z "$last_hb" ] || [ $((NOW - last_hb)) -ge $((6 * 86400)) ]; then
   mem_count=$(index_item_count)
   proj_date=$(python3 - "$MANIFEST" <<'PY' 2>/dev/null || echo "unknown"
 import json, sys

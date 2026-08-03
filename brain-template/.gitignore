@@ -1,1 +1,10 @@
 surface.md
+
+# Projection outputs (hub/project.py) and health state. Deliberately NOT tracked:
+# design-08 check 3 asserts the manifest's projected sha == main HEAD, so committing
+# these would move HEAD past the manifest and make the check fail every single run.
+# Leaving them untracked also keeps the tree clean for sync.sh's post-merge guard.
+hub/projection-manifest.json
+hub/surface-chatgpt.md
+hub/surface-claude-ai.md
+hub/health-state.json
