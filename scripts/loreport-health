@@ -149,12 +149,15 @@ for entry in manifest.get("targets", []):
     current = region_hash(text, mode)
     if entry.get("region_hash") and current != entry["region_hash"]:
         print(f"edit\thand-edit inside generated region: {label} — edits will be lost tonight\trevert hand-edits in {rel} or accept overwrite tonight")
+    dropped = entry.get("dropped_budget") or 0
+    if dropped:
+        print(f"trunc\tindex truncation: {label} silently dropped {dropped} line(s)\traise budget_chars for {label} in hub/projection-targets.json or prune index")
 PY
 )
   while IFS=$'\t' read -r kind target fix; do
     [ -n "${kind:-}" ] || continue
     case "$kind" in
-      stale|edit) note_failure "$target" "$fix" ;;
+      stale|edit|trunc) note_failure "$target" "$fix" ;;
     esac
   done <<< "$projection_out"
 elif [ ! -f "$MANIFEST" ]; then
