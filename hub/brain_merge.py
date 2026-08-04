@@ -290,11 +290,18 @@ def quarantine_merge_update(brain_dir, provider, rel_path, reason, detail, incom
 
 
 def files_changed_between(brain_dir, old_ref, new_ref):
-    """Return memory/knowledge paths that differ between two git refs."""
+    """Return memory/knowledge/PROFILE paths that differ between two git refs.
+
+    Human regions are an item-body convention, but PROFILE.md carries one too
+    (design-wiki-parity §1: the Boundaries section), and it is projected into every
+    provider surface -- so it is the single highest-value file to protect.
+    ITEM_PROVENANCE_DIRS is read at call time: it is defined further down the file.
+    """
+    scope = ITEM_PROVENANCE_DIRS + ("PROFILE.md",)
     r = git(brain_dir, "diff", "--name-only", old_ref, new_ref, check=False)
     changed = []
     for path in r.stdout.splitlines():
-        if path.startswith(ITEM_PROVENANCE_DIRS):
+        if path.startswith(scope):
             changed.append(path)
     return changed
 
@@ -311,7 +318,12 @@ def apply_human_region_guard(brain_dir, head_before, branch, report):
         prior = _read_ref_path(brain_dir, head_before, path)
         if prior is None:
             continue  # new file — human regions pass through untouched
-        current = read_file(os.path.join(brain_dir, path))
+        # A merge that DELETES the file leaves nothing on disk. Treat it as an
+        # empty body: every human region is "dropped", so the guard restores the
+        # pre-merge copy. Reading it unguarded would raise FileNotFoundError and
+        # abort the whole nightly merge -- the one thing this must never do.
+        abs_path = os.path.join(brain_dir, path)
+        current = read_file(abs_path) if os.path.isfile(abs_path) else ""
         reason = human_region_violation(prior, current)
         if not reason:
             continue

@@ -6,6 +6,40 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-08-04
+
+### Added
+- **Managed human-edit regions** (`design-wiki-parity.md` §1). A `<!-- human:start -->…
+  <!-- human:end -->` region marks text as the human's. Two layers enforce it: the capture
+  protocol tells a model an `action="update"` must carry every existing region through
+  verbatim, and — the part prose alone never delivered — `hub/brain_merge.py` now *checks*.
+  A provider branch that drops or alters a region present on `main` has that file reverted
+  to main's copy, the rejected version parked in `hub/quarantine/`, and the reason written
+  to the digest the health check reads. Region bodies compare as a multiset, so reordering
+  verbatim regions is fine; a file with no regions is untouched; a new file passes through.
+  Scope is `memories/`, `knowledge/`, and `PROFILE.md` — the profile is projected into
+  every provider surface, so it is the highest-value file in the brain to protect.
+- **`type: person` and `type: decision`** (§4) accepted end to end: `ITEM_TYPES` in
+  `brain_merge.py` and `inbox_ingest.py`, the emit grammars in `prompts/`, `doctor.sh`'s
+  type check, and `project.py`'s truncation ranking (both rank with `user`/`feedback` —
+  entities and rulings are load-bearing, so they survive a budget squeeze). `person`
+  defaults to `visibility: local` by prompt rule.
+- **Obsidian render** (§3). The brain was already a valid vault, so this is config, not a
+  bridge: a minimal tracked `.obsidian/` (readable line length, wikilinks on, graph
+  defaults) with volatile workspace state gitignored. `doctor.sh` gained a link-resolution
+  pass that reports *ambiguous* `[[wikilinks]]` — a slug matching more than one of
+  `memories/<name>.md`, `knowledge/<name>.md`, `skills/<name>/SKILL.md` — alongside the
+  dangling-link summary it already printed.
+
+### Fixed
+- Projection stripped no `human:` markers, so the PROFILE region delimiters would have been
+  copied into every provider surface. `project.py` now removes the marker lines — never the
+  text between them — on the way out.
+- A provider branch that *deleted* a guarded file raised `FileNotFoundError` mid-merge.
+  Since `sync.sh` halts the whole nightly run on an unclean tree, that would have taken
+  projection and the backup push down with it. A deletion is now treated as an empty body:
+  every region reads as dropped, and the guard restores main's copy.
+
 ## [1.4.0] — 2026-07-26
 
 ### Added

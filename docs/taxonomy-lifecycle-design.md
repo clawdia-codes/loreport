@@ -9,6 +9,13 @@ model infers `type` and lifecycle; the user never fills a form. Every addition b
 `visibility` tiering — a `decision` or entity page about Coach/Portia/finance, or one naming a
 real person, defaults `local` and never reaches a cloud provider.
 
+**Status (2026-08-04, S2):** item 1's enum change has *shipped ahead of this spec* — S2
+(`design-wiki-parity.md` §4) added BOTH `decision` and `person` to `ITEM_TYPES` in
+`inbox_ingest.py` / `brain_merge.py`, to the prompt grammars, and to `project.py`'s
+truncation ranking. So item 1 below is done and its "concrete landmine" is closed; read
+"the ONLY new type this sprint" as historical. Item 2 (`lifespan`) and everything after
+it remain unbuilt.
+
 ---
 
 ## Schema delta (the whole change, precisely)

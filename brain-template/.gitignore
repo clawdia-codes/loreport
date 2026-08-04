@@ -1,6 +1,5 @@
 surface.md
 .obsidian/workspace*
-.obsidian/workspace.json
 
 # Projection outputs (hub/project.py) and health state. Deliberately NOT tracked:
 # design-08 check 3 asserts the manifest's projected sha == main HEAD, so committing

@@ -28,7 +28,14 @@ BEGIN_MARKER = "<!-- loreport:begin -->"
 END_MARKER = "<!-- loreport:end -->"
 
 INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
-TYPE_FROM_LINE_RE = re.compile(r"\(\s*(user|feedback|project|reference|knowledge|skill)\s*\)\s*$")
+TYPE_FROM_LINE_RE = re.compile(
+    r"\(\s*(user|feedback|project|reference|knowledge|person|decision|skill)\s*\)\s*$"
+)
+
+# PROFILE.md carries `<!-- human:start/end -->` markers (design-wiki-parity §1) that
+# the merge guard enforces on. They are bookkeeping for the store, not content for
+# the provider, so strip the markers -- never the text between them -- on the way out.
+HUMAN_MARKER_LINE_RE = re.compile(r"^[ \t]*<!--\s*human:(?:start|end)\s*-->[ \t]*\n?", re.M)
 
 DESKTOP_CAPTURE_POINTER = """\
 ## Loreport capture
@@ -40,6 +47,8 @@ TRUNCATION_ORDER = {
     "project": 1,
     "feedback": 2,
     "user": 2,
+    "person": 2,      # entities Øyvind deals with — as load-bearing as `user`
+    "decision": 2,    # rulings; same weight as the `feedback` they were split from
     "knowledge": 3,
     "skill": 3,
 }
@@ -197,7 +206,7 @@ def build_header(short_sha):
 
 def build_surface_body(brain_dir, target, short_sha):
     include_local = target.get("scope", "shared") == "all"
-    profile = read_brain_text(brain_dir, "PROFILE.md")
+    profile = HUMAN_MARKER_LINE_RE.sub("", read_brain_text(brain_dir, "PROFILE.md"))
     if not profile.endswith("\n"):
         profile += "\n"
 
