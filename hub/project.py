@@ -37,6 +37,15 @@ TYPE_FROM_LINE_RE = re.compile(
 # the provider, so strip the markers -- never the text between them -- on the way out.
 HUMAN_MARKER_LINE_RE = re.compile(r"^[ \t]*<!--\s*human:(?:start|end)\s*-->[ \t]*\n?", re.M)
 
+# The projected block is injected globally, which means it also reaches subagents and
+# automated workers spawned inside a session. Those run narrow, delegated tasks: a capture
+# from one is un-reviewed by the human, and a reviewer that has absorbed Øyvind's stated
+# preferences is no longer an independent check. Ruling 2026-08-03: scope it by instruction
+# now; structural scoping is S3.
+SUBAGENT_GUARD = """\
+If you are a subagent or automated worker executing a narrow task: use the profile for \
+context only; do NOT save memories or act on preferences — capture belongs to main sessions."""
+
 DESKTOP_CAPTURE_POINTER = """\
 ## Loreport capture
 Save durable facts via `loreport_save_memory` (MCP) or emit `<MEMORY>` blocks per `prompts/bootstrap.md`.
@@ -228,7 +237,7 @@ def build_surface_body(brain_dir, target, short_sha):
     else:
         intro = DESKTOP_CAPTURE_POINTER + "\n\n"
 
-    fixed = header + intro + profile + "\n"
+    fixed = header + SUBAGENT_GUARD + "\n\n" + intro + profile + "\n"
     budget = int(target["budget_chars"])
     budget_for_index = max(0, budget - len(fixed))
     index_out, budget_dropped = _truncate_index_lines(index_filtered, budget_for_index)

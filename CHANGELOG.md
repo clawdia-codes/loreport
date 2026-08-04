@@ -6,6 +6,16 @@ Newest first. Versions follow [semver](https://semver.org).
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-08-04
+
+### Added
+- The projected block now opens with a **subagent guard**: a line telling a subagent or
+  automated worker to treat the profile as context only and not to save memories or act on
+  preferences. The projection is injected globally, so it reaches delegated workers too — and
+  a capture from one is un-reviewed, while a reviewer that has absorbed the user's stated
+  preferences is no longer an independent check. Instruction-level scoping only; structural
+  scoping is S3.
+
 ## [1.5.0] — 2026-08-04
 
 ### Added
