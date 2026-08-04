@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.5.2 — 2026-08-04
+## [1.5.2] — 2026-08-04
 - loreport-health: alarm on silent index truncation (dropped_budget > 0 in projection manifest) — closes the no-silent-decay gap found in S2.
 
 Curated by hand, one entry per sprint — deliberately not generated from git log,
