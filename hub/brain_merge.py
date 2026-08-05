@@ -48,7 +48,12 @@ import subprocess
 import sys
 from datetime import date, datetime
 
-import synth_detect
+# Sibling import: this module is imported by tooling that does not put hub/ on the
+# path (scripts/check-docs.sh does exactly that), so make the directory importable
+# rather than relying on being run as a script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import synth_detect  # noqa: E402
 
 # Where the merge parks the detector's report for the weekly health check to read.
 # Gitignored alongside the other hub state files: it is a report artifact, and a
