@@ -1,0 +1,3 @@
+{"timestamp":"2026-08-04T11:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Save this: Codex session logs live under ~/.codex/sessions/."}]}}
+{"timestamp":"2026-08-04T11:00:01.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Noted."}]}}
+{"timestamp":"2026-08-04T11:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"We decided: wikilink fixes skip human regions."}]}}
