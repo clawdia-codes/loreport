@@ -258,6 +258,39 @@ if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
   fi
 fi
 
+# --- 6b. Synthesis detector health (design-wiki-parity §2) --------------------
+# "If the cluster detector emits degenerate output (single-token topics — the REM
+# failure), alarm." The detector itself refuses such topics and reports them as
+# warnings instead of proposals; this is the consumer that makes those warnings
+# visible, so the calibration window is tuned on something a human actually reads.
+SYNTH_REPORT="$BRAIN/hub/synthesis-report.json"
+if [ -f "$SYNTH_REPORT" ]; then
+  synth_out=$(python3 - "$SYNTH_REPORT" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError) as e:
+    print(f"synth\tsynthesis report unreadable: {e}\tcheck hub/synthesis-report.json or re-run hub/brain_merge.py")
+    raise SystemExit(0)
+if data.get("error"):
+    print(f"synth\tsynthesis detector errored: {data['error']}\tsee hub/synth_detect.py")
+warnings = data.get("warnings") or []
+degenerate = [w for w in warnings if w.get("reason") == "degenerate-topic"]
+oversized = [w for w in warnings if w.get("reason") == "oversized-cluster"]
+if degenerate:
+    topics = ", ".join(sorted({w.get("topic", "?") for w in degenerate})[:5])
+    print(f"synth\tsynthesis detector emitting degenerate topics ({len(degenerate)}): {topics}\tthe REM failure mode — retune the signal in hub/synth_detect.py before arming synthesis")
+if oversized:
+    print(f"synth\tsynthesis detector emitting oversized clusters ({len(oversized)})\tlink-graph sprawl, not a topic — tighten clustering before arming synthesis")
+PY
+)
+  while IFS=$'\t' read -r kind target fix; do
+    [ -n "${kind:-}" ] || continue
+    [ "$kind" = "synth" ] && note_failure "$target" "$fix"
+  done <<< "$synth_out"
+fi
+
 # --- 7. ChatGPT surface staleness (monthly nag max) ----------------------------
 chatgpt_surface="$BRAIN/hub/surface-chatgpt.md"
 pasted_hash=$(json_get "chatgpt_pasted.region_hash")

@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.8.0] — 2026-08-05
+
+### Added
+- Synthesis detection runs inside the nightly merge, **report-only** for the
+  design-wiki-parity §2 calibration window (~3 weeks, to 2026-08-25). Proposals go into
+  the digest and `hub/synthesis-report.json`; nothing is filed, and no code path can
+  create a `knowledge/` page from detector output. A detector crash degrades to a digest
+  note rather than failing the merge.
+- Health check gains 6b: alarms when the detector emits degenerate topics (the REM
+  failure design §2 names) or oversized clusters — so the calibration warnings have a
+  consumer instead of sitting in a file nobody opens.
+- `hub/synthesis-report.json` gitignored in the brain template, alongside the other hub
+  report artifacts.
+
 ## [1.7.0] — 2026-08-05
 
 ### Added

@@ -48,6 +48,13 @@ import subprocess
 import sys
 from datetime import date, datetime
 
+import synth_detect
+
+# Where the merge parks the detector's report for the weekly health check to read.
+# Gitignored alongside the other hub state files: it is a report artifact, and a
+# tracked file rewritten nightly would leave the tree dirty for sync.sh's guard.
+SYNTHESIS_REPORT_FILE = "hub/synthesis-report.json"
+
 # --- constants -------------------------------------------------------------
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -488,6 +495,63 @@ def count_quarantine_items(brain_dir):
     return count
 
 
+def run_synthesis_report(brain_dir, dry_run):
+    """Run the cluster detector and park its report for the health check.
+
+    REPORT-ONLY by construction: `synth_detect` only reads, this function only
+    writes `hub/synthesis-report.json` (a gitignored report artifact, never brain
+    content), and the merge does nothing with the result but print it. Filing a
+    proposal as a `knowledge/` page is the post-calibration step and is not
+    implemented anywhere yet — see design-wiki-parity §2.
+
+    Never raises: a detector that crashes must not take the nightly merge with it.
+    """
+    try:
+        result = synth_detect.detect_clusters(brain_dir)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "clusters": [], "warnings": []}
+
+    if not dry_run:
+        payload = dict(result)
+        payload["generated"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            with open(os.path.join(brain_dir, SYNTHESIS_REPORT_FILE), "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+        except OSError as e:
+            result = dict(result)
+            result["error"] = f"could not write {SYNTHESIS_REPORT_FILE}: {e}"
+    return result
+
+
+def format_synthesis_lines(synthesis):
+    """Digest lines for the synthesis section. Says REPORT-ONLY on every run so a
+    reader never mistakes a proposal for something that was filed."""
+    if not synthesis:
+        return ["- Synthesis proposals (REPORT-ONLY, none filed): detector did not run"]
+    if synthesis.get("error"):
+        return [f"- Synthesis proposals (REPORT-ONLY, none filed): detector error — {synthesis['error']}"]
+
+    clusters = synthesis.get("clusters") or []
+    warnings = synthesis.get("warnings") or []
+    lines = [
+        f"- Synthesis proposals (REPORT-ONLY, none filed): {len(clusters)} "
+        f"from {synthesis.get('item_count', 0)} items"
+    ]
+    for cluster in clusters:
+        lines.append(
+            f"    - {cluster['topic']} [{cluster['signal']}] "
+            f"members: {', '.join(cluster['members'])}"
+        )
+    if warnings:
+        lines.append(f"- Detector health: {len(warnings)} warning(s)")
+        for warning in warnings:
+            lines.append(
+                f"    - {warning['reason']}: topic={warning['topic']} "
+                f"({len(warning['members'])} members, {warning['signal']})"
+            )
+    return lines
+
+
 def write_digest(brain_dir, today, report):
     """Write hub/digest-<date>.md from the merge report (REVIEW.md #15) --
     every cycle's outcome as a real file, not just stdout prose nobody reads.
@@ -519,6 +583,7 @@ def write_digest(brain_dir, today, report):
         f"- Human-region violations (incoming update quarantined, main kept): "
         f"{human_violations if human_violations else 'none'}"
     )
+    lines.extend(format_synthesis_lines(report.get("synthesis")))
     lines.append(f"- Quarantine items pending review: {count_quarantine_items(brain_dir)}")
     m, k, s = report["index_counts"]
     lines.append(f"- INDEX rebuilt: {m + k + s} items ({m} memories, {k} knowledge, {s} skills)")
@@ -1018,6 +1083,13 @@ def do_merge(brain_dir, dry_run):
             elif report["scrub_warnings"]:
                 report["scrub"] = "PASS (local-visibility warnings — see scrub_warnings)"
 
+            # Synthesis detection (design-wiki-parity §2) — REPORT-ONLY during the
+            # 2-3 week calibration window. The detector is a pure read: it proposes
+            # topics into the digest and files nothing, and nothing downstream of
+            # here may create a knowledge/ page from its output. It also must never
+            # be able to fail a merge, so a detector bug degrades to a digest note.
+            report["synthesis"] = run_synthesis_report(brain_dir, dry_run)
+
             # Deterministic INDEX rebuild.
             index_bytes, m, k, s = build_index_bytes(brain_dir)
             report["index_counts"] = (m, k, s)
@@ -1100,6 +1172,8 @@ def print_report(today, r):
     else:
         print("Human-region violations: none")
     print(f"Near-dupes flagged: {r['near_dupes'] if r['near_dupes'] else 'none'}")
+    for line in format_synthesis_lines(r.get("synthesis")):
+        print(line.lstrip("- "))
     print(f"Secret-scrub: {r['scrub']}")
     if r.get("scrub_warnings"):
         print(f"Scrub warnings (local-visibility hits, merge continued): {r['scrub_warnings']}")
