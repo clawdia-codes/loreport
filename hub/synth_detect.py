@@ -2,12 +2,18 @@
 """
 hub/synth_detect.py — deterministic synthesis cluster detector (report-only).
 
-Clusters memories on [[wikilink]] co-reference and shared type:. Rule: ≥3 memories
-that mutually link (connected component in the undirected link graph among existing
-items) OR ≥3 memories linking a common missing [[name]] → synthesis proposal.
+Clusters memories on [[wikilink]] co-reference and shared type:. Rule (design §2): ≥3
+memories that MUTUALLY link — an edge exists only when A links B *and* B links A —
+OR ≥3 memories linking a common missing [[name]] → synthesis proposal.
 
-Degenerate single-token / stopword topics are refused and reported as detector-health
-warnings instead of clusters. Wired nowhere — report emitter only.
+Mutuality matters: co-reference in one direction alone makes the link graph one big
+connected component (a densely cross-linked brain yields a single 17-member blob with
+an arbitrary member as its "topic"), which is the degenerate output the health check
+is supposed to alarm on rather than propose.
+
+Degenerate topics — single tokens, stopwords, or a bare taxonomy type — and oversized
+components are refused and reported as detector-health warnings instead of clusters.
+Wired nowhere — report emitter only.
 
 CLI:
     python3 hub/synth_detect.py --brain-dir PATH [--json]
@@ -38,6 +44,15 @@ STOPWORDS = frozenset(
         "below", "between", "out", "off", "over", "under", "again", "further",
     }
 )
+
+# A bare taxonomy type is not a synthesis topic — "project" says nothing about what
+# the cluster is *about*. Treated as degenerate for the same reason single tokens are.
+TYPE_WORDS = frozenset(
+    {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
+)
+
+# A component this large is link-graph sprawl, not a coherent synthesis topic.
+MAX_CLUSTER_MEMBERS = 8
 
 
 def parse_simple_yaml_scalars(text):
@@ -136,11 +151,24 @@ def is_degenerate_topic(topic):
         return True
     if len(tokens) == 1:
         tok = tokens[0]
-        if len(tok) <= 2 or tok in STOPWORDS:
+        if len(tok) <= 2 or tok in STOPWORDS or tok in TYPE_WORDS:
             return True
     if all(t in STOPWORDS for t in tokens):
         return True
     return False
+
+
+def common_slug_prefix(names):
+    """Longest shared hyphen-segment prefix, e.g. project-coach-{db-safety,login-ui}."""
+    segs = [n.split("-") for n in names]
+    shared = []
+    for i in range(min(len(s) for s in segs)):
+        tok = segs[0][i]
+        if all(s[i] == tok for s in segs) and i < min(len(s) for s in segs) - 1:
+            shared.append(tok)
+        else:
+            break
+    return "-".join(shared) if shared else None
 
 
 def detect_clusters(brain_dir):
@@ -155,7 +183,9 @@ def detect_clusters(brain_dir):
             if target == "ambiguous":
                 continue
             if target and link in names:
-                edges.add(tuple(sorted((name, link))))
+                # Design §2: "memories that mutually link" — both directions required.
+                if name in items[link]["links"]:
+                    edges.add(tuple(sorted((name, link))))
             elif not target:
                 missing_link_counts[link].add(name)
 
@@ -170,8 +200,22 @@ def detect_clusters(brain_dir):
         inter_links = sum(
             1 for a in members for b in members
             if a != b and b in items[a]["links"]
-        )
-        topic = shared_type or members[0]
+        ) // 2
+        if len(members) > MAX_CLUSTER_MEMBERS:
+            warnings.append(
+                {
+                    "reason": "oversized-cluster",
+                    "topic": common_slug_prefix(members) or shared_type or members[0],
+                    "members": members,
+                    "signal": "mutual-link",
+                }
+            )
+            continue
+        topic = common_slug_prefix(members) or shared_type or members[0]
+        if is_degenerate_topic(topic):
+            # A bare type is a bad label, not a bad cluster — fall back to a member
+            # name before refusing. Only genuinely degenerate output alarms.
+            topic = members[0]
         if is_degenerate_topic(topic):
             warnings.append(
                 {

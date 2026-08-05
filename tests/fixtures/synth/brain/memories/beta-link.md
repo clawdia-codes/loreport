@@ -5,4 +5,4 @@ type: project
 source: test
 captured: 2026-08-04
 ---
-See [[alpha-link]] and [[missing-topic]].
+See [[alpha-link]], [[delta-link]] and [[missing-topic]].

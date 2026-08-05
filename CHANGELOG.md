@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.6.0] — 2026-08-05
+
+### Added
+- `hub/sweep_extract.py` — deterministic capture sweep over Claude Code, Codex and OpenClaw
+  session logs. Emits emit-grammar blocks to stdout with a content fingerprint per candidate;
+  no git operations, no writes. Wired nowhere yet.
+- `hub/synth_detect.py` — synthesis cluster detector per design §2: ≥3 memories that mutually
+  link, or link a common missing `[[name]]`. Report-only, wired nowhere; degenerate topics and
+  oversized components are reported as detector-health warnings rather than proposals.
+- `hub/wikilink_fix.py` — rewrites `[[a_b]]` → `[[a-b]]` where the hyphen target uniquely
+  resolves, skipping human-authored regions. Dry-run by default.
+
+### Fixed (S3 review, before any of the above was wired)
+- Sweep precision: harness-injected `role=user` turns — skill bodies, slash-command payloads,
+  cron prompts, hook and task notifications, agent dispatch briefs — were captured as user
+  statements. A 3-day live run yielded 15 candidates, none of them typed by the user. Now
+  filtered structurally and by marker, with a length cap.
+- Sweep triggers: an explicit save must name what to keep (`remember this`, `save the
+  following`, `note:`); the bare verb matched "save any outstanding work". A correction must
+  quote a span in double quotes — an apostrophe in "that's wrong" no longer counts as a quote.
+- Sweep slugs: candidates opening with the same words produced the same `memories/<slug>.md`
+  path and silently overwrote each other. Slugs now carry a fingerprint suffix — unique per
+  candidate, stable for identical content.
+- Detector clustering: connected components over one-way links collapsed the brain into a
+  single 17-member blob topic'd by an arbitrary member. Edges now require mutual linking, as
+  design §2 specifies.
+
 ## [1.5.2] — 2026-08-04
 - loreport-health: alarm on silent index truncation (dropped_budget > 0 in projection manifest) — closes the no-silent-decay gap found in S2.
 

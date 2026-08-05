@@ -52,9 +52,14 @@ SECRET_PATTERNS = [
     r"(postgres|mysql|mongodb(\+srv)?|redis|amqp)://[^\s]+:[^\s]+@",
 ]
 
+# The verb alone is not the signal — "save any outstanding work" and "worth saving"
+# are ordinary task talk. An explicit save names what to keep: a demonstrative object
+# or a colon. Without that object the pattern matched every message containing the
+# word "save" (21 of 31 candidates in a 14-day live run).
+_SAVE_VERB = r"(?:remember|save|note|keep\s+in\s+mind|don'?t\s+forget)"
 EXPLICIT_SAVE_RE = re.compile(
-    r"(?i)(?:^|\s)(?:please\s+)?(?:remember|save|don'?t\s+forget|keep\s+in\s+mind|"
-    r"make\s+sure\s+(?:you\s+)?remember|note\s+that)\s+(?:this|that|:|\b)",
+    r"(?i)(?:^|\s)(?:please\s+)?(?:make\s+sure\s+(?:you\s+)?)?"
+    rf"{_SAVE_VERB}\s*(?::|(?:this|that|the\s+following)\b)",
 )
 
 DECISION_RE = re.compile(
@@ -64,14 +69,49 @@ DECISION_RE = re.compile(
 CORRECTION_RE = re.compile(
     r"(?i)(?:that'?s\s+(?:wrong|incorrect|not\s+(?:right|true|correct))|"
     r"(?:^|\s)no\s*[,.—-]\s*actually|"
-    r"(?:^|\s)actually\s*[,.—-]|"
-    r"\bincorrect\b.*[\"'“”`]|"
-    r"[\"'“”`].*(?:is\s+wrong|was\s+wrong|not\s+correct))",
+    r"\bincorrect\b|"
+    r"(?:is\s+wrong|was\s+wrong|not\s+correct))",
 )
+
+# A quoted *span*, not any quote character — apostrophes in "that's wrong" would
+# otherwise satisfy the "user quoted what was wrong" requirement on their own.
+QUOTE_RE = re.compile(r"[\"“”][^\"“”\n]{2,}[\"“”]")
 
 META_SKIP_RE = re.compile(
     r"(?i)<local-command-caveat>|^<permissions\s+instructions>|^<recommended_plugins>",
 )
+
+# Harness-injected turns arrive in the log with role=user but were never typed by the
+# human: skill bodies, slash-command payloads, cron prompts, hook and task notifications.
+# They are long documents full of words like "remember" and "decision", so without this
+# filter they dominate the output — a 3-day live run produced 15 candidates, all of them
+# injected text and none of them a real user statement.
+SYNTHETIC_MARKERS = (
+    "base directory for this skill:",
+    "<system-reminder>",
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<task-notification>",
+    "<user-prompt-submit-hook>",
+    "<permissions instructions>",
+    "<recommended_plugins>",
+    "caveat: the messages below were generated",
+    "[cron:",
+    "this session is being continued from a previous",
+    "stop hook feedback:",
+    "write a dream diary entry",
+)
+
+# Agent-to-agent dispatch briefs land in openclaw session logs as role=user and open
+# by assigning a role. A human never starts a memory statement that way.
+DISPATCH_PREFIXES = ("you are ", "you're ", "your task is")
+
+# A typed "remember this…" is short. Anything longer is a pasted document or an
+# injected payload; dropping it costs recall we do not want and buys precision we do.
+MAX_CANDIDATE_CHARS = 1200
 
 
 def redact_secrets(text):
@@ -201,6 +241,10 @@ def iter_claude_turns(path):
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # Sidechain turns are subagent traffic, isMeta turns are harness notices,
+            # and a turn carrying toolUseResult is a tool result wearing role=user.
+            if obj.get("isSidechain") or obj.get("isMeta") or obj.get("toolUseResult"):
+                continue
             role = None
             text = ""
             ts = parse_iso_ts(obj.get("timestamp"))
@@ -271,25 +315,42 @@ def provider_for_path(path):
     return "unknown"
 
 
+def is_synthetic_turn(text):
+    """True for harness-injected role=user turns the human never typed."""
+    head = text[:400].lower()
+    if head.startswith(DISPATCH_PREFIXES):
+        return True
+    return any(marker in head for marker in SYNTHETIC_MARKERS)
+
+
 def classify_user_text(text, prior_assistant=""):
     if META_SKIP_RE.search(text[:200]):
         return None
-    if len(text.strip()) < 12:
+    body = text.strip()
+    if len(body) < 12:
         return None
-    if DECISION_RE.search(text):
-        return "decision", text.strip()
-    if EXPLICIT_SAVE_RE.search(text):
-        return "explicit_save", text.strip()
-    if CORRECTION_RE.search(text) and (
-        re.search(r"[\"'“”`]", text) or prior_assistant.strip()
-    ):
-        return "correction", text.strip()
+    if len(body) > MAX_CANDIDATE_CHARS:
+        return None
+    if is_synthetic_turn(body):
+        return None
+    if DECISION_RE.search(body):
+        return "decision", body
+    if EXPLICIT_SAVE_RE.search(body):
+        return "explicit_save", body
+    # Hard limit: corrections count only when the user quotes what was wrong.
+    if CORRECTION_RE.search(body) and QUOTE_RE.search(body) and prior_assistant.strip():
+        return "correction", body
     return None
 
 
 def build_emit_block(kind, body, provider, captured_date, slug=None):
-    slug = slug or slug_from_text(body, prefix=kind.replace("_", "-"))
     typ = infer_type(kind, body)
+    fp = content_fingerprint(body)
+    # Two different candidates that open with the same words used to produce the same
+    # slug — and therefore the same memories/<slug>.md path — so the later block
+    # silently clobbered the earlier one. The fingerprint suffix makes the name unique
+    # per candidate and keeps a re-run of the same content on the same filename.
+    slug = slug or f"{typ}-{slug_from_text(body, prefix=kind.replace('_', '-'))}-{fp[:6]}"
     description = body.split("\n", 1)[0][:120].strip()
     if len(description) > 117:
         description = description[:117] + "..."
@@ -315,7 +376,6 @@ def build_emit_block(kind, body, provider, captured_date, slug=None):
         f"</MEMORY>\n"
         f"INDEX: - [[{slug}]] — {description}  ({typ})"
     )
-    fp = content_fingerprint(body)
     return block, fp, slug
 
 
