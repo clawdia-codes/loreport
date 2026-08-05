@@ -1,0 +1,9 @@
+[Unit]
+Description=Loreport capture sweep (deterministic session-log captures -> provider branches)
+ConditionPathExists=%h/projects/loreport/hub/sweep_run.py
+
+[Service]
+Type=oneshot
+# One day of logs, not a backfill: the sweep runs nightly, so a wider window only
+# re-offers candidates the ledger has already seen.
+ExecStart=/usr/bin/python3 %h/projects/loreport/hub/sweep_run.py --window-days 1

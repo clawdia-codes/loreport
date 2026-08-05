@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly Loreport capture sweep (23:30, ahead of the 00:00 merge)
+
+[Timer]
+# 23:30 deliberately: off-peak, and 30 minutes before loreport-brain-sync so the
+# night's captures merge to main in the same run rather than waiting a full day.
+OnCalendar=*-*-* 23:30:00
+Persistent=true
+Unit=loreport-sweep.service
+
+[Install]
+WantedBy=timers.target

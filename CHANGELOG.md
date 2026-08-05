@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.7.0] — 2026-08-05
+
+### Added
+- `hub/sweep_run.py` — the nightly runner that turns sweep candidates into provider-branch
+  commits. It owns no scrubbing, schema or git logic of its own: every candidate goes
+  through `inbox_ingest`'s existing chain (parse -> schema -> secret scan -> imperative scan ->
+  locked `commit_block`), so a swept capture is gated exactly like an assistant-authored one
+  and a rejected one lands in `hub/quarantine/` for the merge digest.
+- `units/loreport-sweep.{service,timer}` — 23:30 nightly, half an hour ahead of the brain
+  sync, so a night's captures merge to `main` in the same run instead of waiting a day.
+- Idempotence has two independent layers: a fingerprint ledger at
+  `~/.local/state/loreport/sweep-state.json` (deliberately outside the brain repo — `sync.sh`
+  halts the nightly pipeline on a dirty tree), and `commit_block`'s own "skipped: no change".
+  Verified against a clone: run 1 committed 4, run 2 offered 0, run 3 with the ledger deleted
+  committed 0 and reported "skipped: no change" for all 4.
+- ChatGPT is never swept — it keeps no local session log, and inventing one would be
+  inventing provenance.
+
 ## [1.6.0] — 2026-08-05
 
 ### Added
