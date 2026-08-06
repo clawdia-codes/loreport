@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.1] — 2026-08-06
+
+### Fixed
+- `brain_merge` imports `synth_detect` path-safely (`a446671`). `check-docs.sh` imports the
+  module without `hub/` on `sys.path`, so the top-level import broke the gate. The fix
+  shipped on 2026-08-05 but landed **unrecorded** — no VERSION bump, no entry — which left
+  `check-docs.sh` itself failing on its own "changed hub/ since VERSION was bumped" rule.
+  Recorded here at the start of Sprint C v2 so the baseline gate passes.
+
 ## [1.8.0] — 2026-08-05
 
 ### Added
