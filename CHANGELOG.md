@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.13.0] — 2026-08-07
+
+### Changed
+- **A quiet day now produces no commits and no tag.** The merge runs daily from a timer,
+  and on most days nobody captured anything — yet every one of those days still wrote two
+  commits ("drop INDEX.md", "rebuild INDEX.md") plus a backup tag for byte-identical
+  content. The cost was never untidiness: it buried the days something real happened, and
+  made `git log INDEX.md` useless for answering "when did the catalog actually change?".
+  A run is treated as a no-op only when **both** hold — every provider branch is already an
+  ancestor of `main`, **and** the committed indexes already equal what a rebuild would
+  produce. The second condition is load-bearing: an interrupted earlier run can leave the
+  index stale while no branch has moved, and skipping the rebuild then would leave it wrong
+  indefinitely. The report says so explicitly rather than printing a silent nothing, since
+  a quiet success and a broken run should not look alike.
+- The index drop is likewise skipped when there is nothing to merge — it exists to keep the
+  indexes out of merge resolution, and with no merge it only spent a delete commit and a
+  restore commit to arrive back at the same bytes.
+- `do_merge()` returns its report (previously `None`), which is what lets the guard be
+  tested against real repositories rather than asserted about.
+
 ## [1.12.0] — 2026-08-07
 
 ### Added

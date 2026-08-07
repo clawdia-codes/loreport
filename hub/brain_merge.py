@@ -329,6 +329,38 @@ def build_index_bytes(brain_dir, today=None):
     return content.encode("utf-8"), len(memories), len(knowledge), len(skills)
 
 
+def is_ancestor(brain_dir, maybe_ancestor, descendant):
+    """True when `maybe_ancestor` is already reachable from `descendant`."""
+    r = git(brain_dir, "merge-base", "--is-ancestor", maybe_ancestor, descendant, check=False)
+    return r.returncode == 0
+
+
+def indexes_are_current(brain_dir):
+    """True when INDEX.md and INDEX-ARCHIVE.md on disk already equal a rebuild.
+
+    Deliberately compares the WORKING-TREE bytes, not a git object: a run that
+    was interrupted after writing the index but before committing it must still
+    count as "needs work", not as "already current".
+    """
+    index_bytes, _, _, _ = build_index_bytes(brain_dir)
+    archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
+
+    index_path = os.path.join(brain_dir, "INDEX.md")
+    if not os.path.isfile(index_path):
+        return False
+    with open(index_path, "rb") as fh:
+        if fh.read() != index_bytes:
+            return False
+
+    archive_path = os.path.join(brain_dir, "INDEX-ARCHIVE.md")
+    if archived_n == 0:
+        return not os.path.isfile(archive_path)
+    if not os.path.isfile(archive_path):
+        return False
+    with open(archive_path, "rb") as fh:
+        return fh.read() == archive_bytes
+
+
 # --- consolidation-lite: mechanical dedup flags -----------------------------
 
 def extract_human_regions(text):
@@ -1051,9 +1083,43 @@ def do_merge(brain_dir, dry_run):
         # two runs start in the same second, `git tag` (no `-f`) refuses the
         # collision and the loop below picks the next free `-N` suffix rather
         # than silently overwriting the earlier run's backup.
+        git(brain_dir, "fetch", "--all", check=False)
+
+        # Compare-and-swap fast-forward (REVIEW.md #3/#5): record each
+        # provider branch's SHA now, before any merging happens. At the
+        # final ff step we only force a branch onto the new main if it
+        # STILL points at the SHA we actually merged — if a capture landed
+        # on it mid-merge, its extra commit(s) are left alone (main is
+        # still their ancestor, so they merge cleanly next run) instead of
+        # being silently discarded by a blind `branch -f`.
+        pre_merge_shas = {}
+        for branch in PROVIDER_ORDER:
+            if branch_exists(brain_dir, branch):
+                pre_merge_shas[branch] = git(brain_dir, "rev-parse", branch).stdout.strip()
+
+        # NO-OP DETECTION. This runs daily from a timer, and on most days nobody
+        # captured anything. Without this check every one of those days still
+        # produced two commits — "drop INDEX.md" and "rebuild INDEX.md" — plus a
+        # backup tag, for byte-identical content. That is not just untidy: it
+        # buries the days something REAL happened under a wall of noise, so the
+        # log stops being scannable exactly when you need to scan it, and it
+        # makes `git log INDEX.md` useless for answering "when did the catalog
+        # actually change?".
+        #
+        # A run is a no-op only when BOTH are true: nothing is left to merge
+        # (every provider branch is already an ancestor of main), and the
+        # committed indexes already equal what a rebuild would produce. The
+        # second half matters — an index can be stale from an interrupted run
+        # even when no branch has moved, and skipping the rebuild then would
+        # leave it wrong forever.
+        nothing_to_merge = all(is_ancestor(brain_dir, sha, orig_head)
+                               for sha in pre_merge_shas.values())
+        noop = not dry_run and nothing_to_merge and indexes_are_current(brain_dir)
+        report["noop"] = noop
+
         tag_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         tag_name = f"pre-merge/{tag_stamp}"
-        if not dry_run:
+        if not dry_run and not noop:
             attempt = 0
             while True:
                 candidate = tag_name if attempt == 0 else f"{tag_name}-{attempt}"
@@ -1071,19 +1137,6 @@ def do_merge(brain_dir, dry_run):
                         f"{attempt} attempts: {tag_res.stderr.strip()}"
                     )
             report["backup_tag"] = tag_name
-        git(brain_dir, "fetch", "--all", check=False)
-
-        # Compare-and-swap fast-forward (REVIEW.md #3/#5): record each
-        # provider branch's SHA now, before any merging happens. At the
-        # final ff step we only force a branch onto the new main if it
-        # STILL points at the SHA we actually merged — if a capture landed
-        # on it mid-merge, its extra commit(s) are left alone (main is
-        # still their ancestor, so they merge cleanly next run) instead of
-        # being silently discarded by a blind `branch -f`.
-        pre_merge_shas = {}
-        for branch in PROVIDER_ORDER:
-            if branch_exists(brain_dir, branch):
-                pre_merge_shas[branch] = git(brain_dir, "rev-parse", branch).stdout.strip()
 
         # Provenance gate (bug fix): figure out, from each provider branch's
         # not-yet-on-main commits and their Trust: trailers, which
@@ -1104,15 +1157,19 @@ def do_merge(brain_dir, dry_run):
             # INDEX-ARCHIVE.md is the same kind of artifact and gets the same
             # treatment — it is rebuilt from the items' `expires` dates, so a
             # hand-merged version of it could only ever be wrong.
+            # Only when a merge is actually going to happen. Dropping the
+            # indexes exists to keep them out of merge resolution; with nothing
+            # to merge it would spend a delete commit and a restore commit to
+            # arrive back at the same bytes — the churn this guard removes.
             derived = [p for p in ("INDEX.md", "INDEX-ARCHIVE.md")
                        if os.path.exists(os.path.join(brain_dir, p))]
-            if derived and not dry_run:
+            if derived and not dry_run and not nothing_to_merge:
                 git(brain_dir, "rm", "-f", "--quiet", *derived, check=False)
                 if has_staged_changes(brain_dir):
                     git(brain_dir, "commit", "-m", "brain(merge): drop INDEX.md (derived artifact)", check=False)
 
             for branch in PROVIDER_ORDER:
-                if not branch_exists(brain_dir, branch):
+                if noop or not branch_exists(brain_dir, branch):
                     continue
 
                 head_before_branch = git(brain_dir, "rev-parse", "HEAD").stdout.strip()
@@ -1194,7 +1251,7 @@ def do_merge(brain_dir, dry_run):
             archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
             report["index_counts"] = (m, k, s)
             report["archived_count"] = archived_n
-            if not dry_run:
+            if not dry_run and not noop:
                 with open(os.path.join(brain_dir, "INDEX.md"), "wb") as fh:
                     fh.write(index_bytes)
                 git(brain_dir, "add", "INDEX.md", check=False)
@@ -1248,7 +1305,7 @@ def do_merge(brain_dir, dry_run):
     # digest file and always exits 0, exactly like before this phase. Only a
     # real run's digest/exit-code reflects what actually landed on `main`.
     if dry_run:
-        return
+        return report
 
     write_digest(brain_dir, today, report)
 
@@ -1267,9 +1324,16 @@ def do_merge(brain_dir, dry_run):
     ):
         sys.exit(1)
 
+    return report
+
 
 def print_report(today, r):
     print(f"=== brain_merge report {today} ===")
+    if r.get("noop"):
+        # Say so explicitly. A silent "nothing happened" run is indistinguishable
+        # from a broken one, and this path is the common case on a quiet day.
+        print("No-op: nothing to merge and the indexes are already current — "
+              "no tag, no commits.")
     print(f"Backup tag: {r.get('backup_tag') or 'none (--dry-run)'}")
     print(f"Merged: {', '.join(r['merged']) if r['merged'] else 'none'} -> main")
     print(f"Conflicts renamed: {r['renamed'] if r['renamed'] else 'none'}")
