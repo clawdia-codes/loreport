@@ -94,17 +94,26 @@ done
 # shelf and leaves the file on disk, so an archived item is catalogued, not missing.
 # Checking INDEX.md alone would report every archived item as "invisible to search"
 # the day it expires — a false alarm that would train the reader to ignore doctor.
+#
+# Build the file list instead of piping `cat`: this script runs under
+# `set -o pipefail`, so `cat INDEX.md INDEX-ARCHIVE.md | grep -q` returns cat's
+# failure whenever the archive doesn't exist yet — reporting EVERY item as
+# "invisible to search" on a brain that has simply never archived anything.
+# Caught by running this against a real brain; it reads fine.
+indexes=(INDEX.md)
+[ -f INDEX-ARCHIVE.md ] && indexes+=(INDEX-ARCHIVE.md)
+
 missing_file=0; missing_line=0
 while read -r name; do
   [ -z "$name" ] && continue
   [ -f "memories/$name.md" ] || [ -f "knowledge/$name.md" ] || [ -f "skills/$name/SKILL.md" ] \
     || { no "INDEX lists [[$name]] but no such item exists"; missing_file=$((missing_file+1)); }
-done < <(cat INDEX.md INDEX-ARCHIVE.md 2>/dev/null | grep -oP '(?<=^- \[\[)[^]]+')
+done < <(grep -hoP '(?<=^- \[\[)[^]]+' "${indexes[@]}" 2>/dev/null)
 for f in memories/*.md knowledge/*.md; do
   [ -f "$f" ] || continue
   case "$(basename "$f")" in README.md) continue ;; esac
   n=$(basename "$f" .md)
-  cat INDEX.md INDEX-ARCHIVE.md 2>/dev/null | grep -q "^- \[\[$n\]\]" \
+  grep -q "^- \[\[$n\]\]" "${indexes[@]}" 2>/dev/null \
     || { no "$f has no INDEX line — it is invisible to search"; missing_line=$((missing_line+1)); }
 done
 [ "$missing_file" = "0" ] && [ "$missing_line" = "0" ] && ok "INDEX matches the files on disk, both directions"

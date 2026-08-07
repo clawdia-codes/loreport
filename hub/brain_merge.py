@@ -1334,7 +1334,9 @@ def print_report(today, r):
         # from a broken one, and this path is the common case on a quiet day.
         print("No-op: nothing to merge and the indexes are already current — "
               "no tag, no commits.")
-    print(f"Backup tag: {r.get('backup_tag') or 'none (--dry-run)'}")
+        print("Backup tag: none (no-op — nothing to back up)")
+    else:
+        print(f"Backup tag: {r.get('backup_tag') or 'none (--dry-run)'}")
     print(f"Merged: {', '.join(r['merged']) if r['merged'] else 'none'} -> main")
     print(f"Conflicts renamed: {r['renamed'] if r['renamed'] else 'none'}")
     print(f"PROFILE conflicts (human review required): {r['profile_conflicts'] if r['profile_conflicts'] else 'none'}")

@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.13.1] — 2026-08-07
+
+### Fixed
+- **`doctor.sh` reported every item as "invisible to search" on a brain with no archive.**
+  1.11.0 taught the INDEX cross-check to consider `INDEX-ARCHIVE.md` by piping
+  `cat INDEX.md INDEX-ARCHIVE.md | grep -q`. This script runs under `set -o pipefail`, so
+  on a brain that has never archived anything `cat` fails on the missing file and the whole
+  pipeline reports failure **even when grep matched** — 77 false failures on a 76-item
+  brain. It reads correctly; only running it against a real brain exposed it. This matters
+  more than an ordinary bug: `sync.sh` copies `doctor.sh` from the framework working tree,
+  so it reaches the live brain on the next nightly sync **without any merge**. Now the
+  index list is built first and only existing files are passed to `grep`.
+- A no-op run no longer prints `Backup tag: none (--dry-run)` when it was not a dry run.
+
+### Added
+- A test for the seam where the archive (1.11.0) and the no-op guard (1.13.0) meet: an item
+  expiring overnight changes what a rebuild produces while **no branch has moved**, so a
+  guard that only asked "is there anything to merge?" would skip the archive transition and
+  keep skipping it. Neither feature's own tests crossed that boundary.
+
 ## [1.13.0] — 2026-08-07
 
 ### Changed

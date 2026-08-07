@@ -41,7 +41,10 @@ Body.
 """
 
 
-class NoopGuardTests(unittest.TestCase):
+class BrainRepoHarness:
+    """Builds a real brain-shaped git repo. Not a TestCase itself, so the
+    guard tests are not silently re-run against every subclass's fixture."""
+
     def setUp(self):
         self.repo = tempfile.mkdtemp(prefix="loreport-noop-")
         self.addCleanup(_rmtree, self.repo)
@@ -77,6 +80,8 @@ class NoopGuardTests(unittest.TestCase):
     def _run_merge(self):
         return brain_merge.do_merge(self.repo, dry_run=False)
 
+
+class NoopGuardTests(BrainRepoHarness, unittest.TestCase):
     # --- it must skip when there is genuinely nothing to do -----------------
 
     def test_quiet_day_creates_no_commit_and_no_tag(self):
@@ -134,6 +139,64 @@ class NoopGuardTests(unittest.TestCase):
         report = self._run_merge()
         self.assertTrue(report.get("noop"))
         self.assertEqual(self._commits(), after_merge)
+
+
+class ArchiveTransitionTests(BrainRepoHarness, unittest.TestCase):
+    """The seam where 1.11's archive and 1.13's no-op guard meet.
+
+    An item expiring overnight changes what a rebuild produces while NO branch
+    has moved — so a guard that asked only "is there anything to merge?" would
+    skip the day the archive should have happened, and keep skipping it. Neither
+    feature's own tests cross this boundary, which is exactly why it gets one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write("memories/expiring-item.md",
+                    ITEM.format(name="expiring-item").replace(
+                        "visibility: shared\n",
+                        "visibility: shared\nlifespan: temporary\nexpires: 2026-08-20\n"))
+        self._run_merge()  # lands the item and its INDEX line
+
+    def _merge_on(self, today):
+        real = brain_merge.date
+
+        class _FrozenDate(real):
+            @classmethod
+            def today(cls):
+                return today
+
+        brain_merge.date = _FrozenDate
+        try:
+            return brain_merge.do_merge(self.repo, dry_run=False)
+        finally:
+            brain_merge.date = real
+
+    def test_before_expiry_is_a_noop_with_no_archive(self):
+        import datetime
+        report = self._merge_on(datetime.date(2026, 8, 19))
+        self.assertTrue(report.get("noop"))
+        self.assertFalse(os.path.isfile(os.path.join(self.repo, "INDEX-ARCHIVE.md")))
+
+    def test_the_day_it_expires_is_not_a_noop_and_the_archive_appears(self):
+        import datetime
+        report = self._merge_on(datetime.date(2026, 8, 21))
+        self.assertFalse(report.get("noop"),
+                         "the no-op guard swallowed an archive transition")
+        archive = os.path.join(self.repo, "INDEX-ARCHIVE.md")
+        self.assertTrue(os.path.isfile(archive))
+        with open(archive, encoding="utf-8") as fh:
+            self.assertIn("[[expiring-item]]", fh.read())
+        with open(os.path.join(self.repo, "INDEX.md"), encoding="utf-8") as fh:
+            self.assertNotIn("[[expiring-item]]", fh.read())
+
+    def test_the_day_after_the_transition_is_a_noop_again(self):
+        import datetime
+        self._merge_on(datetime.date(2026, 8, 21))
+        commits = self._commits()
+        report = self._merge_on(datetime.date(2026, 8, 22))
+        self.assertTrue(report.get("noop"))
+        self.assertEqual(self._commits(), commits)
 
 
 class IndexCurrencyTests(unittest.TestCase):
