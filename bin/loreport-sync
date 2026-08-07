@@ -92,10 +92,15 @@ trap _lp_on_exit EXIT
 trap 'alert "Loreport sync interrupted by a signal — run did not complete."; exit 130' INT TERM
 
 # --- Propagate: pull framework prompts into the brain, and push the brain's
-# skills out to the local host bridges, so edits on either side reach the other
-# without a manual copy.
+# skills out to the local host bridges.
 changed=0
 
+# prompts/ is the one thing still copied, and it is copied because it is brain DATA,
+# not brain tooling: snapshot_publish.py reads prompts/bootstrap.md out of the brain's
+# main and bakes the capture grammar into the published packet. Deleting it here would
+# silently strip the grammar from what every provider is served. It can only leave once
+# the engine sources the grammar directly, or once a tracked surface carries it — which
+# is why that removal belongs with the surface work, not here.
 mkdir -p "$BRAIN/prompts"
 for p in bootstrap onboard consolidate; do
   src="$FRAMEWORK/prompts/$p.md"
@@ -106,15 +111,21 @@ for p in bootstrap onboard consolidate; do
   fi
 done
 
-# docs/setup.md Step 2 tells every user to run ./make-surface.sh in their brain folder,
-# so the brain needs its own copy of the script the framework ships.
-for s in make-surface.sh doctor.sh; do
-  if [ -f "$FRAMEWORK/brain-template/$s" ] && ! cmp -s "$FRAMEWORK/brain-template/$s" "$BRAIN/$s" 2>/dev/null; then
-    cp "$FRAMEWORK/brain-template/$s" "$BRAIN/$s"
-    chmod +x "$BRAIN/$s"
-    changed=1
-  fi
-done
+# Engine scripts are NOT copied into the brain any more. Copying executables into a
+# tracked tree bought no independence — the heavy engine (brain_merge, project,
+# inbox_ingest) was always invoked from the engine checkout, so the brain was already
+# engine-dependent — while creating a second copy free to drift. It duly did: the
+# brain's doctor.sh tracked whatever branch the engine happened to have checked out,
+# and sat 22 lines away from released main. Record which engine produced this state
+# instead; that is real information, where a stale duplicate is a liability.
+engine_version="unknown"
+[ -f "$FRAMEWORK/VERSION" ] && engine_version=$(cat "$FRAMEWORK/VERSION")
+engine_sha=$(git -C "$FRAMEWORK" rev-parse --short HEAD 2>/dev/null || echo unknown)
+engine_stamp="$engine_version ($engine_sha)"
+if [ "$(cat "$BRAIN/ENGINE-VERSION" 2>/dev/null || true)" != "$engine_stamp" ]; then
+  printf '%s\n' "$engine_stamp" > "$BRAIN/ENGINE-VERSION"
+  changed=1
+fi
 
 # The Obsidian config SEEDS, it does not sync: the repo IS the vault, so Obsidian
 # rewrites graph.json the moment the owner touches a graph setting. Copying the
@@ -187,7 +198,7 @@ fi
 # is not the one in the backup.
 git -C "$BRAIN" checkout -q main || { alert "sync: cannot checkout main; aborting"; exit 1; }
 if [ "$changed" = "1" ] || ! git -C "$BRAIN" diff --quiet -- .gitignore loreport.conf; then
-  (cd "$BRAIN" && git add -A prompts skills make-surface.sh doctor.sh .gitignore loreport.conf .obsidian)
+  (cd "$BRAIN" && git add -A prompts skills ENGINE-VERSION .gitignore loreport.conf .obsidian)
   if ! git -C "$BRAIN" diff --cached --quiet; then
     git -C "$BRAIN" commit -q -m "sync: propagate framework prompts + skill bridges"
   fi
