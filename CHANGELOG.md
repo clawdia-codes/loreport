@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.10.0] — 2026-08-07
+
+### Added
+- **`hub/observe_extract.py` — knowledge-grab Pass 1.** Maps a cheap LOCAL model over Pass 0
+  records and proposes observations (`fact` / `trait-signal` / `meta-statement`), each
+  anchored to a quote. Writes nothing to the brain; the output is a private working
+  artifact for later aggregation and human review. Runs on ollama by default — a
+  mechanical map over hundreds of conversations should not spend a metered budget — with
+  `think` disabled, since reasoning defaults have blown idle watchdogs on this host.
+  Resumable: output is appended per conversation and completed ids are skipped.
+- **The quote gate.** Every observation must carry `verbatim_quote`, and the module
+  *mechanically verifies the quote occurs in the source turns* (whitespace-normalized).
+  Unverifiable observations are dropped and counted. This converts "a model asserted this
+  about the user" into "the user demonstrably said this" — cheap, deterministic, and not
+  arguable-past by a fluent model, which is the Barnum failure the design names. It fired
+  on real output immediately: 1 of the first 5 conversations produced a fabricated quote.
+- 16 tests, the core ones negative: an invented-but-plausible quote, a near-miss
+  paraphrase of a real statement, and an over-short quote must all be rejected. Confirmed
+  to fail with the gate removed.
+
+### Changed
+- Pass 1's prompt explicitly rejects **instructions the user gave to a machine**. This user
+  operates AI agents, so their messages are full of task briefs and output-format specs
+  that read exactly like personal preferences. A first live sample returned four
+  observations, all of them agent task-specs ("write ONLY under .maestro/docs/preparation/")
+  rather than facts about the person. The discriminator now stated in the prompt: does this
+  describe THE PERSON, or HOW ONE TASK SHOULD BE DONE?
+
 ## [1.9.0] — 2026-08-07
 
 ### Added
