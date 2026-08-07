@@ -64,11 +64,32 @@ done
 # This runs unattended on a timer, so a silent failure is indistinguishable from
 # success for weeks. Every abnormal exit below pushes to the notifier; never let this
 # script fail quietly.
+_lp_alerted=0
 alert() {
+  _lp_alerted=1
   echo "sync: $*" >&2
   [ -n "$LOREPORT_NOTIFY" ] && [ -x "$LOREPORT_NOTIFY" ] && \
     "$LOREPORT_NOTIFY" "🧠 $*" >/dev/null 2>&1 || true
 }
+
+# Every *handled* error above calls alert(). The remaining hole is the unhandled
+# one: `set -u` aborting on an unbound variable, a signal, or any exit that never
+# reaches one of those branches. Those leave a nonzero status and total silence —
+# and silence on a nightly timer is indistinguishable from success for weeks. This
+# is precisely how six commits once sat unpushed for two days with nobody noticing.
+#
+# Halting is fail-SAFE and must stay that way; it just must not also be fail-SILENT.
+# The trap fires only when nothing has already spoken, so handled errors keep their
+# specific message instead of being buried under a generic one.
+_lp_on_exit() {
+  _lp_rc=$?
+  if [ "$_lp_rc" -ne 0 ] && [ "$_lp_alerted" -eq 0 ]; then
+    alert "Loreport sync exited $_lp_rc with no diagnostic — crashed before any handled error. Nothing was published or pushed this run; check the service log."
+  fi
+  exit "$_lp_rc"
+}
+trap _lp_on_exit EXIT
+trap 'alert "Loreport sync interrupted by a signal — run did not complete."; exit 130' INT TERM
 
 # --- Propagate: pull framework prompts into the brain, and push the brain's
 # skills out to the local host bridges, so edits on either side reach the other
