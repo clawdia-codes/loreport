@@ -65,7 +65,7 @@ class HumanRegionGuardIntegrationTests(unittest.TestCase):
         self.git("config", "user.name", "test")
         os.makedirs(os.path.join(self.brain, "memories"))
         self.rel = "memories/protected.md"
-        self.write(self.rel, _wrap("Øyvind's own words"))
+        self.write(self.rel, _wrap("the owner's own words"))
         self.git("add", "-A")
         self.git("commit", "-qm", "seed")
 
@@ -105,7 +105,7 @@ class HumanRegionGuardIntegrationTests(unittest.TestCase):
             lambda: self.write(self.rel, "agent rewrote the whole body")
         )
         # 1. main's body survives verbatim
-        self.assertIn("Øyvind's own words", self.read(self.rel))
+        self.assertIn("the owner's own words", self.read(self.rel))
         self.assertNotIn("agent rewrote", self.read(self.rel))
         # 2. the rejected version is parked, not lost
         qdir = os.path.join(self.brain, "hub", "quarantine", "provider-openclaw")
@@ -136,11 +136,11 @@ class HumanRegionGuardIntegrationTests(unittest.TestCase):
         report = self._merge_branch_that(
             lambda: os.remove(os.path.join(self.brain, self.rel))
         )
-        self.assertIn("Øyvind's own words", self.read(self.rel))
+        self.assertIn("the owner's own words", self.read(self.rel))
         self.assertEqual(len(report["human_region_violations"]), 1)
 
     def test_edit_outside_the_region_is_allowed_through(self):
-        new = "rewritten intro\n<!-- human:start -->Øyvind's own words<!-- human:end -->\nrewritten outro"
+        new = "rewritten intro\n<!-- human:start -->the owner's own words<!-- human:end -->\nrewritten outro"
         report = self._merge_branch_that(lambda: self.write(self.rel, new))
         self.assertEqual(self.read(self.rel), new)
         self.assertEqual(report["human_region_violations"], [])

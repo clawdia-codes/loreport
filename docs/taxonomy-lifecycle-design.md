@@ -135,7 +135,7 @@ that produced it is transient.
 - `consolidate.md`: enforce the reject-list (drop casual/transient/obsolete on consolidation).
 - Document, in `taxonomy-lifecycle-design.md` "Deferred" below, *why* confidence-scores and
   conflict-coexistence are out (they fight dedup; revisit only with a real runtime).
-- **Full re-verification on the LIVE brain** `~/projects/loreport-oyvind-theie`:
+- **Full re-verification on the LIVE brain** the live brain repo:
   `brain_merge.py` stays **exit-0**; local items stay cloud-invisible; INDEX rebuilds; the
   daily backup still pushes. No regression to the shipped visibility enforcement.
 

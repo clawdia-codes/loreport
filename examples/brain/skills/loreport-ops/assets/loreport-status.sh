@@ -5,7 +5,7 @@
 # (via `git show main:<path>`), never from the working tree.
 set -uo pipefail
 
-BRAIN_DIR="/home/nvidia/projects/loreport-oyvind-theie"
+BRAIN_DIR="${LOREPORT_BRAIN_DIR:-$PWD}"
 
 usage() {
   cat <<'EOF'
@@ -14,7 +14,7 @@ Usage: loreport-status.sh [--brain-dir DIR]
 Print a compact health report for a Loreport brain.
 
   --brain-dir DIR   Path to the brain git repo
-                     (default: /home/nvidia/projects/loreport-oyvind-theie)
+                     (default: $LOREPORT_BRAIN_DIR, else the current directory)
   --help            Show this help and exit
 EOF
 }

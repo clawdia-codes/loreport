@@ -57,7 +57,7 @@ a consolidated dossier synced to OpenAI **and** Anthropic **and** GitHub at once
 the docs never surface. **This is the #1 design fix. Recipe:** add `visibility: shared|local` frontmatter
 (default `local` for health/finance/relationship items); enforce mechanically in publish/merge/read/upload
 so `local` items never leave the machine (INDEX may list existence, never body); add one onboarding
-question routing sensitive items to `local`. *(This review's manifest for Theie-Brain already applies
+question routing sensitive items to `local`. *(This review's manifest for the personal brain instance already applies
 this split by hand; the field makes it durable.)*
 
 ### 4. `consolidate.md` uploads your entire brain to a cloud model to scrub it *(privacy C2)*
@@ -122,7 +122,7 @@ prefers dark mode", the format's own mandated `**How to apply:** Always…`, eve
 save secrets" — quarantine at a high rate, pushing honest traffic around the gate. Meanwhile "you
 should henceforth…" passes. **Recipe:** scope to second-person/assistant-directed unattributed
 imperatives; for `type: user|feedback` self-statements downgrade to a digest flag. *(Directly blocks
-real-memory sync — the feedback memories are full of "always/never" — so this lands before Theie-Brain
+real-memory sync — the feedback memories are full of "always/never" — so this lands before the personal brain instance
 ingest, or ingest bypasses the gate by committing to branches directly.)*
 
 ### 11. Adoption cliffs: ChatGPT instruction-field too small; manual multi-file saves *(privacy H4/H5)*

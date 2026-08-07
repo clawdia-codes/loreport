@@ -3,12 +3,12 @@
 # Read-only checks; set -uo pipefail without -e so every check runs.
 set -uo pipefail
 
-BRAIN="${LOREPORT_BRAIN_DIR:-/home/nvidia/projects/loreport-oyvind-theie}"
-FRAMEWORK="${LOREPORT_FRAMEWORK_DIR:-/home/nvidia/projects/loreport}"
-BANNER="${HOME}/.config/clawdia/loreport-health-report"
+BRAIN="${LOREPORT_BRAIN_DIR:-$PWD}"
+FRAMEWORK="${LOREPORT_FRAMEWORK_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+BANNER="${LOREPORT_BANNER:-${HOME}/.config/loreport/health-report}"
 HEALTH_STATE="${BRAIN}/hub/health-state.json"
 MANIFEST="${BRAIN}/hub/projection-manifest.json"
-TG_NOTIFY="/home/nvidia/bin/tg-notify.sh"
+TG_NOTIFY="${LOREPORT_NOTIFY:-}"
 NOW=$(date +%s)
 
 failures=()

@@ -78,7 +78,15 @@ class SweepRunTests(unittest.TestCase):
     def test_ledger_default_lives_outside_the_brain_repo(self):
         # sync.sh halts the nightly pipeline on a dirty tree, and the sweep runs
         # 30 minutes before it.
-        self.assertNotIn("loreport-oyvind-theie", sweep_run.DEFAULT_STATE_FILE)
+        # Stated generically: the ledger belongs in the user's own state directory,
+        # not inside any brain repo. Naming one specific brain here was the narrow
+        # version of the rule now enforced repo-wide by
+        # tests/test_no_personal_identifiers.py.
+        self.assertTrue(
+            sweep_run.DEFAULT_STATE_FILE.startswith(os.path.expanduser("~/.")),
+            f"sweep ledger must live under the user's state dir, got "
+            f"{sweep_run.DEFAULT_STATE_FILE}",
+        )
 
 
 if __name__ == "__main__":

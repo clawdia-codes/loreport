@@ -19,7 +19,7 @@ Do this first — it decides how every operation below is performed.
 | **Filesystem** | Shell / file access to the brain directory | Read and edit files directly; `git show main:<path>` for canonical reads. Run `assets/loreport-status.sh` for status. |
 | **Paste** | Neither | Emit `<MEMORY …>` blocks and ask the user to file them; ask them to paste items you need. |
 
-The brain lives at `~/projects/loreport-oyvind-theie` on the user's machine (adjust if
+The brain lives in the user's Loreport brain repo (adjust if
 they say otherwise). Never guess a path on a host that has no filesystem.
 
 ## ② Run the requested operation
