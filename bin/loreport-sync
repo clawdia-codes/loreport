@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# loreport-sync — the end-to-end driver for a Loreport brain.
+#
+# Propagates framework updates, merges provider branches into main, rebuilds the
+# published packet and report, projects surfaces to their targets, and pushes every
+# branch and tag to the brain's backup remote. Safe to run repeatedly.
+#
+# Everything instance-specific — where the brain and engine live, how to reach the
+# owner, which assistants receive skill bridges — comes from a config file. This
+# script holds no paths of its own, which is what lets it live in the shared engine
+# while the brain stays private.
+#
+#   loreport-sync --config /path/to/loreport.conf
+#
+# With no --config, looks for ./loreport.conf, so running it from inside a brain
+# just works. See docs/ and the brain template's loreport.conf for the format.
+
+set -uo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: loreport-sync [--config PATH]
+
+  --config PATH   instance config (default: ./loreport.conf)
+  -h, --help      this message
+
+Required config keys: LOREPORT_BRAIN, LOREPORT_ENGINE
+Optional:             LOREPORT_NOTIFY, LOREPORT_BRIDGES
+USAGE
+}
+
+CONFIG="./loreport.conf"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config) CONFIG="${2:-}"; shift 2 || true ;;
+    --config=*) CONFIG="${1#*=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "loreport-sync: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ ! -f "$CONFIG" ]; then
+  echo "loreport-sync: config not found: $CONFIG" >&2
+  echo "loreport-sync: pass --config PATH, or run from a brain containing loreport.conf" >&2
+  exit 2
+fi
+
+# shellcheck source=/dev/null
+. "$CONFIG"
+
+: "${LOREPORT_BRAIN:?loreport-sync: LOREPORT_BRAIN not set in $CONFIG}"
+: "${LOREPORT_ENGINE:?loreport-sync: LOREPORT_ENGINE not set in $CONFIG}"
+LOREPORT_NOTIFY="${LOREPORT_NOTIFY:-}"
+LOREPORT_BRIDGES="${LOREPORT_BRIDGES:-}"
+
+BRAIN="$LOREPORT_BRAIN"
+FRAMEWORK="$LOREPORT_ENGINE"
+HUB="$FRAMEWORK/hub"
+
+for d in "$BRAIN" "$FRAMEWORK"; do
+  [ -d "$d" ] || { echo "loreport-sync: not a directory: $d (check $CONFIG)" >&2; exit 2; }
+done
+
+# This runs unattended on a timer, so a silent failure is indistinguishable from
+# success for weeks. Every abnormal exit below pushes to the notifier; never let this
+# script fail quietly.
+alert() {
+  echo "sync: $*" >&2
+  [ -n "$LOREPORT_NOTIFY" ] && [ -x "$LOREPORT_NOTIFY" ] && \
+    "$LOREPORT_NOTIFY" "🧠 $*" >/dev/null 2>&1 || true
+}
+
+# --- Propagate: pull framework prompts into the brain, and push the brain's
+# skills out to the local host bridges, so edits on either side reach the other
+# without a manual copy.
+changed=0
+
+mkdir -p "$BRAIN/prompts"
+for p in bootstrap onboard consolidate; do
+  src="$FRAMEWORK/prompts/$p.md"
+  dst="$BRAIN/prompts/$p.md"
+  if [ -f "$src" ] && ! cmp -s "$src" "$dst" 2>/dev/null; then
+    cp "$src" "$dst"
+    changed=1
+  fi
+done
+
+# docs/setup.md Step 2 tells every user to run ./make-surface.sh in their brain folder,
+# so the brain needs its own copy of the script the framework ships.
+for s in make-surface.sh doctor.sh; do
+  if [ -f "$FRAMEWORK/brain-template/$s" ] && ! cmp -s "$FRAMEWORK/brain-template/$s" "$BRAIN/$s" 2>/dev/null; then
+    cp "$FRAMEWORK/brain-template/$s" "$BRAIN/$s"
+    chmod +x "$BRAIN/$s"
+    changed=1
+  fi
+done
+
+# The Obsidian config SEEDS, it does not sync: the repo IS the vault, so Obsidian
+# rewrites graph.json the moment the owner touches a graph setting. Copying the
+# template over it nightly would silently revert their own tuning every night.
+# Ship the defaults once; after that the brain's copy is theirs.
+if [ -d "$FRAMEWORK/brain-template/.obsidian" ]; then
+  mkdir -p "$BRAIN/.obsidian"
+  for o in "$FRAMEWORK"/brain-template/.obsidian/*.json; do
+    [ -f "$o" ] || continue
+    dst="$BRAIN/.obsidian/$(basename "$o")"
+    if [ ! -e "$dst" ]; then
+      cp "$o" "$dst"
+      changed=1
+    fi
+  done
+fi
+
+# Volatile Obsidian workspace state must never be tracked (it churns on every pane
+# move). The brain's .gitignore is hand-owned, so append the rule rather than
+# overwrite the file.
+if [ -f "$BRAIN/.gitignore" ] && ! grep -qxF '.obsidian/workspace*' "$BRAIN/.gitignore"; then
+  printf '.obsidian/workspace*\n' >> "$BRAIN/.gitignore"
+  changed=1
+fi
+
+# Skill bridges. A skill reaches an assistant by being INSTALLED where its harness
+# looks, not by being catalogued in INDEX.md — an index line is retrieval, and
+# retrieval does not fire. Each LOREPORT_BRIDGES line is "<skill name> <destination>".
+# A destination whose parent does not exist is skipped, so one config stays valid on a
+# machine where only some assistants are installed.
+if [ -n "$LOREPORT_BRIDGES" ]; then
+  while read -r skill bridge; do
+    [ -n "${skill:-}" ] && [ -n "${bridge:-}" ] || continue
+    case "$skill" in \#*) continue ;; esac
+    src="$BRAIN/skills/$skill"
+    [ -d "$src" ] || continue
+
+    # This block deletes a directory named by config, so it validates the target
+    # rather than trusting it. A typo like "loreport-ops /" would otherwise be
+    # catastrophic, and a mistaken "~/.claude" would take the user's whole config
+    # with it. Two rules, both cheap:
+    #   1. the destination must be an absolute path at least two levels deep, and
+    #   2. if it already exists it must LOOK like a skill directory we installed
+    #      (contains SKILL.md) — never an arbitrary directory that happens to sit
+    #      at that path.
+    case "$bridge" in
+      /*/?*) : ;;
+      *) alert "skill bridge skipped: '$bridge' is not an absolute path at least two levels deep"; continue ;;
+    esac
+    if [ -e "$bridge" ] && [ ! -f "$bridge/SKILL.md" ]; then
+      alert "skill bridge skipped: '$bridge' exists but is not a skill directory (no SKILL.md) — refusing to delete it"
+      continue
+    fi
+
+    parent=$(dirname "$bridge")
+    [ -d "$parent" ] || continue
+    rm -rf "$bridge"
+    cp -r "$src" "$bridge"
+    # A host resolves the skill by its directory name, so the frontmatter `name:`
+    # must match the bridge dir — otherwise the slash-command fails to resolve.
+    sed -i "1,5s/^name: .*/name: $(basename "$bridge")/" "$bridge/SKILL.md"
+  done <<EOF
+$LOREPORT_BRIDGES
+EOF
+fi
+
+# The propagation commit must land on main, never on whichever provider branch the
+# shared tree happens to be parked on. .gitignore and loreport.conf are staged too:
+# an uncommitted edit to the instance's own wiring means the executed configuration
+# is not the one in the backup.
+git -C "$BRAIN" checkout -q main || { alert "sync: cannot checkout main; aborting"; exit 1; }
+if [ "$changed" = "1" ] || ! git -C "$BRAIN" diff --quiet -- .gitignore loreport.conf; then
+  (cd "$BRAIN" && git add -A prompts skills make-surface.sh doctor.sh .gitignore loreport.conf .obsidian)
+  if ! git -C "$BRAIN" diff --cached --quiet; then
+    git -C "$BRAIN" commit -q -m "sync: propagate framework prompts + skill bridges"
+  fi
+fi
+
+python3 "$HUB/brain_merge.py" --brain-dir "$BRAIN"
+merge_rc=$?
+
+# A nonzero merge exit means EITHER a clean fail-closed abort (rolled back, tree
+# intact) OR a crash that left the repo in an undefined state. The exit code alone
+# can't tell them apart, so verify the invariants directly before doing anything
+# irreversible — publishing or pushing from a broken tree is how a bad state
+# escapes to every connected provider.
+head_ref=$(git -C "$BRAIN" symbolic-ref --short -q HEAD || echo DETACHED)
+dirty=$(git -C "$BRAIN" status --porcelain --untracked-files=no)
+if [ "$head_ref" != "main" ] || [ -n "$dirty" ]; then
+  alert "Loreport sync HALTED: repo state unsafe after merge (HEAD=$head_ref, dirty=$([ -n "$dirty" ] && echo yes || echo no), merge_rc=$merge_rc). Not publishing or pushing."
+  exit 1
+fi
+[ "$merge_rc" -ne 0 ] && alert "Loreport merge exited $merge_rc — tree is clean on main, check hub/digest-$(date +%F).md"
+
+python3 "$HUB/snapshot_publish.py" --brain-dir "$BRAIN" || {
+  alert "Loreport publish failed — the packet served to providers may be stale"
+  exit 1
+}
+
+# Rebuild the human-readable HTML report. It IS tracked: the report is part of the
+# brain, so it travels with the repo and restores with it. That is only affordable
+# because report_build.py stamps it from main's last commit rather than the wall
+# clock -- same brain in, byte-identical file out -- so it is committed when the
+# memories change and not once a day for nothing.
+python3 "$HUB/report_build.py" --brain-dir "$BRAIN" \
+  --out "$BRAIN/hub/published/report.html" >/dev/null || \
+  alert "Loreport report build failed — the browsable report is stale"
+
+# Commit the packet. It is derived, but it is also the record of exactly what was
+# exposed to cloud providers on a given day — worth keeping in history. Leaving it
+# uncommitted made the working tree permanently dirty, which would trip the guard
+# above on every subsequent run.
+(cd "$BRAIN" && git add -A hub/published)
+if ! git -C "$BRAIN" diff --cached --quiet; then
+  git -C "$BRAIN" commit -q -m "brain(publish): packet $(date +%F)"
+fi
+
+python3 "$HUB/project.py" --brain-dir "$BRAIN" || alert "Loreport projection FAILED"
+
+if ! git -C "$BRAIN" push origin --all; then
+  alert "Loreport backup push FAILED — the private backup is now stale"
+  exit 1
+fi
+
+# Push tags SEPARATELY and explicitly. `git push --all` sends branches only, and
+# `--follow-tags` sends only *annotated* tags — brain_merge.py's pre-merge/* tags
+# are lightweight, so both would silently skip them and the documented rollback
+# target would not exist in a fresh clone. Verified: --follow-tags left the remote
+# with zero tags.
+if ! git -C "$BRAIN" push --tags origin; then
+  alert "Loreport tag push failed — recovery tags exist locally but not in the backup"
+  exit 1
+fi
