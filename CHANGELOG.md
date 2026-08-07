@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.12.0] — 2026-08-07
+
+### Added
+- **`hub/domain_backfill.py` — propose / review / apply for the `domain` field.** Two
+  commands on purpose. `domain` says which side of a person's life an item belongs to;
+  that is a judgement about *them*, not a property of the text, so a machine reading
+  "deployed the staging cluster" cannot know whether it was their job or their weekend.
+  `propose` reads only and writes a plain-text mapping with its reasoning; a human edits
+  it; `apply` writes exactly what the file says. Measured on a real 76-item brain, the
+  heuristic could only guess 25 and marked **51 as `?`** — which is the honest result and
+  the reason the tool is built to hand those back rather than default them.
+  Safety properties, each covered by a test: `?` lines are skipped rather than defaulted;
+  a value outside the enum is refused; a line whose item has changed since the proposal is
+  refused, so a stale review can never be replayed over newer content; `visibility` and
+  every other byte of the item are preserved, because the two axes are independent and
+  neither may be inferred from the other.
+
 ## [1.11.0] — 2026-08-07
 
 ### Added
