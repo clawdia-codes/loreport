@@ -1,7 +1,19 @@
 [Unit]
 Description=Loreport weekly health check (design-08)
-ConditionPathExists=%h/.local/bin/loreport-health
+# The script Telegrams on its own failure path and exits 1 to mean "brain is
+# unhealthy" — an ordinary, well-reported outcome, not a systemd failure. Any
+# OTHER nonzero status means the check itself died before it could report, which
+# is the case nothing else can see. Requires loreport-alert@.service installed.
+OnFailure=loreport-alert@%N.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/loreport-health
+# exit 1 is "unhealthy, already reported". Without this, OnFailure= would fire a
+# second Telegram every time the brain is merely unhealthy, and the last-resort
+# alarm would stop meaning "the check is broken".
+SuccessExitStatus=1
+# Edit the --config path to point at YOUR brain's loreport.conf; the engine ships
+# no instance paths. There is deliberately no ConditionPathExists= here: a failed
+# condition marks the unit successful-and-skipped, which on a weekly timer is
+# indistinguishable from a healthy run — a permanently green, permanently dead check.
+ExecStart=%h/projects/loreport/scripts/loreport-health --config %h/projects/my-brain/loreport.conf

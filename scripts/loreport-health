@@ -3,12 +3,61 @@
 # Read-only checks; set -uo pipefail without -e so every check runs.
 set -uo pipefail
 
-BRAIN="${LOREPORT_BRAIN_DIR:-$PWD}"
-FRAMEWORK="${LOREPORT_FRAMEWORK_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+usage() {
+  cat <<'USAGE'
+usage: loreport-health [--config PATH] [--pasted]
+
+  --config PATH   instance config (default: ./loreport.conf)
+  --pasted        record that hub/surface-chatgpt.md was pasted, then exit
+  -h, --help      this message
+
+Required config keys: LOREPORT_BRAIN, LOREPORT_ENGINE
+Optional:             LOREPORT_NOTIFY, LOREPORT_BANNER
+USAGE
+}
+
+CONFIG="./loreport.conf"
+DO_PASTED=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pasted) DO_PASTED=1; shift ;;
+    --config) CONFIG="${2:-}"; shift 2 || true ;;
+    --config=*) CONFIG="${1#*=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "loreport-health: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# A missing config is fatal, not a fallback. This check's whole job is to be the
+# consumer of last resort, so the one thing it must never do is run against a
+# guessed brain and report it healthy. The previous version defaulted BRAIN to
+# $PWD; under systemd that is $HOME, where every path below silently resolves to
+# nothing. Refusing to start is loud, and loud is the point.
+if [ ! -r "$CONFIG" ]; then
+  echo "loreport-health: config not found or unreadable: $CONFIG" >&2
+  echo "loreport-health: pass --config PATH, or run from a brain containing loreport.conf" >&2
+  exit 2
+fi
+
+# shellcheck source=/dev/null
+. "$CONFIG"
+
+# BRAIN and FRAMEWORK get no defaults for the same reason: a wrong-but-plausible
+# value here IS the silent-green failure. :? aborts on unset or empty, which
+# matters because this script runs without -e and would otherwise sail past.
+BRAIN="${LOREPORT_BRAIN:?loreport-health: LOREPORT_BRAIN not set in $CONFIG}"
+FRAMEWORK="${LOREPORT_ENGINE:?loreport-health: LOREPORT_ENGINE not set in $CONFIG}"
+# These two do have honest defaults — a banner in the standard location, and no
+# notifier at all. Neither can fake a healthy brain.
 BANNER="${LOREPORT_BANNER:-${HOME}/.config/loreport/health-report}"
+TG_NOTIFY="${LOREPORT_NOTIFY:-}"
+
+for d in "$BRAIN" "$FRAMEWORK"; do
+  [ -d "$d" ] || { echo "loreport-health: not a directory: $d (check $CONFIG)" >&2; exit 2; }
+done
+
 HEALTH_STATE="${BRAIN}/hub/health-state.json"
 MANIFEST="${BRAIN}/hub/projection-manifest.json"
-TG_NOTIFY="${LOREPORT_NOTIFY:-}"
 NOW=$(date +%s)
 
 failures=()
@@ -100,7 +149,7 @@ print(region_hash(text, mode))
 PY
 }
 
-if [ "${1:-}" = "--pasted" ]; then
+if [ "$DO_PASTED" -eq 1 ]; then
   json_set_pasted
   exit 0
 fi
@@ -300,7 +349,7 @@ if [ -f "$chatgpt_surface" ] && [ -n "$pasted_hash" ]; then
   current_hash=$(region_hash_file "$chatgpt_surface" block)
   if [ "$current_hash" != "$pasted_hash" ]; then
     if [ -z "$last_nag" ] || [ $((NOW - last_nag)) -ge $((30 * 86400)) ]; then
-      note_failure "ChatGPT surface changed since last paste" "re-paste hub/surface-chatgpt.md into ChatGPT, then loreport-health --pasted"
+      note_failure "ChatGPT surface changed since last paste" "re-paste hub/surface-chatgpt.md into ChatGPT, then run: loreport-health --pasted --config $CONFIG"
       python3 - "$HEALTH_STATE" "$NOW" <<'PY'
 import json, os, sys
 state_path, now = sys.argv[1], int(sys.argv[2])
