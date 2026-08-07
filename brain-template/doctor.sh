@@ -274,6 +274,10 @@ if [ -d hub ] || git show-ref --quiet refs/heads/provider/openclaw 2>/dev/null; 
     # if publishing carried INDEX.md alone every archived shared item would drop
     # out of every cloud assistant's view with nothing reporting it. Same shape as
     # the vacuous check above: a silent, green-looking loss of reach.
+    #
+    # Both delivery surfaces are checked. `surface.md` is the paste-host path and
+    # a paste host cannot fetch a cold shelf either, so checking only the packet
+    # would leave exactly half of this property guarded.
     if [ -f INDEX-ARCHIVE.md ]; then
       amiss=0; ashared=0
       while read -r n; do
@@ -284,9 +288,13 @@ if [ -d hub ] || git show-ref --quiet refs/heads/provider/openclaw 2>/dev/null; 
           ashared=$((ashared + 1))
           grep -q "\[\[$n\]\]" hub/published/packet.md 2>/dev/null \
             || { no "archived SHARED item [[$n]] is MISSING from the published packet — cloud providers lost it"; amiss=1; }
+          if [ -f surface.md ]; then
+            grep -q "\[\[$n\]\]" surface.md \
+              || { no "archived SHARED item [[$n]] is MISSING from surface.md — paste hosts lost it (re-run ./make-surface.sh)"; amiss=1; }
+          fi
         done
       done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX-ARCHIVE.md 2>/dev/null)
-      [ "$amiss" = "0" ] && [ "$ashared" -gt 0 ] && ok "all $ashared archived shared item(s) still reach the packet"
+      [ "$amiss" = "0" ] && [ "$ashared" -gt 0 ] && ok "all $ashared archived shared item(s) still reach the packet and surface.md"
     fi
   fi
 fi

@@ -6,9 +6,10 @@
 #                                           captures are stamped with where they came from
 #   ./make-surface.sh --all              -> include `local` items (local hosts only)
 #
-# surface.md = the brain protocol + PROFILE.md + INDEX.md. That is the whole
-# always-loaded footprint; detail files stay on disk until something needs them.
-# Re-run this whenever PROFILE.md or INDEX.md changes.
+# surface.md = the brain protocol + PROFILE.md + INDEX.md (+ INDEX-ARCHIVE.md when the
+# brain has archived anything). That is the whole always-loaded footprint; detail files
+# stay on disk until something needs them.
+# Re-run this whenever PROFILE.md or either index changes.
 #
 # WHY SHARED-ONLY IS THE DEFAULT: pasting is how the brain reaches hosts that can't
 # read your files — which in practice means cloud chat boxes. An item marked
@@ -51,6 +52,16 @@ item_file() {
   return 1
 }
 
+# THE ARCHIVE SEAM, again — a paste host cannot lazy-fetch a cold shelf any more
+# than a cloud provider can. surface.md is the whole catalog such a host will ever
+# see, so an archived SHARED item must appear here exactly like it appears in the
+# published packet; otherwise the day an item expires it silently disappears from
+# every paste host, with nothing reporting it. Only `visibility: local` is ever
+# withheld. INDEX-ARCHIVE.md is absent on a brain that has never archived anything,
+# which is normal and not an error.
+indexes=(INDEX.md)
+[ -f INDEX-ARCHIVE.md ] && indexes+=(INDEX-ARCHIVE.md)
+
 dropped=0
 index_out=$(
   while IFS= read -r line; do
@@ -67,7 +78,7 @@ index_out=$(
     else
       printf '%s\n' "$line"
     fi
-  done < INDEX.md
+  done < <(cat "${indexes[@]}")
   printf '%s' "__DROPPED__$dropped"            # subshell can't export; smuggle the count
 )
 dropped=${index_out##*__DROPPED__}

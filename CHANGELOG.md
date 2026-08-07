@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.13.2] — 2026-08-07
+
+### Fixed
+- **`make-surface.sh` had the same archive seam as the packet, and it was missed.** 1.11.0
+  closed the seam for `hub/published/packet.md` but `surface.md` is a *second* delivery
+  path — the one for paste hosts — and it composed `INDEX.md` only. A paste host cannot
+  fetch a cold shelf any more than a cloud provider can, so the first time an item expired,
+  every archived **shared** item would have vanished from every paste surface while
+  `doctor.sh`'s new seam check stayed green (it only looked at the packet). `surface.md`
+  now carries `INDEX-ARCHIVE.md` too, through the same local-item filter, and the doctor
+  check covers both surfaces. Verified by running: archived shared item present, archived
+  local item absent, and removing the line from `surface.md` makes doctor fail.
+  Worth noting how this was found — the general claim "the archive seam is closed" was
+  written down before both delivery paths had been checked. `sync.sh` copies **both**
+  `doctor.sh` and `make-surface.sh` from the framework working tree, so like 1.13.1 this
+  would have shipped to a live brain with no merge involved.
+
 ## [1.13.1] — 2026-08-07
 
 ### Fixed
