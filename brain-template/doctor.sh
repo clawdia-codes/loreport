@@ -212,12 +212,34 @@ if [ -d hub ] || git show-ref --quiet refs/heads/provider/openclaw 2>/dev/null; 
   done
   if [ -f hub/published/packet.md ]; then
     pleak=0
+    pcount=0
     while read -r n; do
       [ -z "$n" ] && continue
+      pcount=$((pcount + 1))
       for p in "memories/$n.md" "knowledge/$n.md"; do
         [ -f "$p" ] && grep -qx 'visibility: local' "$p" && { no "LEAK: local item [[$n]] is in the published packet"; pleak=1; }
       done
     done < <(grep -oP '(?<=^- \[\[)[^]]+' hub/published/packet.md 2>/dev/null)
+
+    # POSITIVE assertion — the leak check above is VACUOUSLY TRUE on an empty packet:
+    # its loop body never runs, pleak stays 0, and it reports success. That makes the
+    # instrument blind to the exact failure it exists to catch (a refactor that stops
+    # the packet being populated silently stops shared memories reaching every cloud
+    # provider, with a green health check). So assert the packet is actually populated
+    # whenever the brain holds shared items.
+    shared_on_disk=0
+    for f in memories/*.md knowledge/*.md; do
+      [ -f "$f" ] || continue
+      grep -qx 'visibility: local' "$f" || shared_on_disk=$((shared_on_disk + 1))
+    done
+    if [ "$shared_on_disk" -gt 0 ] && [ "$pcount" = "0" ]; then
+      no "published packet is EMPTY but $shared_on_disk shared item(s) exist — cloud providers are receiving nothing"
+    elif [ "$pcount" = "0" ]; then
+      hmm "published packet is empty (and no shared items exist on disk — consistent)"
+    else
+      ok "published packet carries $pcount item(s), $shared_on_disk shared on disk"
+    fi
+
     [ "$pleak" = "0" ] && ok "published packet contains no local item"
   fi
 fi

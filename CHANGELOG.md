@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.3] — 2026-08-07
+
+### Fixed
+- **`doctor.sh`'s published-packet privacy check was vacuously true on an empty packet.**
+  Its leak loop iterates the packet's entries, so an empty packet ran the body zero times,
+  left `pleak=0`, and reported "published packet contains no local item" — success. The
+  instrument was blind to the exact failure it exists to catch: anything that stops the
+  packet being populated silently stops every shared memory reaching every cloud provider,
+  with a green health check. Now paired with a positive assertion — the packet must carry
+  items whenever shared items exist on disk, and both counts are reported so drift is
+  visible. Negative-tested against a clone: emptying the packet flips the run to FAIL while
+  the old check still reported success beside it.
+
 ## [1.8.2] — 2026-08-07
 
 ### Fixed
