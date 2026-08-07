@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.10.1] — 2026-08-07
+
+### Fixed
+- **`observe_extract` refuses to run while another process writes the same output.**
+  Resumability alone was not enough: `already_done()` is read once at startup, so two
+  concurrent runs both see the same completed set, both process the same remainder, and
+  both append. Observed live — a backgrounded run was believed dead (its wrapper had
+  exited) and a second was started; the artifact came out with **238 rows for 140
+  conversations, 98 duplicated**. That is not cosmetic: Pass 2 judges whether a preference
+  is stable by counting *how many distinct conversations* a claim appears in, so a
+  double-counted conversation silently inflates its evidence. Now guarded by an exclusive
+  `flock` on a sidecar file, released however the process dies. Verified by starting a
+  second run against a held lock and confirming it exits with a clear message.
+
 ## [1.10.0] — 2026-08-07
 
 ### Added

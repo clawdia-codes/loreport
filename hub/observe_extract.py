@@ -42,6 +42,8 @@ CLI:
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -173,6 +175,38 @@ def verify_and_clean(observations, turns):
     return kept, rejects
 
 
+@contextlib.contextmanager
+def single_writer(out_path):
+    """Refuse to run while another process is writing the same output file.
+
+    Resumability alone is not enough. `already_done()` is read once at startup, so two
+    concurrent runs both see the same completed set, both process the same remainder, and
+    both append — producing duplicate rows for the same conversation.
+
+    That is not hypothetical: it happened on 2026-08-07. A backgrounded run was believed
+    dead (its wrapper had exited) and a second was started; the artifact came out with 238
+    rows for 140 conversations, 98 of them duplicated. Duplicate rows are not merely
+    untidy — the next pass counts *how many distinct conversations* a claim appears in to
+    judge whether a preference is stable, so a double-counted conversation silently
+    inflates that evidence.
+
+    An exclusive flock on a sidecar file is enough; it is released when the process dies,
+    however it dies.
+    """
+    lock_path = out_path + ".lock"
+    fh = open(lock_path, "a+")
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError):
+            raise SystemExit(
+                f"another observe_extract run is already writing {out_path} "
+                f"(lock: {lock_path}). Wait for it, or kill it before re-running.")
+        yield
+    finally:
+        fh.close()
+
+
 def already_done(out_path):
     done = set()
     if not os.path.exists(out_path):
@@ -216,6 +250,14 @@ def main():
     totals = {"conversations": 0, "observations": 0, "model_errors": 0,
               "quote_not_found": 0, "quote_too_short": 0, "bad_shape": 0}
 
+    with single_writer(args.out):
+        _run(args, pending, totals)
+
+    totals["model"] = args.model
+    print(json.dumps(totals, sort_keys=True))
+
+
+def _run(args, pending, totals):
     out = open(args.out, "a", encoding="utf-8")
     try:
         for rec in pending:
@@ -244,9 +286,6 @@ def main():
             totals["observations"] += len(kept)
     finally:
         out.close()
-
-    totals["model"] = args.model
-    print(json.dumps(totals, sort_keys=True))
 
 
 if __name__ == "__main__":
