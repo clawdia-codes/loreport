@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.9.0] — 2026-08-07
+
+### Added
+- **`hub/corpus_prep.py` — knowledge-grab Pass 0.** Normalizes Claude Code / Codex /
+  OpenClaw session logs into per-conversation records containing *only* genuine user
+  turns, for the knowledge-grab pipeline. Deliberately high-recall and judgment-free:
+  deciding what is worth remembering belongs to later passes. Reuses `sweep_extract`'s
+  parsing rather than forking it. Writes nothing to the brain, touches no git, calls no
+  model.
+- **Structural template detection.** Marker lists rot — they only catch injections someone
+  already noticed. A live-corpus sample showed marker filtering still leaving the artifact
+  dominated by `/security-review` payloads and Codex review-continuation templates that
+  carried no marker at all. So a *long* turn whose opening recurs across ≥3 distinct
+  conversations is treated as injected, whatever words it uses: a human does not type the
+  same 2,000-character message in fifty sessions. Length-gated so short human repeats
+  ("try now", "continue") survive. Needs no per-payload maintenance and catches shapes that
+  do not exist yet.
+- **Whole-turn injection scan.** `sweep_extract.is_synthetic_turn` inspects only the first
+  400 chars, which is correct there (candidates are capped at 1200). Pass 0 keeps long
+  turns, so it scans the entire turn — two `/security-review` payloads (14,996 and 42,399
+  chars) had leaked with markers at char 2378 and 4024. Plus a 20,000-char ceiling: a human
+  does not type 42,000 characters.
+- 12 tests, including two negative ones encoding production failures — the `[System]`
+  gateway notice that became a memory *about* the user, and pasted credentials. Both were
+  confirmed to fail with their fix removed.
+
+### Measured
+- Full local corpus → **140 conversations, 1,138 user turns**, 2026-05-02 → 2026-08-07.
+  Median turn 81 chars (was 667 before template detection — the drop is injected payloads
+  leaving). Zero `[system]`, `system-reminder`, `<command-name>` or credential-shaped
+  strings survive into the artifact.
+
 ## [1.8.3] — 2026-08-07
 
 ### Fixed
