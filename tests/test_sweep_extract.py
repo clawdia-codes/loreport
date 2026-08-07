@@ -130,6 +130,45 @@ class SweepExtractTests(unittest.TestCase):
         self.assertIn("<MEMORY file=", block)
         self.assertIn("INDEX:", block)
 
+    def test_system_prefixed_injection_is_not_a_user_statement(self):
+        """Regression: OpenClaw injects gateway notices as role=user "[System] …"
+        prompts. A 2026-08-06 full-history dry run promoted the gateway-restart
+        notice into a candidate memory ABOUT the user — a system message wearing
+        the user's identity. The whole "[System] " class must be filtered, not
+        just the one sentence that leaked."""
+        leaked = (
+            "[System] Your previous turn was interrupted by a gateway restart "
+            "while OpenClaw was waiting on tool/model work. Continue from where "
+            "you left off. Remember the decision you made about the schema."
+        )
+        self.assertIsNone(
+            classify_user_text(leaked),
+            "the [System] gateway notice must never become a candidate",
+        )
+        # Same sentence WITHOUT the marker is ordinary user text — proves the
+        # filter keys on the injection marker and is not just length/keyword luck.
+        self.assertIsNotNone(
+            classify_user_text(
+                "Remember this always: the decision we made about the schema stands."
+            ),
+            "a genuine 'remember this' must still be captured",
+        )
+
+    def test_system_marker_is_case_insensitive_and_positional(self):
+        """`is_synthetic_turn` lowercases and scans a 400-char head, so the marker
+        must catch casing variants — but must NOT swallow a user sentence that
+        merely mentions the word system."""
+        for variant in ("[SYSTEM] gateway restarted, continue.",
+                        "[system] gateway restarted, continue."):
+            self.assertIsNone(classify_user_text(variant + " Remember this decision."),
+                              f"variant should be filtered: {variant!r}")
+        self.assertIsNotNone(
+            classify_user_text(
+                "Remember this: the system prompt is what decides tool routing."
+            ),
+            "'system' as an ordinary word must not trigger the filter",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

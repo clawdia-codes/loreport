@@ -103,6 +103,12 @@ SYNTHETIC_MARKERS = (
     "this session is being continued from a previous",
     "stop hook feedback:",
     "write a dream diary entry",
+    # OpenClaw injects gateway/system notices as role=user prompts prefixed "[System] ".
+    # Caught in the wild 2026-08-06: a full-history dry run promoted
+    # "[System] Your previous turn was interrupted by a gateway restart..." into a
+    # candidate memory ABOUT THE USER. Match the generic prefix rather than that one
+    # sentence, so the whole class is filtered instead of a single instance.
+    "[system]",
 )
 
 # Agent-to-agent dispatch briefs land in openclaw session logs as role=user and open

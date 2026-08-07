@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.2] — 2026-08-07
+
+### Fixed
+- **Sweep no longer attributes system messages to the user.** OpenClaw injects gateway
+  notices as `role=user` prompts prefixed `[System] `. A full-history dry run on 2026-08-06
+  promoted `"[System] Your previous turn was interrupted by a gateway restart..."` into a
+  candidate memory *about the user* — a system message wearing the user's identity, the
+  attribution-error failure mode named in the knowledge-grab design. `SYNTHETIC_MARKERS`
+  now carries the generic `[system]` prefix, so the whole class is filtered rather than the
+  one sentence that leaked. Two regression tests cover it, including a positive control
+  proving the filter keys on the marker and not on length or keywords; both were confirmed
+  to fail with the fix removed. Verified against the live corpus: the candidate is gone.
+
 ## [1.8.1] — 2026-08-06
 
 ### Fixed
