@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.11.0] — 2026-08-07
+
+### Added
+- **Lifecycle: `lifespan` + `expires`, and a real `INDEX-ARCHIVE.md`.** The hot/cold index
+  split has been a deferred design note since v1; it now ships. An item whose `expires`
+  date has passed leaves `INDEX.md` and appears in `INDEX-ARCHIVE.md`, rebuilt
+  deterministically alongside it. **Only the catalog line moves** — the file stays on disk,
+  still readable and still wikilink-resolvable, so archiving can never be a quiet deletion.
+  The trigger is a date comparison and nothing else: no duration math, no model judgement
+  of staleness, and no "untouched since" notion (which would need access tracking the brain
+  deliberately doesn't keep). An item with no `expires` is therefore untouchable by
+  construction — which is what makes `permanent` and `active` safe, rather than a second
+  rule that could drift out of sync with the first.
+- **The archive/cloud seam.** The published packet now carries `INDEX.md` **and**
+  `INDEX-ARCHIVE.md`, both through the same visibility filter. Without this, archiving a
+  `shared` item would silently revoke every cloud assistant's access to it — providers get
+  the packet, not the repo, and cannot fetch a cold shelf — while every health check stayed
+  green. `doctor.sh` now asserts every archived shared item is present in the packet, and
+  that assertion was proven non-vacuous by removing the archive from the packet build and
+  watching it fail. The only thing ever excluded from the packet remains `visibility: local`.
+- **`domain: work | personal | both`** — the work-vs-private axis, optional. This is
+  explicitly **not** cloud exposure: that is `visibility`, and the two are independent (a
+  work item may be local, a personal item may be shared). Nothing infers one from the other.
+- `consolidate.md` gains a Lifecycle operation and an **Archived** output section; capture
+  guidance for all three fields is in `bootstrap.md`. `doctor.sh` treats `INDEX-ARCHIVE.md`
+  as catalogued — otherwise every archived item would be reported "invisible to search" the
+  day it expired — and flags an item listed in both indexes.
+
+### Changed
+- `INDEX-ARCHIVE.md` is a derived artifact like `INDEX.md`: excluded from every merge and
+  regenerated wholesale, since a hand-merged copy could only ever be wrong.
+
 ## [1.10.1] — 2026-08-07
 
 ### Fixed

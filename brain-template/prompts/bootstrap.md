@@ -33,6 +33,9 @@ type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
 visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
+expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
+domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>
@@ -62,6 +65,13 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
   `<!-- human:start -->…<!-- human:end -->` region in that body must pass through
   verbatim; if you cannot see the current body, do not claim `action="update"`.
 - `type: person` defaults to `visibility: local` (entities — family, colleagues, partners).
+- `lifespan`, `expires` and `domain` are optional and stay omitted unless they are obvious.
+  Omitted `lifespan` means `permanent`, which is the right default for most captures —
+  stamp `temporary` only for context that genuinely stops being true (a trip, a deadline,
+  a stand-in arrangement), and when a real end date is knowable, stamp `expires` with it:
+  that date is what later files the item to the archive, and without it nothing does.
+  `domain: work | personal | both` is which side of life the item belongs to — it is NOT
+  exposure, so never let it influence `visibility` or vice versa.
 
 ## If this host has its own memory (capture parity)
 Your native memory and this brain coexist; neither replaces the other.

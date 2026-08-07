@@ -88,20 +88,38 @@ for f in memories/*.md knowledge/*.md; do
 done
 [ "$bad_fm" = "0" ] && ok "$items items, all with valid frontmatter"
 
-# INDEX <-> files, both directions
+# INDEX <-> files, both directions.
+#
+# INDEX-ARCHIVE.md counts as catalogued: archiving moves an item's line to the cold
+# shelf and leaves the file on disk, so an archived item is catalogued, not missing.
+# Checking INDEX.md alone would report every archived item as "invisible to search"
+# the day it expires — a false alarm that would train the reader to ignore doctor.
 missing_file=0; missing_line=0
 while read -r name; do
   [ -z "$name" ] && continue
   [ -f "memories/$name.md" ] || [ -f "knowledge/$name.md" ] || [ -f "skills/$name/SKILL.md" ] \
     || { no "INDEX lists [[$name]] but no such item exists"; missing_file=$((missing_file+1)); }
-done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX.md 2>/dev/null)
+done < <(cat INDEX.md INDEX-ARCHIVE.md 2>/dev/null | grep -oP '(?<=^- \[\[)[^]]+')
 for f in memories/*.md knowledge/*.md; do
   [ -f "$f" ] || continue
   case "$(basename "$f")" in README.md) continue ;; esac
   n=$(basename "$f" .md)
-  grep -q "^- \[\[$n\]\]" INDEX.md 2>/dev/null || { no "$f has no INDEX line — it is invisible to search"; missing_line=$((missing_line+1)); }
+  cat INDEX.md INDEX-ARCHIVE.md 2>/dev/null | grep -q "^- \[\[$n\]\]" \
+    || { no "$f has no INDEX line — it is invisible to search"; missing_line=$((missing_line+1)); }
 done
 [ "$missing_file" = "0" ] && [ "$missing_line" = "0" ] && ok "INDEX matches the files on disk, both directions"
+
+# An item must be catalogued in exactly ONE of the two indexes. Both = it is listed
+# twice in the surface a reader loads; the hot/cold split has stopped being a split.
+if [ -f INDEX-ARCHIVE.md ]; then
+  double=0
+  while read -r name; do
+    [ -z "$name" ] && continue
+    grep -q "^- \[\[$name\]\]" INDEX.md 2>/dev/null \
+      && { no "[[$name]] is listed in BOTH INDEX.md and INDEX-ARCHIVE.md"; double=$((double+1)); }
+  done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX-ARCHIVE.md 2>/dev/null)
+  [ "$double" = "0" ] && ok "hot and cold indexes do not overlap"
+fi
 
 # Dangling and ambiguous wikilinks. A link to an item you haven't written yet is FINE
 # by design — it marks something worth writing later. Report dangling and ambiguous
@@ -241,6 +259,26 @@ if [ -d hub ] || git show-ref --quiet refs/heads/provider/openclaw 2>/dev/null; 
     fi
 
     [ "$pleak" = "0" ] && ok "published packet contains no local item"
+
+    # ARCHIVE SEAM — an archived SHARED item must still reach the packet. Cloud
+    # providers get the packet, not the repo, and cannot fetch the cold shelf, so
+    # if publishing carried INDEX.md alone every archived shared item would drop
+    # out of every cloud assistant's view with nothing reporting it. Same shape as
+    # the vacuous check above: a silent, green-looking loss of reach.
+    if [ -f INDEX-ARCHIVE.md ]; then
+      amiss=0; ashared=0
+      while read -r n; do
+        [ -z "$n" ] && continue
+        for p in "memories/$n.md" "knowledge/$n.md"; do
+          [ -f "$p" ] || continue
+          grep -qx 'visibility: local' "$p" && continue
+          ashared=$((ashared + 1))
+          grep -q "\[\[$n\]\]" hub/published/packet.md 2>/dev/null \
+            || { no "archived SHARED item [[$n]] is MISSING from the published packet — cloud providers lost it"; amiss=1; }
+        done
+      done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX-ARCHIVE.md 2>/dev/null)
+      [ "$amiss" = "0" ] && [ "$ashared" -gt 0 ] && ok "all $ashared archived shared item(s) still reach the packet"
+    fi
   fi
 fi
 

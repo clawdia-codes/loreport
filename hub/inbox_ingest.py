@@ -73,6 +73,13 @@ def _load_providers():
 
 PROVIDERS = _load_providers()
 ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
+# Lifecycle + work/private axis (docs/taxonomy-lifecycle-design.md). All three
+# fields below are OPTIONAL; absent `lifespan` means `permanent`, and absent
+# `domain` means unclassified. Kept byte-identical to brain_merge.py's copies —
+# every hub/*.py file is single-file and stdlib-only, nothing is imported between them.
+LIFESPANS = {"permanent", "active", "temporary"}
+DOMAINS = {"work", "personal", "both"}
+EXPIRES_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 # Identical secret-regex set to brain_merge.py / snapshot_publish.py (duplicated on
@@ -226,7 +233,45 @@ def validate_schema(block):
     if visibility is not None and visibility not in ("shared", "local"):
         return f"schema-invalid: visibility '{visibility}' must be 'shared' or 'local'"
 
+    # Optional lifecycle fields (docs/taxonomy-lifecycle-design.md Phase 2).
+    lifespan = fm.get("lifespan")
+    if lifespan is not None and lifespan not in LIFESPANS:
+        return f"schema-invalid: lifespan '{lifespan}' not in enum {sorted(LIFESPANS)}"
+
+    expires = fm.get("expires")
+    if expires is not None:
+        # Format is enforced HERE and only here. Downstream (brain_merge.is_expired)
+        # treats an unparseable date as "not expired", because once an item is on
+        # disk the safe reading of a broken date is to leave it in the hot index —
+        # so capture time is the last moment a bad date can still be rejected while
+        # the author is present to fix it.
+        if not EXPIRES_RE.match(expires) or not _is_real_date(expires):
+            return f"schema-invalid: expires '{expires}' must be a real YYYY-MM-DD date"
+        # A stated contradiction, not an inference: `expires` is the archival
+        # trigger for temporary context, so an item that declares itself
+        # permanent or active cannot also declare an expiry date. An item that
+        # omits `lifespan` entirely is NOT rejected — capture models routinely
+        # emit an expiry without the lifespan, and quarantining a well-formed
+        # memory over a missing default would lose real content.
+        if lifespan in ("permanent", "active"):
+            return f"schema-invalid: lifespan '{lifespan}' cannot carry an expires date"
+
+    # Optional `domain` — the work-vs-private axis. This is NOT cloud exposure:
+    # that is `visibility`, and the two are independent (a work note may be local,
+    # a personal note may be shared). Nothing here may be used to infer visibility.
+    domain = fm.get("domain")
+    if domain is not None and domain not in DOMAINS:
+        return f"schema-invalid: domain '{domain}' not in enum {sorted(DOMAINS)}"
+
     return None
+
+
+def _is_real_date(value):
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _visibility_from_text(text):

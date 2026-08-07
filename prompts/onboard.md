@@ -17,6 +17,9 @@ type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
 visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
+expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
+domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>

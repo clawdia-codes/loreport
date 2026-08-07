@@ -15,6 +15,9 @@ type: user | feedback | project | reference | knowledge | person | decision
 source: <host>               # provenance — assistant/app the capture came from (claude, chatgpt, openclaw, …)
 captured: <YYYY-MM-DD>       # provenance — capture date
 visibility: shared | local   # optional — see below; absent = shared
+lifespan: permanent | active | temporary   # optional — absent = permanent
+expires: <YYYY-MM-DD>        # optional — the archival trigger; only on temporary
+domain: work | personal | both             # optional — which side of life this belongs to
 ---
 ```
 
@@ -37,6 +40,21 @@ visibility: shared | local   # optional — see below; absent = shared
   field is absent) participates in the published packet and is readable by all connected
   providers. **`local`** never leaves this machine — excluded from publish, and cloud
   provider reads refuse it.
+- **`lifespan`** (optional) is `permanent` | `active` | `temporary`; absent = `permanent`.
+  `permanent` — identity, long-term goals, durable knowledge, architecture, decisions.
+  `active` — current projects and present responsibilities. `temporary` — travel,
+  reminders, context that should expire.
+- **`expires`** (optional, `YYYY-MM-DD`) is the **mechanical** archival trigger, and the
+  only one: an item whose `expires` is before today has its INDEX line moved to
+  `INDEX-ARCHIVE.md` (see "Archive"). It belongs only on a `temporary` item — declaring
+  `permanent`/`active` *and* an expiry is a contradiction and is rejected at capture. An
+  item with no `expires` is never archived by machinery, so `permanent` and `active` items
+  are untouchable by construction rather than by a separate rule that could drift.
+- **`domain`** (optional) is `work` | `personal` | `both` — which side of life an item
+  belongs to. **This is not cloud exposure.** That is `visibility`, and the two axes are
+  independent: a work item may be `local` and a personal item may be `shared`. Nothing may
+  infer one from the other. `domain` exists so a reader can scope itself ("only work
+  context in this session"); it grants and revokes nothing.
 
 ---
 
@@ -140,15 +158,29 @@ large enough item count that starts to matter: on a paste host it eventually cro
 custom-instructions character limit; even on a filesystem host it's just more noise to
 scan per session than a genuinely "hot" catalog needs to be.
 
-**Design note (no code ships for this yet):** once the brain is large, split `INDEX.md`
-into a hot/cold pair. Items that haven't been touched (read, updated, or linked from a
-recent capture) in a long while move their INDEX line into `INDEX-ARCHIVE.md`, fetched
-on demand — the same lazy-load pattern detail files already use, one level up. `INDEX.md`
-stays the always-in-context catalog of what's actually active; `INDEX-ARCHIVE.md` is a
-cold shelf the model asks for explicitly ("anything archived about X?") rather than
-something pinned into every session. The cutoff (by age, by explicit "archive this" during
-consolidation, or both) and the exact split mechanics are deferred to whenever a brain
-actually reaches this scale — most brains never will.
+**This now ships** (it was a deferred design note through v1.10). `INDEX.md` is a hot/cold
+pair: an item whose `expires` date has passed has its INDEX line moved into
+`INDEX-ARCHIVE.md`, rebuilt deterministically by `hub/brain_merge.py` alongside `INDEX.md`.
+`INDEX.md` stays the always-in-context catalog of what's active; `INDEX-ARCHIVE.md` is a
+cold shelf a filesystem host fetches on demand ("anything archived about X?") rather than
+something pinned into every session. The file is only created once something is actually
+on the shelf.
+
+Three properties make this safe to run unattended, and each is worth stating because the
+obvious implementation gets them wrong:
+
+- **Only the catalog line moves.** The item's file stays exactly where it is, still
+  readable, still `[[wikilink]]`-resolvable, still merged and secret-scrubbed like any
+  other. Archiving is a hot/cold split of the index, never a deletion.
+- **The trigger is a date comparison, not a judgement.** `expires` before today. No
+  duration math, no model guess about staleness, and no notion of "untouched" — which
+  would need access-time tracking the brain deliberately doesn't keep.
+- **The cloud seam.** Cloud providers receive the published *packet*, not the repository,
+  and cannot lazy-fetch a cold shelf. So the packet carries `INDEX.md` **and**
+  `INDEX-ARCHIVE.md`, both through the same visibility filter — otherwise archiving a
+  `shared` item would silently revoke every cloud assistant's access to it while every
+  health check stayed green. The only thing ever excluded from the packet remains
+  `visibility: local`; that invariant is unchanged.
 
 ---
 
@@ -176,6 +208,9 @@ type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
 visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
+expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
+domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>

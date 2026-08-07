@@ -9,16 +9,19 @@ Pipeline:
   1. Build the packet — read from `main` (via `git show main:<path>`, NEVER
      the working tree, which the shared repo can have parked on any
      provider/* branch at any moment — mid-capture, or between merges):
-     prompts/bootstrap.md + PROFILE.md + INDEX.md, concatenated in that
+     prompts/bootstrap.md + PROFILE.md + INDEX.md + INDEX-ARCHIVE.md (the
+     last only when the brain has archived something), concatenated in that
      order, with a footer comment
      `<!-- loreport packet: main@<short-commit-hash> <date> -->` stamped from
      `main`'s own SHA (never `HEAD`, which may not be `main` at all). Refuses
      to run (clear error, nonzero exit) if `main` cannot be resolved.
-     The packet contains EXACTLY these three files, nothing else — no detail
-     file bodies, ever. The INDEX.md portion is filtered: any line referencing
+     The packet contains EXACTLY those files, nothing else — no detail
+     file bodies, ever. Both index portions are filtered: any line referencing
      a `visibility: local` item is dropped from the packet (the on-disk
      INDEX.md itself is untouched — only the published packet excludes local
-     items; docs/visibility-design.md §3). That per-item visibility lookup is
+     items; docs/visibility-design.md §3). Archived SHARED items are carried
+     via INDEX-ARCHIVE.md so archiving never revokes cloud access to a shared
+     item — see build_packet_text. That per-item visibility lookup is
      the ONLY place the fail-closed visibility parser (_visibility_from_text)
      is applied — it is never applied to bootstrap.md/PROFILE.md/INDEX.md
      themselves (none of which carry item frontmatter; running the parser on
@@ -216,10 +219,28 @@ def build_packet_text(brain_dir):
 
     index = filter_index_text(brain_dir, index_raw)
 
+    # THE ARCHIVE SEAM (docs/taxonomy-lifecycle-design.md Phase 2, "the sharp one").
+    #
+    # Cloud providers get this packet, not the repository — they cannot lazy-fetch
+    # INDEX-ARCHIVE.md the way a filesystem host can. So if archiving removed an
+    # item's line from INDEX.md and the packet carried INDEX.md alone, every
+    # archived SHARED item would silently disappear from every cloud assistant's
+    # view of the brain, with no error anywhere. Archiving is meant to shrink the
+    # hot index on a filesystem host, NOT to revoke cloud access.
+    #
+    # Hence: the packet is INDEX + INDEX-ARCHIVE, both run through the SAME
+    # visibility filter. The one and only thing ever excluded from the packet
+    # stays `visibility: local` — that invariant is unchanged by this.
+    #
+    # INDEX-ARCHIVE.md is absent from a brain that has never archived anything;
+    # that is normal and not an error, unlike the three files above.
+    archive_raw = read_from_main(brain_dir, "INDEX-ARCHIVE.md")
+    archive = filter_index_text(brain_dir, archive_raw) if archive_raw is not None else ""
+
     today = date.today().isoformat()
     footer = f"<!-- loreport packet: main@{main_sha} {today} -->\n"
 
-    return bootstrap + profile + index + footer
+    return bootstrap + profile + index + archive + footer
 
 
 def write_alert(brain_dir, hit):

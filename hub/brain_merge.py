@@ -87,6 +87,15 @@ def _load_provider_order():
 PROVIDER_ORDER = _load_provider_order()
 ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
 
+# Lifecycle (docs/taxonomy-lifecycle-design.md Phase 2). Both fields are OPTIONAL;
+# an absent `lifespan` means `permanent`.
+LIFESPANS = {"permanent", "active", "temporary"}
+# The work-vs-private axis. Orthogonal to `visibility`, which is cloud EXPOSURE —
+# a `domain: work` item may be local, and a `domain: personal` item may be shared.
+DOMAINS = {"work", "personal", "both"}
+
+EXPIRES_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 HUMAN_REGION_RE = re.compile(
     r"<!--\s*human:start\s*-->(.*?)<!--\s*human:end\s*-->",
     re.DOTALL,
@@ -173,12 +182,42 @@ def _visibility_from_text(text):
     return "shared" if seen == "shared" else "local"
 
 
+# --- lifecycle ---------------------------------------------------------------
+
+def parse_expires(value):
+    """Return a `date` for a well-formed `expires: YYYY-MM-DD`, else None.
+
+    Anything unparseable returns None, which means "not expired" — a garbled
+    date must never cause an item to silently vanish from the hot index. The
+    strict-format complaint belongs at capture time (inbox_ingest.validate_schema),
+    where the author can still fix it; by the time an item is on disk, the safe
+    reading of a broken date is to leave the item alone.
+    """
+    if not value or not EXPIRES_RE.match(value.strip()):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def is_expired(fm, today):
+    """True when this item's INDEX line belongs on the cold shelf.
+
+    The trigger is MECHANICAL and is the `expires` date alone — a before/after
+    comparison, never duration math and never a model's judgement of "stale"
+    (docs/taxonomy-lifecycle-design.md Phase 2). An item with no `expires` is
+    never archived by this code, so `permanent` and `active` items are untouched
+    by construction rather than by a separate rule that could drift.
+    """
+    expires = parse_expires(fm.get("expires"))
+    return expires is not None and expires < today
+
+
 # --- deterministic INDEX rebuild --------------------------------------------
 
-def build_index_bytes(brain_dir):
-    """Scan memories/, knowledge/, skills/ and build INDEX.md bytes.
-    Deterministic: sorted alphabetically within each section; no reliance on
-    filesystem iteration order, mtimes, or any other non-content input."""
+def _collect_memories(brain_dir):
+    """Return [(name, desc, typ, frontmatter)] for every valid memory item."""
     memories = []
     mem_dir = os.path.join(brain_dir, "memories")
     if os.path.isdir(mem_dir):
@@ -191,7 +230,58 @@ def build_index_bytes(brain_dir):
             name, desc, typ = fm.get("name"), fm.get("description"), fm.get("type")
             if not name or not desc or typ not in ITEM_TYPES:
                 continue
-            memories.append((name, desc, typ))
+            memories.append((name, desc, typ, fm))
+    return memories
+
+
+def build_archive_index_bytes(brain_dir, today=None):
+    """Build INDEX-ARCHIVE.md bytes — the cold shelf.
+
+    Only the catalog LINE moves here; the item's file stays exactly where it is
+    on disk, so an archived item is still readable, still wikilink-resolvable,
+    and still merged/scrubbed like any other. Archiving is a hot/cold split of
+    the index, not a deletion.
+
+    Returns (bytes, archived_count). Deterministic for a given day and item set.
+    """
+    today = today or date.today()
+    archived = [
+        (name, desc, typ)
+        for name, desc, typ, fm in _collect_memories(brain_dir)
+        if is_expired(fm, today)
+    ]
+    archived.sort(key=lambda t: t[0])
+    lines = [
+        "# Index — Archive",
+        "",
+        # No wikilink-shaped example text in this header: every downstream
+        # consumer (snapshot_publish's visibility filter, doctor.sh's link pass)
+        # treats a `[[...]]` anywhere on a line as an item reference, so a
+        # decorative one here would be scanned as if it were a real entry.
+        "Items whose `expires` date has passed. Their files are untouched and still",
+        "resolve by wikilink; only their catalog line left the hot `INDEX.md`.",
+        "",
+        "## Memories",
+    ]
+    for name, desc, typ in archived:
+        lines.append(f"- [[{name}]] — {desc}  ({typ})")
+    content = "\n".join(lines) + "\n"
+    return content.encode("utf-8"), len(archived)
+
+
+def build_index_bytes(brain_dir, today=None):
+    """Scan memories/, knowledge/, skills/ and build INDEX.md bytes.
+    Deterministic: sorted alphabetically within each section; no reliance on
+    filesystem iteration order, mtimes, or any other non-content input.
+
+    Expired items (`expires` in the past) are omitted here and listed in
+    INDEX-ARCHIVE.md instead — see build_archive_index_bytes."""
+    today = today or date.today()
+    memories = [
+        (name, desc, typ)
+        for name, desc, typ, fm in _collect_memories(brain_dir)
+        if not is_expired(fm, today)
+    ]
 
     knowledge = []
     know_dir = os.path.join(brain_dir, "knowledge")
@@ -1011,9 +1101,13 @@ def do_merge(brain_dir, dry_run):
             # removal must land in its own commit before any branch merge is
             # attempted.) It is regenerated wholesale in step 6, after every
             # provider branch has been merged in.
-            index_path = os.path.join(brain_dir, "INDEX.md")
-            if os.path.exists(index_path) and not dry_run:
-                git(brain_dir, "rm", "-f", "--quiet", "INDEX.md", check=False)
+            # INDEX-ARCHIVE.md is the same kind of artifact and gets the same
+            # treatment — it is rebuilt from the items' `expires` dates, so a
+            # hand-merged version of it could only ever be wrong.
+            derived = [p for p in ("INDEX.md", "INDEX-ARCHIVE.md")
+                       if os.path.exists(os.path.join(brain_dir, p))]
+            if derived and not dry_run:
+                git(brain_dir, "rm", "-f", "--quiet", *derived, check=False)
                 if has_staged_changes(brain_dir):
                     git(brain_dir, "commit", "-m", "brain(merge): drop INDEX.md (derived artifact)", check=False)
 
@@ -1050,7 +1144,7 @@ def do_merge(brain_dir, dry_run):
                             report["profile_conflicts"].append(f)
                             git(brain_dir, "checkout", "--ours", "--", f, check=False)
                             git(brain_dir, "add", f, check=False)
-                        elif base == "INDEX.md":
+                        elif base in ("INDEX.md", "INDEX-ARCHIVE.md"):
                             git(brain_dir, "rm", "-f", f, check=False)
                         else:
                             resolve_conflicted_file(brain_dir, branch, f, report, tag_name)
@@ -1097,11 +1191,27 @@ def do_merge(brain_dir, dry_run):
 
             # Deterministic INDEX rebuild.
             index_bytes, m, k, s = build_index_bytes(brain_dir)
+            archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
             report["index_counts"] = (m, k, s)
+            report["archived_count"] = archived_n
             if not dry_run:
                 with open(os.path.join(brain_dir, "INDEX.md"), "wb") as fh:
                     fh.write(index_bytes)
                 git(brain_dir, "add", "INDEX.md", check=False)
+
+                # The cold shelf only exists once something is actually on it.
+                # A brain that has never expired an item gets no empty
+                # INDEX-ARCHIVE.md, and one whose last archived item was
+                # revived loses the file again rather than keeping a
+                # misleading empty catalog around.
+                archive_path = os.path.join(brain_dir, "INDEX-ARCHIVE.md")
+                if archived_n:
+                    with open(archive_path, "wb") as fh:
+                        fh.write(archive_bytes)
+                    git(brain_dir, "add", "INDEX-ARCHIVE.md", check=False)
+                elif os.path.isfile(archive_path):
+                    git(brain_dir, "rm", "-f", "--quiet", "INDEX-ARCHIVE.md", check=False)
+
                 git(brain_dir, "commit", "-m", "brain(merge): rebuild INDEX.md", check=False)
 
                 # Fast-forward each provider branch to the new main — but
