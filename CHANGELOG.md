@@ -1,8 +1,72 @@
 # Changelog
 
-## [Unreleased]
+## [1.14.0] — 2026-08-10
+
+### Added
+- **A leak check you can point at a brain — `scripts/loreport-audit --config <brain>/loreport.conf`.**
+  On 2026-08-07 three batches of memories reached cloud-published surfaces and there was no
+  runnable check that could have said so. Two separate reasons: `brain-template/doctor.sh`
+  does `cd "$(dirname "$0")"`, so the brain it audits is always its own directory — it
+  cannot be aimed, and the live brain no longer has a copy of it at all; and
+  `scripts/loreport-health`, which *can* be aimed, carries no leak assertion whatsoever.
+  The new script takes the same `--config` as `bin/loreport-sync` and `loreport-health`, is
+  read-only, and asserts: every item carries an explicit `visibility:` and `domain:` (absent
+  `visibility` means *shared*, so an unclassified item is cloud-published by omission); no
+  `local` item appears in `hub/published/packet.md`, `hub/surface-chatgpt.md` or
+  `hub/surface-claude-ai.md`; and the counts reconcile — on disk vs classified vs catalogued
+  vs published, including that every shared item catalogued on `main` reaches the packet.
+  Logic lives in `hub/brain_audit.py`; the script is the config plumbing. Item frontmatter
+  and the INDEX are read from `main` (like `snapshot_publish.py`, because that is what the
+  publisher used); the surfaces are read from disk, because two of the three are gitignored
+  and exist nowhere else.
+- **Blind spots are failures, not passes.** A safety assertion that iterates a collection is
+  vacuously true when the collection is empty, and this repo shipped exactly that bug once
+  (the published-packet privacy check passed on an EMPTY packet). So zero items, a missing
+  surface, an unreadable surface, an empty surface and an empty INDEX each produce a
+  `BLIND` finding and a nonzero exit — and the guards are **unconditional**. A guard gated
+  on "…and shared items exist" is itself a path back to reporting green having examined
+  nothing, which is why the test for it uses a brain whose items are *all* local.
+- **The checker uses the fail-closed visibility rule, and `scripts/check-docs.sh` now pins
+  it there.** The repo holds two rules: fail-closed parsing (5 copies) and a whole-line
+  `^visibility:\s*local\s*$` match (`hub/project.py`, `make-surface.sh`, `doctor.sh`). They
+  disagree on `visibility: "local"`, `visibility: local  # note` and a file with no
+  frontmatter — the projector keeps such an item in the paste-into-cloud surfaces while
+  `snapshot_publish` drops it from the packet, and `doctor.sh`, sharing the *producer's*
+  rule, reports green on a real leak. The audit reports it as a leak *and* reports the
+  non-canonical spelling before it becomes one; the check-docs parser-agreement gate now
+  covers `brain_audit.effective_visibility` so it cannot drift.
 
 ### Fixed
+- **The audit went blind on any item whose filename carries a non-ASCII byte.** `git ls-tree`
+  runs with `core.quotePath=true` by default, so such a path comes back C-quoted *and*
+  double-quoted — `"memories/caf\314\201-note.md"` — no longer ends in `.md`, and was
+  filtered out of `item_paths`. The item was then never classification-checked (no RISK for
+  a missing `visibility:`, no META for a missing `domain:`) and, because it was also never
+  counted, the unconditional vacuity guard stayed quiet as long as one ASCII item existed.
+  Measured, one variable changed: a brain whose only unclassified item had a non-ASCII
+  filename reported `items=1, findings=[], exit 0`; the byte-identical brain with an ASCII
+  filename reported the RISK and exit 1. So the instrument certified clean on exactly the
+  published-by-omission defect it was built to detect, silently. `_run_git` now passes
+  `-c core.quotePath=false`, and `encoding="utf-8"` with it — `text=True` alone decodes with
+  the locale encoding, and this runs from a systemd user unit that may carry no `LANG`.
+  Item slugs are derived from names, so non-ASCII item names are ordinary input.
+- **An unreadable or non-UTF-8 surface killed the audit instead of being reported BLIND.**
+  `UnicodeDecodeError` is not an `OSError`, so the section-2 guard did not catch it, and
+  section 3 re-opened `hub/published/packet.md` with no guard at all. Either path raised out
+  of `audit()`: `format_report` never ran, the operator saw a traceback and no report, and
+  Python's uncaught-exception status (1) is this script's *findings* code — a cannot-run
+  condition delivered as "audited fine, found problems", the exact conflation the 0/1/2 exit
+  design exists to prevent. Both reads now produce a `BLIND` finding.
+- `scripts/loreport-audit` deliberately does **not** copy two idioms from its siblings.
+  `--config` with no value: `shift 2 || true` shifts nothing when one argument remains and
+  swallows the failure, so `$1` stays `--config` and the loop spins forever — verified,
+  `timeout 5 bash scripts/loreport-health --config` exits 124, and under a timer a hung unit
+  is worse than a failed one. And `${LOREPORT_BRAIN:?…}` aborts a *script* with exit 1 on
+  this bash, which is the new script's "found problems" code — a wiring error must not be
+  able to impersonate a finding, so the required keys are tested explicitly and exit 2.
+  Both are pinned by tests. The same two issues remain in `scripts/loreport-health` and
+  `bin/loreport-sync`; fixing them there touches units and exit-code contracts, so it is
+  left as its own change.
 - **A failed capture destroyed every uncommitted change in the brain, not just its own.**
   `inbox_ingest.commit_block`'s failure handler ran `git checkout -- .` plus a pathless
   `git reset` against the single shared working tree. Measured twice on 2026-08-07/08: a

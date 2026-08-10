@@ -146,6 +146,7 @@ Licensed under **MIT** (`prompts/`, `hub/` Python code) and **CC BY 4.0** (`docs
 | [`prompts/`](prompts/) | The three pasteables: `onboard.md`, `bootstrap.md`, `consolidate.md`. |
 | [`scripts/init-brain.sh`](scripts/init-brain.sh) | **Start here** — creates a new brain: folder, git repo, private GitHub backup. |
 | [`brain-template/`](brain-template/) | The skeleton it copies, if you'd rather do it by hand. |
+| [`scripts/loreport-audit`](scripts/loreport-audit) | Point it at any brain's `loreport.conf`: is anything unclassified being published? |
 | [`examples/`](examples/) | A filled fixture brain with a worked consolidation example. |
 | [`hub/`](hub/) | The opt-in Tier-2 sync hub. |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release, written to be read. |
