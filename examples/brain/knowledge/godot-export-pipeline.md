@@ -2,6 +2,7 @@
 name: godot-export-pipeline
 description: Godot 4 export pipeline for Windows/Mac/Linux builds
 type: knowledge
+visibility: shared
 ---
 How Godot 4 turns a project into shippable builds for the three desktop targets.
 

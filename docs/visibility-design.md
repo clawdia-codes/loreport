@@ -12,12 +12,26 @@ Every item gains one frontmatter field:
 visibility: shared | local
 ```
 
-- **`shared`** (default) — participates in the published packet and is readable by all
+- **`shared`** — participates in the published packet and is readable by all
   connected providers over MCP. Global across providers.
 - **`local`** — never leaves the machine: excluded from the published packet, and cloud
   provider reads refuse it. Only local/trusted hosts (openclaw, Claude Code) can read it.
 
-Absent field ⇒ `shared` (back-compatible with existing brains).
+The field is **required** on every item. An item is `shared` only on an explicit
+`visibility: shared`; the field absent, a value that doesn't parse, or no frontmatter block
+at all all read as `local` (`_visibility_from_text`, five copies across `hub/`, plus the
+equivalent rule in `hub/project.py` and `make-surface.sh`).
+
+**Changed 2026-08 — this used to say "absent ⇒ `shared`, back-compatible with existing
+brains".** Back-compatibility was the wrong thing to optimise: it made an unclassified item
+not merely unfiltered but positively *published*, the one fail-open default in an otherwise
+fail-closed engine, and three batches leaked that way on 2026-08-07. Now an unclassified
+item is withheld, and `hub/snapshot_publish.py` refuses to publish at all while any exists
+(§6) so the withholding cannot quietly accumulate.
+
+Skills are exempt: a skill is a package, not an item, and carries no `visibility:` field at
+all (`docs/format-spec.md` §1). Skills are always shared. The carve-out lives in the
+resolvers that know a path is a skill, never in the parser, which only ever sees text.
 
 ## 2. Trust tiers (independent of provider)
 
@@ -72,14 +86,26 @@ hardcoded across three scripts): `{name, token_env, trust, merge_order}` per pro
    user the split for **explicit confirmation before saving** (this is the "manifest," now
    produced by the interview instead of by hand).
 
-`bootstrap.md` capture grammar: the model may emit `visibility: local`, and should default
-to `local` for a capture that obviously touches an always-local topic.
+`bootstrap.md` capture grammar: the model must state `visibility:` on every capture, and
+should choose `local` for a capture that obviously touches an always-local topic.
 
-## 6. Default & back-compat
+## 6. Default & migration
 
-- New captures default `shared` unless sensitive-flagged (per §5) → `local`.
-- Existing brains with no `visibility:` field read as `shared` — no migration required, but
-  a one-shot `loreport_change_memory_settings` pass (or hand-edit) can classify a pre-existing brain.
+- Every capture states `visibility:` explicitly. A capture that omits it is not rejected —
+  it is filed and read as `local`, so nothing is lost and nothing leaks.
+- An item with no `visibility:` reads as `local` everywhere: publish, MCP read/search,
+  and the projected surfaces. It is withheld, not deleted, and a local-trust caller still
+  sees it.
+- **The withholding is reported, not silent.** `hub/snapshot_publish.py` enumerates
+  `memories/`/`knowledge/` on `main` before building anything and refuses the whole
+  republish while any item lacks the field, naming each one to stdout and to
+  `hub/quarantine/digest.md`. `bin/loreport-sync` already treats a nonzero
+  `snapshot_publish` as "publish failed" and raises an alert, so the gate reuses a signal
+  path that is known to reach a human. The last good `packet.md` stays on disk meanwhile,
+  so providers keep working from a slightly stale index rather than losing the brain.
+- A pre-existing brain therefore migrates by classification, not by trust: the first
+  publish after upgrading names every unclassified item, and a one-shot
+  `loreport_change_memory_settings` pass (or hand-edit) clears the list.
 
 ## 7. Verification gates (objective, non-gameable)
 

@@ -2,6 +2,7 @@
 name: prefers-plain-language-answers
 description: prefers plain language and simple explanations
 type: feedback
+visibility: shared
 ---
 I asked for plain language over jargon more than once — when an assistant reaches for
 technical terms I don't use myself, I have to stop and ask for a translation.

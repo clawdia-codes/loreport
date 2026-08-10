@@ -361,9 +361,21 @@ def _parse_frontmatter_scalars(text):
 def _visibility_from_text(text):
     """Return "shared" or "local" for an item's raw text.
 
-    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
-    as `local`. A false `local` merely hides an item from cloud providers --
-    visible and recoverable. A false `shared` leaks it -- neither.
+    FAIL CLOSED: an item is `shared` ONLY when its frontmatter carries an
+    explicit `visibility: shared`. Everything else -- an ABSENT `visibility:`
+    key, a malformed value, no frontmatter block at all -- is `local`. A false
+    `local` merely hides an item from cloud providers -- visible and
+    recoverable. A false `shared` leaks it -- neither.
+
+    The absent-key case used to return "shared" (the old `absent = shared`
+    frontmatter default). That was the only fail-OPEN default in the engine:
+    an item nobody had classified was not merely unfiltered, it was positively
+    published. See docs/format-spec.md 1 -- `visibility:` is now REQUIRED on
+    items, and this parser is what makes forgetting it safe instead of costly.
+
+    Skills are NOT items and never carry `visibility:` (format-spec.md 1).
+    They are always shared. That carve-out lives in the RESOLVERS that know a
+    path is a skill, never here -- this function only ever sees text.
     """
     if text.startswith("﻿"):
         text = text[1:]
@@ -378,19 +390,35 @@ def _visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "local"
+
+
+def _visibility_of(typ, content):
+    """Return "local" or "shared" for an item whose TYPE is already known.
+
+    Every read path in this file must go through here rather than calling
+    _visibility_from_text directly, because `visibility:` is required on items
+    but does not exist for skills at all: a skill is a package, not an item
+    (docs/format-spec.md §1). The parser fails closed on an absent key, so a
+    skill run through it bare would come back `local` and vanish from every
+    cloud-trust read — which is why the carve-out lives at the resolvers, the
+    only layer that knows a path is a skill. This is not new policy: the
+    status counter below and hub/brain_merge.py's secret scrub have always
+    treated skills as unconditionally shared/egress-critical."""
+    if typ == "skill":
+        return "shared"
+    return _visibility_from_text(content)
 
 
 def _item_visibility(brain_dir, name):
     """Return "local" or "shared" for the named brain item, read FROM MAIN
-    (absent field defaults to "shared", per docs/visibility-design.md §1), or
-    None if the item doesn't exist on main. Raises GitTimeout."""
-    _relpath, _typ, content = _locate_item_on_main(brain_dir, name)
+    (fail closed: shared ONLY on an explicit `visibility: shared`; skills are
+    always shared — see _visibility_of), or None if the item doesn't exist on
+    main. Raises GitTimeout."""
+    _relpath, typ, content = _locate_item_on_main(brain_dir, name)
     if content is None:
         return None
-    return _visibility_from_text(content)
+    return _visibility_of(typ, content)
 
 
 def _set_visibility_field(text, visibility):
@@ -729,10 +757,10 @@ def tool_loreport_read_memory(brain_dir, name, trust):
     if not name or "/" in name or "\\" in name or ".." in name:
         return {"error": "invalid item name"}
     try:
-        _relpath, _typ, content = _locate_item_on_main(brain_dir, name)
+        _relpath, typ, content = _locate_item_on_main(brain_dir, name)
         if content is None:
             return {"error": "not found"}
-        vis = _visibility_from_text(content)
+        vis = _visibility_of(typ, content)
     except GitTimeout:
         return {"error": "git timeout"}
     if vis == "local" and trust != "local":
@@ -770,9 +798,9 @@ def tool_loreport_search_memories(brain_dir, query, trust):
 
             source = "unknown"
             if name:
-                _relpath, _typ, content = _locate_item_on_main(brain_dir, name)
+                _relpath, typ, content = _locate_item_on_main(brain_dir, name)
                 if content is not None:
-                    vis = _visibility_from_text(content)
+                    vis = _visibility_of(typ, content)
                     if vis == "local" and trust != "local":
                         continue  # unchanged: hidden from cloud-trust search results
                     fm_source = _parse_frontmatter_scalars(content).get("source")
@@ -799,7 +827,7 @@ def tool_loreport_view_memory_settings(brain_dir, trust):
             content = _read_from_main(brain_dir, relpath)
             if content is None:
                 continue  # raced with a concurrent write between ls-tree and show; skip
-            vis = _visibility_from_text(content)
+            vis = _visibility_of(typ, content)
             if vis == "local" and trust != "local":
                 items.append({"name": name, "visibility": "local", "hidden": True})
             else:
@@ -912,13 +940,13 @@ def tool_loreport_status(brain_dir):
             # The shared/local split is a privacy axis over CONTENT (memories,
             # knowledge pages) — it deliberately excludes skills. A skill's
             # frontmatter carries no `visibility:` field at all (it's a
-            # procedure, not personal data), which _visibility_from_text
-            # defaults to "shared"; folding skills into this split would
-            # inflate the shared count by every skill in the brain rather
-            # than reflecting how many actual memories are shareable.
+            # procedure, not personal data), and _visibility_of therefore
+            # reports every skill as "shared"; folding skills into this split
+            # would inflate the shared count by every skill in the brain
+            # rather than reflecting how many actual memories are shareable.
             if typ == "skill":
                 continue
-            if _visibility_from_text(content) == "shared":
+            if _visibility_of(typ, content) == "shared":
                 shared_count += 1
             else:
                 local_count += 1

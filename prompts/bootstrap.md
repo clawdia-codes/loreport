@@ -29,7 +29,7 @@ description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
-visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+visibility: shared | local    # REQUIRED — always state it; omitting it withholds the item AND blocks publish
 lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
 expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
 domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
@@ -52,10 +52,11 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
 <!-- /spec-slice -->
 
 - Pick names that read well in a sentence, since other items will link them as [[names]].
-- The frontmatter above may include `visibility: shared | local` (default `shared` when
-  omitted). Mark `visibility: local` when the capture obviously touches a sensitive/
+- The frontmatter above must state `visibility: shared | local` — always, on every item.
+  Mark `visibility: local` when the capture obviously touches a sensitive/
   always-local topic — health, finances, relationships, credentials/security, employer —
-  so it never leaves this machine.
+  so it never leaves this machine. Omitting the field does not make an item shared: it is
+  withheld from every provider AND blocks the next publish until a human classifies it.
 - Never emit `action="update"` for an item whose current body you have not read this
   session — read it first, then fold in the change. A full replacement rebuilt from only
   the INDEX line will erase the rest of the item. Every existing

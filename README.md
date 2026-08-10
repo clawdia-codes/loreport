@@ -52,9 +52,11 @@ always-loaded. It grows one line per item, not one file per item.
 
 ## Shared vs. local — what leaves your machine
 
-Every item carries a `visibility`: **`shared`** (the default) syncs to every connected
-provider; **`local`** never leaves your machine — excluded from the published packet, and
-refused outright to a cloud provider that asks for it. Onboarding offers five always-local topics
+Every item carries a `visibility`, and it is required: **`shared`** syncs to every
+connected provider; **`local`** never leaves your machine — excluded from the published
+packet, and refused outright to a cloud provider that asks for it. There is no shared-by-
+default: an item that omits the field is treated as `local`, and publishing refuses until
+you say which you meant, so forgetting to classify something can never expose it. Onboarding offers five always-local topics
 by default — **health, finances, relationships, credentials/security, employer** — and you can add your own.
 Those items stay on your disk while remaining fully yours, backed up, and readable by
 your local agents.
