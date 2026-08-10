@@ -109,7 +109,7 @@ def process_candidate(brain_dir, candidate, block_path, trust):
     except ingest.OwnershipError as e:
         ingest.quarantine(brain_dir, provider, block_path, "ownership-denied", str(e))
         return "quarantined: ownership-denied"
-    except Exception as e:  # git failure — commit_block already restored the tree
+    except Exception as e:  # git failure — commit_block restored its own path only
         ingest.quarantine(brain_dir, provider, block_path, "git-error", str(e))
         return f"quarantined: git-error ({e})"
 

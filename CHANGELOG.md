@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **A failed capture destroyed every uncommitted change in the brain, not just its own.**
+  `inbox_ingest.commit_block`'s failure handler ran `git checkout -- .` plus a pathless
+  `git reset` against the single shared working tree. Measured twice on 2026-08-07/08: a
+  session's hand-edit was discarded at 23:06:25.069, 7ms before the quarantine file for an
+  unrelated block was written at 23:06:25.076. The loop was self-reinforcing — a dirty tree
+  is exactly what makes `git checkout provider/<host>` fail, so the handler wiped the tree
+  and destroyed the very edit that had caused the failure.
+  The cleanup is not removed; its purpose (REVIEW.md #13 — a half-staged capture must not
+  poison the next capture or the nightly merge) is real. It is now scoped to `block["file"]`
+  alone, via `_restore_capture_path`, and it only runs if the capture actually mutated
+  something: on the checkout-refused path the correct amount of repair is **none**, because
+  scoping alone would still have restored the dirty path and destroyed the same hand-edit.
+  Two leftovers the old handler never cleaned are also fixed — a failed *create* left the
+  new file untracked on disk (which `finally`'s `git checkout main` then carried onto main),
+  and a failed *delete* left an unstaged deletion that halts the next nightly merge.
+  If the scoped restore cannot complete, `CleanupError` names the path and the original
+  failure and the capture fails loudly; there is deliberately no fallback to wiping the tree.
+  Note the narrow case that decides where the "did this capture mutate anything" flag is set:
+  a delete aimed at a path that exists on disk but is *untracked* (a session's hand-created
+  file) makes `git rm` fail at pathspec-match having changed nothing, and the old handler left
+  untracked files alone — so the flag is set **after** the `rm`, and **before** the `open()`
+  on the create/update branch, which truncates on entry.
+  Covered by `tests/test_ingest_cleanup.py` (13 tests, run against a real two-branch git repo
+  with real failures — a `pre-commit` hook exiting 1, a genuinely dirty tree blocking the
+  branch switch, and an untracked delete target).
+
 ## [1.13.2] — 2026-08-07
 
 ### Fixed

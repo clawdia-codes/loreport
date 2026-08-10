@@ -458,6 +458,59 @@ def quarantine(brain_dir, provider, block_file, reason, detail):
     print(f"Quarantine file: {dest}")
 
 
+class CleanupError(RuntimeError):
+    """Raised when the scoped post-failure cleanup cannot put the capture's own
+    path back the way it found it. Never swallowed and never widened into a
+    tree-wide wipe: an operator resolving one half-staged path by hand is
+    strictly better than silently discarding every other uncommitted change in
+    the shared working tree."""
+
+
+def _path_in_head(brain_dir, rel_path):
+    """True if `rel_path` is committed on the currently checked-out branch."""
+    return git(brain_dir, "cat-file", "-e", f"HEAD:{rel_path}", check=False).returncode == 0
+
+
+def _restore_capture_path(brain_dir, rel_path, in_head):
+    """Undo THIS capture's index/worktree change to `rel_path` — and nothing
+    else (REVIEW.md #13, live data loss measured 2026-08-07/08).
+
+    The predecessor of this function was `git checkout -- .` + a pathless
+    `git reset`, which discarded every uncommitted change in the shared
+    working tree, not just the paths this capture wrote. Because a dirty tree
+    is exactly what makes `git checkout provider/<host>` fail, that handler
+    destroyed the very hand-edit that caused the failure.
+
+    `in_head` must be sampled BEFORE the capture mutates anything — after a
+    `git rm` the path is still in HEAD, but after a failed create it never
+    was, and the two need opposite repairs (restore vs. delete the untracked
+    leftover, which the old handler left behind for `finally`'s
+    `git checkout main` to carry onto main).
+
+    Raises CleanupError if the path is not clean afterwards. The postcondition
+    is asserted against `git status`, not inferred from the individual return
+    codes, so a git that "succeeds" without restoring is still caught.
+    """
+    abs_path = os.path.join(brain_dir, rel_path)
+    git(brain_dir, "reset", "-q", "HEAD", "--", rel_path, check=False)
+    if in_head:
+        git(brain_dir, "checkout", "HEAD", "--", rel_path, check=False)
+    elif os.path.exists(abs_path):
+        try:
+            os.remove(abs_path)
+        except OSError:
+            pass  # reported by the postcondition check below
+
+    status = git(brain_dir, "status", "--porcelain", "--", rel_path, check=False)
+    leftover = (not in_head) and os.path.exists(abs_path)
+    if status.returncode != 0 or status.stdout.strip() or leftover:
+        raise CleanupError(
+            f"scoped cleanup did not restore {rel_path}: "
+            f"git status --porcelain -> {status.stdout.strip()!r} "
+            f"(rc={status.returncode}, exists_on_disk={os.path.exists(abs_path)})"
+        )
+
+
 def commit_block(brain_dir, provider, block, trust):
     """Commit `block` to provider/<provider>. Returns "committed" or
     "skipped: no change" (identical content re-captured — not a failure).
@@ -468,12 +521,17 @@ def commit_block(brain_dir, provider, block, trust):
     interleave with brain_merge.py's git mutations — the ownership check
     itself also runs inside this lock, so it can't race a concurrent merge
     that changes what's on `main` between the check and the write. On ANY
-    git failure (including a timeout raised by git()) the working tree is
-    restored to clean (`git checkout -- .` + `git reset`) before the
-    exception propagates, so a failed capture never poisons the next capture
-    or the nightly merge with a half-staged change (REVIEW.md #13). Either
-    way, the branch is restored to `main` on exit so the shared working tree
-    is never left parked on a provider branch (REVIEW.md #3 partial)."""
+    git failure (including a timeout raised by git()) the ONE path this
+    capture wrote is restored to its committed state before the exception
+    propagates, so a failed capture never poisons the next capture or the
+    nightly merge with a half-staged change (REVIEW.md #13) — and no other
+    uncommitted change in the shared working tree is touched. If the capture
+    failed before mutating anything (e.g. `git checkout provider/<host>`
+    refused because the tree was dirty) nothing is restored at all: repairing
+    a path this capture never wrote would destroy the hand-edit that caused
+    the failure. Either way, the branch is restored to `main` on exit so the
+    shared working tree is never left parked on a provider branch
+    (REVIEW.md #3 partial)."""
     with brain_lock(brain_dir):
         rel_path = block["file"]
         denial = check_ownership(brain_dir, provider, trust, rel_path)
@@ -481,9 +539,15 @@ def commit_block(brain_dir, provider, block, trust):
             raise OwnershipError(denial)
 
         branch = f"provider/{provider}"
+        # Set the instant before the first mutation, and only then: the
+        # cleanup below must be a no-op for a capture that never wrote
+        # anything, otherwise it repairs a path it did not dirty.
+        touched = False
+        in_head = False
         try:
             git(brain_dir, "checkout", branch)
             abs_path = os.path.join(brain_dir, rel_path)
+            in_head = _path_in_head(brain_dir, rel_path)
 
             if block["action"] == "delete":
                 name = os.path.splitext(os.path.basename(rel_path))[0]
@@ -491,9 +555,17 @@ def commit_block(brain_dir, provider, block, trust):
                     raise RuntimeError(
                         f"delete target does not exist under brain_dir: {rel_path}"
                     )
+                # AFTER the rm, not before: `git rm` fails at pathspec-match
+                # (mutating nothing) when the target exists on disk but is
+                # untracked — a session's hand-created file. Flagging it as
+                # touched would send the cleanup down the not-in-HEAD branch
+                # and delete that file, which the old handler never did.
                 git(brain_dir, "rm", "-f", rel_path)
+                touched = True
             else:
                 os.makedirs(os.path.dirname(abs_path) or brain_dir, exist_ok=True)
+                # BEFORE the open, which truncates on entry.
+                touched = True
                 with open(abs_path, "w", encoding="utf-8") as fh:
                     fh.write(block["body"])
                 git(brain_dir, "add", rel_path)
@@ -514,12 +586,21 @@ def commit_block(brain_dir, provider, block, trust):
             )
             git(brain_dir, "commit", "-m", msg)
             return "committed"
-        except Exception:
-            # Leave the tree clean rather than poisoning the next
+        except Exception as exc:
+            # Leave OUR path clean rather than poisoning the next
             # capture/merge with a half-staged change, then let the caller
-            # map this to a real quarantine (not a silent loss).
-            git(brain_dir, "checkout", "--", ".", check=False)
-            git(brain_dir, "reset", check=False)
+            # map this to a real quarantine (not a silent loss). Everything
+            # else in the shared working tree is none of our business.
+            if touched:
+                try:
+                    _restore_capture_path(brain_dir, rel_path, in_head)
+                except Exception as cleanup_exc:
+                    raise CleanupError(
+                        f"capture of {rel_path} failed ({exc}) AND the scoped "
+                        f"cleanup failed ({cleanup_exc}); that path may still "
+                        f"hold a half-staged change. Refusing to fall back to "
+                        f"wiping the working tree — resolve {rel_path} by hand."
+                    ) from exc
             raise
         finally:
             # Never leave the shared working tree parked on a provider
