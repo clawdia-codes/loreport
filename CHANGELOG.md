@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.14.0] — 2026-08-10
+
+### Added
+- **A leak check you can point at a brain — `scripts/loreport-audit --config <brain>/loreport.conf`.**
+  On 2026-08-07 three batches of memories reached cloud-published surfaces and there was no
+  runnable check that could have said so. Two separate reasons: `brain-template/doctor.sh`
+  does `cd "$(dirname "$0")"`, so the brain it audits is always its own directory — it
+  cannot be aimed, and the live brain no longer has a copy of it at all; and
+  `scripts/loreport-health`, which *can* be aimed, carries no leak assertion whatsoever.
+  The new script takes the same `--config` as `bin/loreport-sync` and `loreport-health`, is
+  read-only, and asserts: every item carries an explicit `visibility:` and `domain:` (absent
+  `visibility` means *shared*, so an unclassified item is cloud-published by omission); no
+  `local` item appears in `hub/published/packet.md`, `hub/surface-chatgpt.md` or
+  `hub/surface-claude-ai.md`; and the counts reconcile — on disk vs classified vs catalogued
+  vs published, including that every shared item catalogued on `main` reaches the packet.
+  Logic lives in `hub/brain_audit.py`; the script is the config plumbing. Item frontmatter
+  and the INDEX are read from `main` (like `snapshot_publish.py`, because that is what the
+  publisher used); the surfaces are read from disk, because two of the three are gitignored
+  and exist nowhere else.
+- **Blind spots are failures, not passes.** A safety assertion that iterates a collection is
+  vacuously true when the collection is empty, and this repo shipped exactly that bug once
+  (the published-packet privacy check passed on an EMPTY packet). So zero items, a missing
+  surface, an unreadable surface, an empty surface and an empty INDEX each produce a
+  `BLIND` finding and a nonzero exit — and the guards are **unconditional**. A guard gated
+  on "…and shared items exist" is itself a path back to reporting green having examined
+  nothing, which is why the test for it uses a brain whose items are *all* local.
+- **The checker uses the fail-closed visibility rule, and `scripts/check-docs.sh` now pins
+  it there.** The repo holds two rules: fail-closed parsing (5 copies) and a whole-line
+  `^visibility:\s*local\s*$` match (`hub/project.py`, `make-surface.sh`, `doctor.sh`). They
+  disagree on `visibility: "local"`, `visibility: local  # note` and a file with no
+  frontmatter — the projector keeps such an item in the paste-into-cloud surfaces while
+  `snapshot_publish` drops it from the packet, and `doctor.sh`, sharing the *producer's*
+  rule, reports green on a real leak. The audit reports it as a leak *and* reports the
+  non-canonical spelling before it becomes one; the check-docs parser-agreement gate now
+  covers `brain_audit.effective_visibility` so it cannot drift.
+
+### Fixed
+- `scripts/loreport-audit` deliberately does **not** copy two idioms from its siblings.
+  `--config` with no value: `shift 2 || true` shifts nothing when one argument remains and
+  swallows the failure, so `$1` stays `--config` and the loop spins forever — verified,
+  `timeout 5 bash scripts/loreport-health --config` exits 124, and under a timer a hung unit
+  is worse than a failed one. And `${LOREPORT_BRAIN:?…}` aborts a *script* with exit 1 on
+  this bash, which is the new script's "found problems" code — a wiring error must not be
+  able to impersonate a finding, so the required keys are tested explicitly and exit 2.
+  Both are pinned by tests. The same two issues remain in `scripts/loreport-health` and
+  `bin/loreport-sync`; fixing them there touches units and exit-code contracts, so it is
+  left as its own change.
+
 ## [1.13.2] — 2026-08-07
 
 ### Fixed

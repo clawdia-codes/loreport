@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# loreport-audit — point this at a brain and it tells you whether anything
+# unclassified is being published.
+#
+#   loreport-audit --config /path/to/loreport.conf
+#
+# The gap it fills: brain-template/doctor.sh does `cd "$(dirname "$0")"`, so it
+# audits its own directory and nothing else — it cannot be aimed at a brain, and
+# the live brain no longer even has a copy. scripts/loreport-health CAN be aimed
+# anywhere but carries no leak assertion. This script is the aimable leak check:
+# it takes the same --config as bin/loreport-sync and scripts/loreport-health,
+# reads LOREPORT_BRAIN/LOREPORT_ENGINE out of it, and runs the audit in
+# <engine>/hub/brain_audit.py against that brain.
+#
+# Read-only. It never writes into the brain, and — unlike loreport-health — it
+# never writes LOREPORT_BANNER either: loreport-health does `rm -f "$BANNER"` on
+# its own success, so anything this script left there would be erased by the next
+# healthy run. Findings go to stdout and the exit code.
+#
+# Exit codes:
+#   0  audited something, found nothing
+#   1  findings (leak, blind spot, risk, or metadata gap)
+#   2  cannot audit: bad arguments, missing/unreadable config, missing dirs, or
+#      `main` unresolvable. Never conflated with 0.
+set -uo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: loreport-audit [--config PATH] [--quiet]
+
+  --config PATH   instance config (default: ./loreport.conf)
+  --quiet         print only findings and the verdict
+  -h, --help      this message
+
+Required config keys: LOREPORT_BRAIN, LOREPORT_ENGINE
+USAGE
+}
+
+CONFIG="./loreport.conf"
+QUIET=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    # NOT `shift 2 || true`, the form used in loreport-health and loreport-sync:
+    # with one argument left, `shift 2` shifts NOTHING and `|| true` swallows the
+    # failure, so $1 stays "--config" and the loop spins forever. Verified: a bare
+    # trailing `--config` hangs both of those scripts. Under a timer that is a hung
+    # unit, which is worse than a failed one.
+    --config)
+      [ $# -ge 2 ] || { echo "loreport-audit: --config needs a value" >&2; exit 2; }
+      CONFIG="$2"; shift 2 ;;
+    --config=*) CONFIG="${1#*=}"; shift ;;
+    --quiet) QUIET="--quiet"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "loreport-audit: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# A missing config is fatal, not a fallback — same rule as loreport-health. The
+# one thing a leak check must never do is run against a guessed brain and report
+# it clean.
+if [ ! -r "$CONFIG" ]; then
+  echo "loreport-audit: config not found or unreadable: $CONFIG" >&2
+  echo "loreport-audit: pass --config PATH, or run from a brain containing loreport.conf" >&2
+  exit 2
+fi
+
+# shellcheck source=/dev/null
+. "$CONFIG"
+
+# Deliberately NOT `${LOREPORT_BRAIN:?...}`, the form used by loreport-health and
+# loreport-sync. Measured on this bash: `${X:?}` inside a *script* aborts with exit
+# 1, not 127 — so a config missing LOREPORT_BRAIN would exit 1, which is this
+# script's "found problems" code. A configuration error that is indistinguishable
+# from a leak finding is the same disease as a leak check that cannot be aimed:
+# the number tells you nothing. Explicit tests, explicit 2.
+#
+# The emptiness test matters as much as the unset one: with BRAIN="" every path
+# below resolves under "/", nothing exists, and the audit would report blind spots
+# — a plausible-looking failure caused purely by bad wiring.
+BRAIN="${LOREPORT_BRAIN:-}"
+FRAMEWORK="${LOREPORT_ENGINE:-}"
+[ -n "$BRAIN" ] || { echo "loreport-audit: LOREPORT_BRAIN not set in $CONFIG" >&2; exit 2; }
+[ -n "$FRAMEWORK" ] || { echo "loreport-audit: LOREPORT_ENGINE not set in $CONFIG" >&2; exit 2; }
+
+for d in "$BRAIN" "$FRAMEWORK"; do
+  [ -d "$d" ] || { echo "loreport-audit: not a directory: $d (check $CONFIG)" >&2; exit 2; }
+done
+
+AUDIT="$FRAMEWORK/hub/brain_audit.py"
+if [ ! -f "$AUDIT" ]; then
+  echo "loreport-audit: engine has no hub/brain_audit.py at $AUDIT (check LOREPORT_ENGINE in $CONFIG)" >&2
+  exit 2
+fi
+
+python3 "$AUDIT" --brain-dir "$BRAIN" $QUIET
+exit $?

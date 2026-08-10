@@ -166,6 +166,7 @@ def load(name, path):
     s.loader.exec_module(m); return m
 canon = load("bm", "hub/brain_merge.py")
 rep   = load("rb", "hub/report_build.py")
+aud   = load("ba", "hub/brain_audit.py")
 CASES = ['visibility: local', 'visibility: "local"', "visibility: 'local'", 'visibility: Local',
          'visibility: LOCAL', 'Visibility: local', 'visibility: local  # note', 'visibility: shared',
          'visibility: nonsense', 'type: project']
@@ -177,14 +178,25 @@ for line in CASES:
     b_norm = "local" if b == "private" else b
     if a != b_norm:
         bad.append(f"  {line!r}: brain_merge={a} report_build={b}")
+    # hub/brain_audit.py is the CHECKER. A checker that classifies differently
+    # from the publisher is worse than none — it certifies the wrong thing. It
+    # must stay on the fail-closed rule and never drift to the whole-line
+    # `^visibility:\s*local\s*$` match used by project.py / make-surface.sh /
+    # doctor.sh: under that rule `visibility: "local"` reads as SHARED, and the
+    # audit would report green on a real leak.
+    c = aud.effective_visibility(text)
+    if a != c:
+        bad.append(f"  {line!r}: brain_merge={a} brain_audit={c}")
 for text, label in (('no frontmatter at all', 'bare'), ('---\nname: x\n', 'unterminated')):
     a = canon._visibility_from_text(text); b = rep.visibility_from_text(text)
     b_norm = "local" if b == "private" else b
     if a != b_norm: bad.append(f"  {label}: brain_merge={a} report_build={b}")
+    c = aud.effective_visibility(text)
+    if a != c: bad.append(f"  {label}: brain_merge={a} brain_audit={c}")
 if bad:
-    print("FAIL: report_build.py visibility parser disagrees with hub/brain_merge.py:")
+    print("FAIL: a visibility parser disagrees with hub/brain_merge.py:")
     print("\n".join(bad)); sys.exit(1)
-print("visibility parsers agree across 12 cases")
+print("visibility parsers agree across 12 cases (report_build + brain_audit)")
 PYEQ
 
 # --- 5. version-bump discipline -------------------------------------------------

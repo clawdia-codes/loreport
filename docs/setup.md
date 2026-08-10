@@ -246,8 +246,41 @@ to a real file *and* every file has a line, that frontmatter is valid, that `sur
 is gitignored, and — the important one — that **no `local` item appears in `surface.md` or
 the published packet**. It also greps anything shareable for obvious secrets.
 
-With `--providers` it calls the MCP server once per configured credential and asserts the
-wall from the outside: every cloud credential must be able to read a `shared` item and must
+### The same wall, checked from outside the brain
+
+`doctor.sh` does `cd "$(dirname "$0")"`, so the brain it audits is always the folder it is
+sitting in. That makes it useless the moment you want to check a brain from somewhere else
+— a cron job, another machine, a second brain — and a brain created before the engine/brain
+split may not have a copy at all. For that, the engine ships an aimable check:
+
+```
+scripts/loreport-audit --config /path/to/my-brain/loreport.conf
+scripts/loreport-audit --config /path/to/my-brain/loreport.conf --quiet
+```
+
+Same `--config` as `bin/loreport-sync` and `scripts/loreport-health`. It is read-only, and
+it asserts the three things that were unenforceable on 2026-08-07, when three batches of
+memories reached cloud-published surfaces with nothing able to say so:
+
+- every item carries an **explicit** `visibility:` and `domain:` — an absent `visibility:`
+  means *shared*, so an unclassified item is cloud-published by omission;
+- no `local` item appears in `hub/published/packet.md`, `hub/surface-chatgpt.md` or
+  `hub/surface-claude-ai.md` — using the *fail-closed* rule, so an item spelled
+  `visibility: "local"` (which `make-surface.sh` and `doctor.sh` do **not** treat as local)
+  is reported as the leak it is;
+- the counts reconcile: items on disk vs classified vs catalogued vs published, and every
+  shared item catalogued on `main` actually reaches the packet.
+
+Its blind spots are reported as failures, not passes: an empty packet, a missing surface, or
+a brain with no items exits nonzero, because a leak check that examined nothing must never
+print a clean bill of health. Exit codes: `0` clean, `1` findings, `2` could not run (bad
+config, no `main`) — never conflated.
+
+It does **not** replace `doctor.sh`: layout, git/backup privacy, wikilink integrity, secret
+grepping and the live provider probes are still only there.
+
+With `--providers` doctor.sh calls the MCP server once per configured credential and asserts
+the wall from the outside: every cloud credential must be able to read a `shared` item and must
 be **refused** a `local` one. That is the guarantee stated as a test rather than a promise.
 
 Four things no script can check — do them once per assistant:
