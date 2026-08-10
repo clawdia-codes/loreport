@@ -2,6 +2,18 @@
 
 ## [1.14.0] — 2026-08-10
 
+### Fixed — the audit checker agreed with the old default (merge-introduced)
+
+- **`hub/brain_audit.effective_visibility` returned `shared` for an absent `visibility:`**
+  while every publisher and `docs/format-spec.md` §1 had moved to `local`. Its own docstring
+  claimed FAIL CLOSED and did the opposite. This existed on **no individual branch** — green
+  on `main` and on each of the four source branches, red only once the parser flip and the new
+  checker landed together, which is why it took an independent measurement pass to find.
+  Effect was fail-**open** on the exact assertion the checker exists to enforce: an unmarked
+  item that had reached a cloud surface would not be flagged, while a correctly withheld one
+  raised a false "shared item missing from the packet" finding. `scripts/check-docs.sh` §2 now
+  pins the two parsers against each other.
+
 ### Changed — `visibility:` is now REQUIRED, and absent means `local`
 
 - **The last fail-open default in a fail-closed engine is closed.** `docs/format-spec.md`
@@ -536,8 +548,6 @@
 Curated by hand, one entry per sprint — deliberately not generated from git log,
 because a list of commit subjects tells you what was touched, not what changed.
 Newest first. Versions follow [semver](https://semver.org).
-
-## [Unreleased]
 
 ## [1.5.1] — 2026-08-04
 
