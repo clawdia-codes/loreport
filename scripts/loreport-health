@@ -518,6 +518,62 @@ if [ -f "$chatgpt_surface" ] && [ -n "$pasted_hash" ]; then
   fi
 fi
 
+# --- 8. Leak assertion (the audit gets a consumer) ----------------------------
+# WHY HERE AND NOT ON ITS OWN TIMER. scripts/loreport-audit is the only thing in
+# the engine that asserts "nothing unclassified is being published" — the exact
+# property whose absence let three batches of memories reach cloud surfaces on
+# 2026-08-07. When written it was referenced by no unit, no timer, and neither
+# this script nor bin/loreport-sync: it ran only when a human typed it, the same
+# producer-with-no-consumer shape that caused the leaks it exists to catch. A
+# second timer is a second thing to forget; this script already runs on one and
+# already alerts, so the assertion belongs inside it.
+#
+# SEVERITY IS MAPPED, NOT FLATTENED. The first version of this section routed
+# every audit finding to note_failure, which turned a memory missing a `domain:`
+# field into a permanently red brain — i.e. it rebuilt the single-FAIL-state
+# defect that section 6c exists to remove, inside the commit that consumes 6c.
+#   LEAK  -> failure. Something local is exposed. Nothing else qualifies.
+#   BLIND -> failure. The check could not see a surface, so "clean" is vacuous —
+#            the packet-privacy check that passed on an EMPTY packet is this
+#            project's own precedent for why silence here is not safety.
+#   RISK / META -> review. The pipeline is healthy; a human owes it a decision.
+#
+# THE EXIT CODES ARE NOT INTERCHANGEABLE, and 2 is the important one:
+# 0 = audited something, found nothing. 1 = findings. 2 = COULD NOT AUDIT (bad
+# config, missing dirs, `main` unresolvable). Treating 2 as clean would be the
+# vacuous-truth bug one layer up, silently.
+audit_bin="$FRAMEWORK/scripts/loreport-audit"
+if [ ! -x "$audit_bin" ]; then
+  note_failure \
+    "leak audit: $audit_bin missing or not executable — the publish-leak assertion is not running" \
+    "check LOREPORT_ENGINE in $CONFIG"
+else
+  audit_out=$("$audit_bin" --quiet --config "$CONFIG" 2>&1)
+  audit_rc=$?
+  if [ "$audit_rc" -ge 2 ]; then
+    note_failure \
+      "leak audit: COULD NOT RUN (exit $audit_rc) — nothing is asserting that unclassified items stay unpublished" \
+      "run: $audit_bin --config $CONFIG   # then fix the config/dirs it names"
+  elif [ "$audit_rc" -eq 1 ]; then
+    hard=$(printf '%s\n' "$audit_out" | grep -cE '\[(LEAK|BLIND)\]' || true)
+    soft=$(printf '%s\n' "$audit_out" | grep -cE '\[(RISK|META)\]' || true)
+    if [ "${hard:-0}" -gt 0 ]; then
+      first=$(printf '%s\n' "$audit_out" | grep -E '\[(LEAK|BLIND)\]' | head -2 \
+              | sed 's/^[[:space:]]*✗ //' | tr '\n' ' ')
+      note_failure \
+        "leak audit: $hard exposure/blind-spot finding(s) — $first" \
+        "run: $audit_bin --config $CONFIG"
+    fi
+    if [ "${soft:-0}" -gt 0 ]; then
+      firsts=$(printf '%s\n' "$audit_out" | grep -E '\[(RISK|META)\]' | head -2 \
+               | sed 's/^[[:space:]]*✗ //' | tr '\n' ' ')
+      note_review \
+        "leak audit: $soft item(s) need a metadata decision — $firsts" \
+        "run: $audit_bin --config $CONFIG"
+    fi
+  fi
+fi
+
 # --- outcome -----------------------------------------------------------------
 # One of exactly three states. `review` is a healthy state: it exits 0, it keeps
 # the weekly heartbeat alive, and its notice never contains the word FAIL.

@@ -57,9 +57,24 @@ class HealthHarness:
         subprocess.run(["git", "init", "-q", "-b", "main", self.brain], check=True)
         self._git("config", "user.email", "test@example.invalid")
         self._git("config", "user.name", "test")
+        # A REAL item behind the INDEX line, explicitly classified. Section 8
+        # runs the leak audit, and the audit treats "I could not see a surface"
+        # as BLIND — a failure, deliberately, because a privacy check that
+        # certifies clean having examined nothing already shipped here once. A
+        # fixture that called itself a clean brain while carrying an INDEX line
+        # pointing at no item and no published surfaces was not clean; it was
+        # unauditable, and the audit was right to say so.
+        self.write("memories/seed.md",
+                   "---\nname: seed\nvisibility: shared\ndomain: personal\n---\nseed body\n")
         self.write("INDEX.md", "# Index\n\n- [[seed]] — seed\n")
         self._git("add", "-A")
         self._git("commit", "-qm", "seed")
+
+        # The three published surfaces, catalogueing exactly the shared item —
+        # what a correct publish run would have produced.
+        for rel in ("hub/published/packet.md", "hub/surface-chatgpt.md",
+                    "hub/surface-claude-ai.md"):
+            self.write(rel, "# Index\n\n- [[seed]] — seed\n")
 
         # A manifest with no targets keeps checks 3-4 green without pretending
         # a projection ran.
@@ -337,7 +352,12 @@ class PendingItemsStayVisible(HealthHarness, unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        surface = "<!-- loreport:begin -->\ncurrent content\n<!-- loreport:end -->\n"
+        # Keeps the catalogue line so the surface stays AUDITABLE (section 8
+        # treats a surface it cannot read as BLIND, which is a failure), while
+        # still differing from the recorded pasted hash, which is what this
+        # test is actually about.
+        surface = ("<!-- loreport:begin -->\n- [[seed]] — seed\n"
+                   "current content\n<!-- loreport:end -->\n")
         self.write("hub/surface-chatgpt.md", surface)
         self.write("hub/health-state.json", json.dumps(
             {"chatgpt_pasted": {"region_hash": "sha256:deliberately-not-the-current-hash",
