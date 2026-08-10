@@ -224,6 +224,41 @@ def effective_visibility(text):
     return "shared" if seen == "shared" else "local"
 
 
+def _has_explicit_visibility(text):
+    """True when the frontmatter carries a `visibility:` key at all, parseable or
+    not. Byte-identical in intent to hub/brain_merge.py's copy; check-docs §2c
+    pins them together."""
+    ok, fields, _ = parse_frontmatter(text)
+    return bool(ok) and "visibility" in fields
+
+
+def resolved_visibility(relpath, text):
+    """Visibility for an item WHOSE PATH IS KNOWN — the checker's mirror of
+    snapshot_publish._item_visibility, and it must stay a mirror.
+
+    SKILLS ARE THE EXCEPTION. A skill is a package, not an item, and carries no
+    `visibility:` field at all (docs/format-spec.md §1). While an absent key
+    meant `shared`, that fell out for free. Once the default flipped to `local`
+    it had to be stated at every RESOLVER — and this checker was missed, which
+    made all three skills read `local` and turned every legitimate appearance of
+    a skill in a published surface into a reported LEAK. Nine false leaks on the
+    live brain, against a checker that had scored 0 the day before.
+
+    scripts/check-docs.sh §2 did not catch it because it compares the PARSERS,
+    and the carve-out has never lived in a parser — `_visibility_from_text` only
+    ever sees text and cannot know a path is a skill. The 1.14.0 changelog
+    entry warned about this exact gap in writing ("that diff compared parsers,
+    not the resolver paths through them") and it was walked into anyway.
+
+    DEFEASIBLE, exactly as in the publisher: the carve-out supplies a default
+    for a key skills do not carry; it never OVERRIDES an explicit one. An
+    unconditional version would make `visibility: local` on a SKILL.md a control
+    that reports success and changes nothing."""
+    if relpath and relpath.startswith("skills/") and not _has_explicit_visibility(text):
+        return "shared"
+    return effective_visibility(text)
+
+
 def visibility_problem(text):
     """Return None, or a human-readable reason this item's `visibility:` cannot
     be trusted: absent (silently cloud-published), unparseable, or spelled in a
@@ -338,7 +373,7 @@ def audit(brain_dir):
                 f"add `domain: {'|'.join(VALID_DOMAINS)}` to the frontmatter")
         else:
             dom_ok += 1
-        if effective_visibility(text) == "shared":
+        if resolved_visibility(relpath, text) == "shared":
             shared += 1
         else:
             local += 1
@@ -389,7 +424,7 @@ def audit(brain_dir):
             item_rel, item_text = resolve_item(brain_dir, name, cache)
             if item_rel is None:
                 continue
-            if effective_visibility(item_text) == "local":
+            if resolved_visibility(item_rel, item_text) == "local":
                 add("LEAK", f"LEAK: local item [[{name}]] ({item_rel}) appears in {rel}",
                     "remove it from that surface and rebuild; treat the exposure as real")
 
@@ -432,7 +467,7 @@ def audit(brain_dir):
             item_rel, item_text = resolve_item(brain_dir, name, cache)
             if item_rel is None:
                 continue
-            if effective_visibility(item_text) != "shared":
+            if resolved_visibility(item_rel, item_text) != "shared":
                 continue
             reach_checked += 1
             if name not in packet_names:

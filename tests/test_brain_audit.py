@@ -570,3 +570,83 @@ class AnUnreadablePacketIsBlindNotATraceback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class SkillsAreNotFalseLeaks(unittest.TestCase):
+    """A skill carries no `visibility:` field at all (docs/format-spec.md §1), so
+    once an absent key started meaning `local`, every skill in every published
+    surface read as a LEAK.
+
+    Measured, not hypothesised: this shipped on the integration branch and the
+    audit went from 0 leaks to **9** against the live brain overnight, on skills
+    that were correctly published. `scripts/check-docs.sh` §2 stayed green
+    throughout, because it compares the visibility PARSERS and the carve-out has
+    never lived in a parser — `_visibility_from_text` only ever sees text and
+    cannot know a path is a skill. The 1.14.0 changelog entry warned about that
+    exact gap in writing, and it was walked into anyway.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="my-brain-skills-")
+        subprocess.run(["git", "init", "-q", "-b", "main", self.dir], check=True)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "test")):
+            subprocess.run(["git", "-C", self.dir, "config", k, v], check=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_skill_with_no_visibility_key_is_shared_not_local(self):
+        # Reddened by deleting the `relpath.startswith("skills/")` branch in
+        # brain_audit.resolved_visibility.
+        text = "---\nname: demo\ntype: skill\n---\nbody\n"
+        self.assertEqual(
+            brain_audit.resolved_visibility("skills/demo/SKILL.md", text), "shared"
+        )
+
+    def test_the_carve_out_does_not_override_an_explicit_marking(self):
+        # The carve-out supplies a DEFAULT for a key skills do not carry; it must
+        # never beat a human who wrote one. Unconditional, it would make
+        # `visibility: local` on a SKILL.md a control that reports success and
+        # changes nothing.
+        # Reddened by dropping the `and not _has_explicit_visibility(text)` guard.
+        text = "---\nname: demo\ntype: skill\nvisibility: local\n---\nbody\n"
+        self.assertEqual(
+            brain_audit.resolved_visibility("skills/demo/SKILL.md", text), "local"
+        )
+
+    def test_a_memory_with_no_visibility_key_is_still_local(self):
+        # The carve-out must not leak back into items: fail-closed stands.
+        # Reddened by widening the prefix test to accept any relpath.
+        text = "---\nname: demo\ntype: project\n---\nbody\n"
+        self.assertEqual(
+            brain_audit.resolved_visibility("memories/demo.md", text), "local"
+        )
+
+    def test_a_published_skill_is_not_reported_as_a_leak_end_to_end(self):
+        """The regression as it actually happened: a skill on main, catalogued in
+        a published surface, must produce NO leak finding."""
+        os.makedirs(os.path.join(self.dir, "memories"))
+        os.makedirs(os.path.join(self.dir, "skills", "demo"))
+        with open(os.path.join(self.dir, "memories", "m1.md"), "w") as fh:
+            fh.write("---\nname: m1\nvisibility: shared\ndomain: personal\n---\nbody\n")
+        with open(os.path.join(self.dir, "skills", "demo", "SKILL.md"), "w") as fh:
+            fh.write("---\nname: demo\ntype: skill\n---\nbody\n")
+        index = "# INDEX\n\n## Memories\n\n- [[m1]] — hook\n\n## Skills\n\n- [[demo]] — hook\n"
+        with open(os.path.join(self.dir, "INDEX.md"), "w") as fh:
+            fh.write(index)
+        subprocess.run(["git", "-C", self.dir, "add", "-A"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", self.dir, "commit", "-qm", "seed"], check=True,
+                       capture_output=True)
+        for rel in brain_audit.PUBLISHED_SURFACES:
+            path = os.path.join(self.dir, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(index)
+
+        findings, _counts = brain_audit.audit(self.dir)
+        leaks = [f for f in findings if f.severity == "LEAK"]
+        self.assertEqual(
+            [f.message for f in leaks], [],
+            "a correctly published skill was reported as a leak",
+        )
