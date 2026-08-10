@@ -277,5 +277,63 @@ class LoudCleanupFailureTests(_BrainRepo):
         self.assertIn("commit", str(ctx.exception.__cause__))
 
 
+class TouchedIsSetBeforeTheOpenTests(_BrainRepo):
+    """`touched = True` sits BEFORE the `with open(abs_path, "w")` — and it has
+    to, because `open(..., "w")` truncates on entry. Every other line of the
+    update branch is guarded by a test; this placement was named as load-bearing
+    in the commit message, the inline comment and the CHANGELOG, and nothing
+    pinned it. The `git rm` half of the same decision IS pinned
+    (`test_the_untracked_file_is_not_deleted`); this half was not.
+
+    Failure mode if `touched` moves after the block: the file is already
+    truncated when the write raises, the handler runs no cleanup at all, and a
+    committed memory is left at 0 bytes as an unstaged modification — which
+    poisons the next capture and halts the nightly merge, and loses the
+    committed content on top.
+
+    The trigger used here is a non-`str` body, so `open()` succeeds and
+    `fh.write()` raises. It stands in for EIO/ENOSPC, which cannot be provoked
+    portably in a test.
+    """
+
+    def _block_with_unwritable_body(self):
+        block = _block("target", body="captured body")
+        block["body"] = 1234          # open() succeeds, fh.write() raises TypeError
+        return block
+
+    def test_a_write_that_fails_after_open_does_not_leave_a_truncated_file(self):
+        """MUTATION: in `inbox_ingest.commit_block`, move `touched = True` from
+        before the `with open(abs_path, "w", ...)` block to after it.
+        Observed: 2 failed, 14 passed — this test and
+        `test_a_write_that_fails_after_open_leaves_the_tree_clean`. (The third
+        test in this class stays green under the mutation by construction: with
+        `touched` false no cleanup runs at all, so an unrelated dirty file is
+        trivially untouched. It guards the opposite over-correction.)
+        """
+        before = self.read("memories/target.md")
+        with self.assertRaises(TypeError):
+            self.capture(self._block_with_unwritable_body())
+        self.assertNotEqual(os.path.getsize(
+            os.path.join(self.brain, "memories/target.md")), 0)
+        self.assertEqual(self.read("memories/target.md"), before)
+
+    def test_a_write_that_fails_after_open_leaves_the_tree_clean(self):
+        """Same mutation. The 0-byte file is left as an unstaged modification,
+        which is exactly the dirty-tree condition the next capture refuses on
+        and the nightly merge halts on."""
+        with self.assertRaises(TypeError):
+            self.capture(self._block_with_unwritable_body())
+        self.assertEqual(self.status("memories/target.md"), "")
+
+    def test_an_unrelated_dirty_file_still_survives_that_failure(self):
+        """Non-vacuity for the two above: the cleanup they require must still be
+        the SCOPED one, not a tree-wide `git checkout -- .` that would satisfy
+        them by discarding someone else's uncommitted work."""
+        self.dirty("memories/unrelated.md")
+        with self.assertRaises(TypeError):
+            self.capture(self._block_with_unwritable_body())
+        self.assertIn(HAND_EDIT, self.read("memories/unrelated.md"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
