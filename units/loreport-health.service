@@ -11,6 +11,14 @@ Type=oneshot
 # exit 1 is "unhealthy, already reported". Without this, OnFailure= would fire a
 # second Telegram every time the brain is merely unhealthy, and the last-resort
 # alarm would stop meaning "the check is broken".
+#
+# Only BROKEN and STALE reach exit 1. Items merely awaiting a human decision —
+# quarantined blocks, a PROFILE conflict, an unpasted ChatGPT surface — exit 0:
+# the merge and publish completed normally, and grading that as a failure is
+# what once had this brain reported as three days dead while it ran fine every
+# night. The check's startup errors keep their own codes (2, and 127 from an
+# unset required key) so they remain real unit failures; do not normalize those
+# to 1, which SuccessExitStatus= would then hide.
 SuccessExitStatus=1
 # Edit the --config path to point at YOUR brain's loreport.conf; the engine ships
 # no instance paths. There is deliberately no ConditionPathExists= here: a failed

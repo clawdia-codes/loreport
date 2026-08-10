@@ -89,6 +89,22 @@
   copies, including a new one: a SKILL a human marked `visibility: local` must not reach the
   default surface.
 
+### Changed
+- **The health check emitted one failure state for three different conditions, and it caused
+  a real false diagnosis.** `Loreport health FAIL: merge digest needs review` was the single
+  line produced by a secret-scrub abort, a quarantined block, and a PROFILE conflict. On
+  2026-08-10 two separate readers took it to mean the merge had failed and reported the brain
+  as stuck for three days. It had merged and published every night. The states are separate
+  now: **BROKEN** (exit 1) is a merge that did not complete, **STALE** (exit 1) is no
+  completed merge inside the freshness budget, and **NEEDS REVIEW** (exit 0) is items waiting
+  on a human with the pipeline otherwise healthy. Each message names its subsystem and what
+  actually happened. `brain_merge.py` gained the matching distinction — exit **1** for the
+  fail-closed aborts, exit **3** for needs-review — and `bin/loreport-sync` publishes and
+  pushes on 3 without paging anyone.
+- **Notifications fire on state CHANGE, not on every run**, and a recovery is announced so a
+  reader who got a failure notice learns when it cleared. A first run on a new brain does not
+  claim a recovery it never had.
+
 ### Added
 
 - `tests/test_visibility_failclosed.py` — 22 tests. Each names the single-line production
@@ -135,6 +151,13 @@
   rule, reports green on a real leak. The audit reports it as a leak *and* reports the
   non-canonical spelling before it becomes one; the check-docs parser-agreement gate now
   covers `brain_audit.effective_visibility` so it cannot drift.
+- **Nothing asserted that the merge had actually run.** Check #1 looks at the age of `main`'s
+  last commit, which only moves when content changes, and the digest check graded the newest
+  `hub/digest-*.md` without ever asking how old it was — so a merge that died a month ago kept
+  being graded on its last good day, green. A completed merge (a quiet no-op night included)
+  now stamps `hub/merge-state.json`; the abort paths deliberately do not. `loreport-health`
+  fails when that stamp exceeds `LOREPORT_MERGE_MAX_AGE_HOURS` (default 36), with distinct
+  messages for "never merged here" and "merged N hours ago".
 
 ### Fixed
 - **The audit went blind on any item whose filename carries a non-ASCII byte.** `git ls-tree`
@@ -192,6 +215,46 @@
   Covered by `tests/test_ingest_cleanup.py` (13 tests, run against a real two-branch git repo
   with real failures — a `pre-commit` hook exiting 1, a genuinely dirty tree blocking the
   branch switch, and an untracked delete target).
+- **Three of the five NEEDS REVIEW reasons reached the owner through no channel at all.**
+  `brain_merge.needs_review_reasons()` has five members. The health check re-derived two of
+  them by grepping the digest: `profile_conflicts` (the "PROFILE conflicts … none" line) and
+  `human_region_violations` (they write files under `hub/quarantine/`, so the count line
+  catches them). A renamed add/add twin, a secret-scrub warning on a `visibility: local`
+  item, and a reverted provenance violation write no quarantine file and appear in no line
+  it read. Moving the merge's nonzero exit off the alert path — correct, that exit had been
+  read as "the merge failed" — removed their last route out. Measured on the branch as it
+  stood: with a `sk-…` sitting in a local item, `brain_merge` exited 3 and the owner's phone
+  received `🧠 brain OK — 2 memories`, with the banner deleted. An unremediated secret in
+  the brain announced itself as healthy; the cross-provider tamper gate reverted silently
+  and said nothing.
+  `hub/merge-state.json` already carried a `needs_review` bool and nothing anywhere read it.
+  It now also carries `needs_review_kinds` — the subsystem KEYS, never the payloads, because
+  `scrub_warnings`' payload is the matched secret fragment and `merge-state.json` is
+  untracked-but-not-gitignored in brains created before this version — and
+  `scripts/loreport-health` §6c is the consumer. It iterates whatever kinds are present
+  rather than testing a fixed list, so a sixth reason added to `brain_merge` is reported the
+  day it lands; it skips, by name, the kinds §6b already stated in the digest's own words, so
+  the common conditions are not double-reported and a kind §6b has never heard of can never
+  fall into the gap between them. A `merge-state.json` from an older engine (bool, no list)
+  reports that something is waiting and that it cannot name the subsystem, rather than
+  nothing. `needs_review_reasons` and the new `needs_review_kinds` are both derived from one
+  `NEEDS_REVIEW_KINDS` table, so the digest wording and the machine-readable keys cannot
+  drift apart.
+- **The three digest conditions were an `elif` chain**, so only the first ever surfaced — and
+  the first, quarantine, is the one that never clears without a human. They are independent
+  now.
+- **`count_quarantine_items` counted `.gitkeep`.** The brain's `.gitignore` keeps that marker
+  deliberately, so any brain having it reported one pending item forever — a count that can
+  never reach zero, and therefore a check nobody reads.
+- **The ChatGPT paste reminder sat behind a 30-day nag throttle that also gated the state.**
+  Week 0 reported review; week 1 the throttle suppressed the item, the state fell back to
+  healthy and the banner was deleted — which, once recovery announcements existed, would have
+  reported "all checks green" while the surface was still unpasted, on a 30-day loop. The
+  state-change gate is the only throttle now.
+- **`index_item_count` returned the string `"0\n0"` on an INDEX with no items.** `grep -c`
+  prints `0` *and* exits 1, so the `|| echo 0` fallback appended a second zero; the capture
+  check then died with a `ValueError` that the script (no `set -e`) swallowed, leaving a
+  crashed check reporting healthy.
 
 ## [1.13.2] — 2026-08-07
 

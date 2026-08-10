@@ -107,10 +107,30 @@ Run once a day (see `hub/config/cron.txt` for the schedule):
    common base.
 
 Read `hub/digest-<date>.md` (see "Daily digest to the user", below) before you
-consider the day's cycle closed. `brain_merge.py` exits nonzero whenever that
-digest needs your attention — a PROFILE conflict, a renamed add/add twin, or a
-local-visibility scrub warning — so a cron/notify hook can catch it without you
-having to remember to look.
+consider the day's cycle closed. `brain_merge.py` distinguishes two nonzero
+exits, and a hook that collapses them into "the merge failed" will misreport a
+healthy pipeline:
+
+| exit | meaning |
+|------|---------|
+| `0`  | merged (or nothing to merge); nothing waiting on you. |
+| `1`  | **BROKEN** — the merge did not complete: a fail-closed scrub abort, or a merge that never started. `main` was rolled back; nothing landed. |
+| `3`  | **NEEDS REVIEW** — the merge completed and `main` is publishable; a PROFILE conflict, a renamed add/add twin, a local-visibility scrub warning, a provenance revert or a quarantined human-region update is waiting on you. Publishing and pushing must continue. |
+
+Exit 3 itself is a stderr line in the journal, so it is not how the owner hears
+about any of those five. The merge stamps `needs_review_kinds` — the subsystem
+keys, never the payloads — into `hub/merge-state.json`, and
+`scripts/loreport-health` §6c turns each one into a NEEDS REVIEW banner entry
+and notification. Three of the five (renamed, scrub warnings, provenance
+reverts) write no quarantine file and appear in no line the digest greps read,
+so that field is their only route to a human.
+
+A completed merge — a quiet no-op night included — stamps
+`hub/merge-state.json` with `last_success_epoch`. The abort paths deliberately
+do not, and that asymmetry is what makes the file a real liveness signal: the
+daily digest is written on the abort paths too, so "a recent digest exists" says
+nothing about whether the pipeline ran. `scripts/loreport-health` fails when
+that stamp is older than `LOREPORT_MERGE_MAX_AGE_HOURS` (default 36).
 
 ## Monthly full consolidation
 
