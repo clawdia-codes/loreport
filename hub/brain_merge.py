@@ -672,6 +672,13 @@ def write_merge_state(brain_dir, report):
     fail-closed aborts do not call this, so `last_success_epoch` going stale is
     the signal that the merge stopped working rather than merely stayed quiet.
     Never raises: a brain on a read-only mount should still get its digest.
+
+    `needs_review_kinds` is the authoritative channel to the owner. Exit 3 is a
+    stderr line in the journal, and the health check used to re-derive a SUBSET
+    of the same fact by grepping the digest — so a renamed add/add twin, a
+    secret-scrub warning on a local item and a reverted provenance violation
+    reached the human through nothing at all while the weekly notification said
+    "brain OK". Kinds, not payloads: see needs_review_kinds.
     """
     path = os.path.join(brain_dir, MERGE_STATE_FILE)
     payload = {
@@ -679,6 +686,7 @@ def write_merge_state(brain_dir, report):
         "last_success_iso": datetime.now().isoformat(timespec="seconds"),
         "quarantine_pending": count_quarantine_items(brain_dir),
         "needs_review": bool(needs_review_reasons(report)),
+        "needs_review_kinds": needs_review_kinds(report),
     }
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -690,6 +698,37 @@ def write_merge_state(brain_dir, report):
     return path
 
 
+# The five things a completed merge can park for a human, as
+# (report key, human wording). ONE list, so a sixth reason added here reaches
+# both the digest text and hub/merge-state.json — and therefore the health
+# check — without anyone remembering to update a second place. Three of these
+# (renamed, scrub_warnings, provenance_violations) write no quarantine file and
+# appear in no line the health check greps, so before merge-state carried the
+# kinds they reached the owner through NO channel at all: the merge exited 3,
+# loreport-health computed state=ok, deleted the banner and pushed the weekly
+# all-clear.
+NEEDS_REVIEW_KINDS = [
+    ("profile_conflicts", "PROFILE conflicts"),
+    ("renamed", "add/add renames"),
+    ("scrub_warnings", "secret-scrub warnings on local items"),
+    ("provenance_violations", "provenance violations reverted"),
+    ("human_region_violations", "human-region violations quarantined"),
+]
+
+
+def needs_review_kinds(report):
+    """Which subsystems this completed merge parked for a human — KEYS ONLY.
+
+    Deliberately not the payloads. This is what goes into
+    hub/merge-state.json, and `scrub_warnings`' payload carries the matched
+    secret fragment; merge-state.json is untracked-but-not-gitignored in brains
+    that predate this version, so a payload written there is a secret fragment
+    sitting loose in the brain repo. The health check names the subsystem and
+    points at the digest for the detail.
+    """
+    return [key for key, _label in NEEDS_REVIEW_KINDS if report.get(key)]
+
+
 def needs_review_reasons(report):
     """The things a completed merge parks for a human, named individually.
 
@@ -697,18 +736,8 @@ def needs_review_reasons(report):
     is waiting. "needs review" with no subsystem is the wording that got read as
     "the merge failed".
     """
-    reasons = []
-    if report.get("profile_conflicts"):
-        reasons.append(f"PROFILE conflicts: {report['profile_conflicts']}")
-    if report.get("renamed"):
-        reasons.append(f"add/add renames: {report['renamed']}")
-    if report.get("scrub_warnings"):
-        reasons.append(f"secret-scrub warnings on local items: {report['scrub_warnings']}")
-    if report.get("provenance_violations"):
-        reasons.append(f"provenance violations reverted: {report['provenance_violations']}")
-    if report.get("human_region_violations"):
-        reasons.append(f"human-region violations quarantined: {report['human_region_violations']}")
-    return reasons
+    return [f"{label}: {report[key]}"
+            for key, label in NEEDS_REVIEW_KINDS if report.get(key)]
 
 
 def run_synthesis_report(brain_dir, dry_run):

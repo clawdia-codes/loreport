@@ -28,6 +28,31 @@
   messages for "never merged here" and "merged N hours ago".
 
 ### Fixed
+- **Three of the five NEEDS REVIEW reasons reached the owner through no channel at all.**
+  `brain_merge.needs_review_reasons()` has five members. The health check re-derived two of
+  them by grepping the digest: `profile_conflicts` (the "PROFILE conflicts … none" line) and
+  `human_region_violations` (they write files under `hub/quarantine/`, so the count line
+  catches them). A renamed add/add twin, a secret-scrub warning on a `visibility: local`
+  item, and a reverted provenance violation write no quarantine file and appear in no line
+  it read. Moving the merge's nonzero exit off the alert path — correct, that exit had been
+  read as "the merge failed" — removed their last route out. Measured on the branch as it
+  stood: with a `sk-…` sitting in a local item, `brain_merge` exited 3 and the owner's phone
+  received `🧠 brain OK — 2 memories`, with the banner deleted. An unremediated secret in
+  the brain announced itself as healthy; the cross-provider tamper gate reverted silently
+  and said nothing.
+  `hub/merge-state.json` already carried a `needs_review` bool and nothing anywhere read it.
+  It now also carries `needs_review_kinds` — the subsystem KEYS, never the payloads, because
+  `scrub_warnings`' payload is the matched secret fragment and `merge-state.json` is
+  untracked-but-not-gitignored in brains created before this version — and
+  `scripts/loreport-health` §6c is the consumer. It iterates whatever kinds are present
+  rather than testing a fixed list, so a sixth reason added to `brain_merge` is reported the
+  day it lands; it skips, by name, the kinds §6b already stated in the digest's own words, so
+  the common conditions are not double-reported and a kind §6b has never heard of can never
+  fall into the gap between them. A `merge-state.json` from an older engine (bool, no list)
+  reports that something is waiting and that it cannot name the subsystem, rather than
+  nothing. `needs_review_reasons` and the new `needs_review_kinds` are both derived from one
+  `NEEDS_REVIEW_KINDS` table, so the digest wording and the machine-readable keys cannot
+  drift apart.
 - **The three digest conditions were an `elif` chain**, so only the first ever surfaced — and
   the first, quarantine, is the one that never clears without a human. They are independent
   now.

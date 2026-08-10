@@ -117,6 +117,14 @@ healthy pipeline:
 | `1`  | **BROKEN** — the merge did not complete: a fail-closed scrub abort, or a merge that never started. `main` was rolled back; nothing landed. |
 | `3`  | **NEEDS REVIEW** — the merge completed and `main` is publishable; a PROFILE conflict, a renamed add/add twin, a local-visibility scrub warning, a provenance revert or a quarantined human-region update is waiting on you. Publishing and pushing must continue. |
 
+Exit 3 itself is a stderr line in the journal, so it is not how the owner hears
+about any of those five. The merge stamps `needs_review_kinds` — the subsystem
+keys, never the payloads — into `hub/merge-state.json`, and
+`scripts/loreport-health` §6c turns each one into a NEEDS REVIEW banner entry
+and notification. Three of the five (renamed, scrub warnings, provenance
+reverts) write no quarantine file and appear in no line the digest greps read,
+so that field is their only route to a human.
+
 A completed merge — a quiet no-op night included — stamps
 `hub/merge-state.json` with `last_success_epoch`. The abort paths deliberately
 do not, and that asymmetry is what makes the file a real liveness signal: the

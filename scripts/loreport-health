@@ -361,6 +361,11 @@ fi
 # hold at once, they belong to different subsystems, and reporting only the
 # first hid the other two. Each message names its subsystem and what actually
 # happened, so none of them can be read as "the merge failed" unless it did.
+# Which needs-review kinds 6b manages to say in the digest's own words, so 6c
+# below does not say them a second time. Tracked by NAME rather than by "6b
+# covers the first two", so a kind 6b has never heard of always falls through
+# to 6c instead of into a gap.
+digest_reported_kinds=""
 latest_digest=$(ls -1 "$BRAIN"/hub/digest-*.md 2>/dev/null | sort | tail -1 || true)
 if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
   # BROKEN. A fail-closed scrub hit rolls main back and merges nothing; the
@@ -379,6 +384,7 @@ if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
   if [ -n "${q_count:-}" ] && [ "$q_count" -gt 0 ]; then
     note_review "merge quarantine: ${q_count} block(s) awaiting your decision — the merge and publish completed normally" \
       "review hub/quarantine/ (listed in $latest_digest); delete or re-file each block"
+    digest_reported_kinds="${digest_reported_kinds} human_region_violations"
   fi
 
   # NEEDS REVIEW. An identity conflict is resolved --ours and flagged; the merge
@@ -386,8 +392,75 @@ if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
   if ! grep -qi 'PROFILE conflicts (human review required): none' "$latest_digest"; then
     note_review "PROFILE conflict: two providers edited identity, main's version was kept and flagged — the merge and publish completed normally" \
       "compare the flagged files named in $latest_digest and pick the correct PROFILE.md content"
+    digest_reported_kinds="${digest_reported_kinds} profile_conflicts"
   fi
 fi
+
+# --- 6c. NEEDS REVIEW, taken from the merge's own record ----------------------
+# brain_merge.needs_review_reasons() has FIVE members. 6b above re-derives two of
+# them by grepping the digest — and the other three (a renamed add/add twin, a
+# secret-scrub warning on a local-visibility item, a reverted provenance
+# violation) write no quarantine file and appear in no line it greps. They
+# reached the owner through NO channel: the merge exited 3, that exit is a plain
+# stderr line in the journal, and this script then computed state=ok, deleted the
+# banner and pushed the weekly "brain OK". An unremediated secret sitting in the
+# brain announced itself as healthy.
+#
+# hub/merge-state.json already carries the answer — write_merge_state stamps the
+# subsystem KEYS (never the payloads; scrub_warnings' payload is a secret
+# fragment). This is the consumer. It iterates whatever kinds are present rather
+# than testing a fixed list, so a sixth reason added to brain_merge is reported
+# here the day it lands instead of being silent until someone remembers.
+merge_review_kinds=$(python3 - "$MERGE_STATE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    raise SystemExit(0)
+kinds = data.get("needs_review_kinds")
+if isinstance(kinds, list):
+    for k in kinds:
+        if str(k).strip():
+            print(str(k).strip())
+elif data.get("needs_review"):
+    # merge-state stamped by an engine older than the kinds field. We know a
+    # human is owed a decision, just not by which subsystem — say exactly that
+    # rather than nothing. Clears itself on the first merge under this version.
+    print("unspecified")
+PY
+)
+while IFS= read -r kind; do
+  [ -n "${kind:-}" ] || continue
+  # Already said, in the digest's own words, by 6b. Skipping is by NAME, so a
+  # kind 6b does not know about can never fall through this gap.
+  case " ${digest_reported_kinds:-} " in *" $kind "*) continue ;; esac
+  case "$kind" in
+    profile_conflicts)
+      note_review "PROFILE conflict: two providers edited identity, main's version was kept and flagged — the merge and publish completed normally" \
+        "compare the flagged files named in the newest $BRAIN/hub/digest-*.md and pick the correct PROFILE.md content" ;;
+    renamed)
+      note_review "add/add rename: two providers created the same item name and one copy was filed under a new name — the merge and publish completed normally" \
+        "see 'Renamed (add/add conflicts)' in the newest $BRAIN/hub/digest-*.md; merge the two items or keep both deliberately" ;;
+    scrub_warnings)
+      note_review "secret-scrub: a secret pattern matched inside a visibility:local item — nothing egressed and the merge completed, but the secret is still sitting in the brain" \
+        "see 'Scrub warnings' in the newest $BRAIN/hub/digest-*.md; remove or rotate the credential, then re-run the merge" ;;
+    provenance_violations)
+      note_review "provenance: an untrusted commit touched a path it does not own and was reverted — the merge and publish completed normally" \
+        "see 'Provenance violations' in the newest $BRAIN/hub/digest-*.md; confirm the revert was right and check that provider's capture path" ;;
+    human_region_violations)
+      note_review "human-region: a provider edited a human-owned region and the edit was quarantined — the merge and publish completed normally" \
+        "review $BRAIN/hub/quarantine/; delete or re-file each block" ;;
+    unspecified)
+      note_review "merge needs review: the last completed merge parked something for you, and it was stamped by an engine older than this one, so it could not name the subsystem — the merge and publish completed normally" \
+        "read the newest $BRAIN/hub/digest-*.md; the next merge under this engine version will name it" ;;
+    *)
+      note_review "merge needs review ($kind): the last completed merge parked this for you — the merge and publish completed normally" \
+        "read the newest $BRAIN/hub/digest-*.md" ;;
+  esac
+done <<< "$merge_review_kinds"
 
 # --- 6b. Synthesis detector health (design-wiki-parity §2) --------------------
 # "If the cluster detector emits degenerate output (single-token topics — the REM
