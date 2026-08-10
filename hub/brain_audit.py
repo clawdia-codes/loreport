@@ -117,10 +117,23 @@ class CannotAudit(RuntimeError):
 # --- git access (main only) --------------------------------------------------
 
 def _run_git(brain_dir, *args, timeout=30):
+    """Run git against the brain.
+
+    `core.quotePath=false` is LOAD-BEARING, not tidiness. With git's default
+    (`true`) any path carrying a byte outside ASCII comes back C-quoted AND
+    wrapped in double quotes — `"memories/caf\\314\\201-note.md"` — so it no
+    longer ends in `.md`, `audit()`'s filter drops it, and the item is never
+    classification-checked: no RISK for a missing `visibility:`, and no count
+    either, so the unconditional vacuity guard stays quiet as long as one ASCII
+    item exists. The checker would then certify clean on exactly the
+    published-by-omission defect it exists to detect. `encoding="utf-8"` is here
+    for the same class of reason: `text=True` alone decodes with the locale
+    encoding, and this runs from a systemd user unit that may carry no LANG.
+    """
     try:
         return subprocess.run(
-            ["git", "-C", brain_dir] + list(args),
-            capture_output=True, text=True, timeout=timeout,
+            ["git", "-C", brain_dir, "-c", "core.quotePath=false"] + list(args),
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         raise CannotAudit(f"git {' '.join(args)} timed out in {brain_dir}")
@@ -333,9 +346,13 @@ def audit(brain_dir):
         try:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
+            # UnicodeDecodeError is NOT an OSError. A surface that exists and is
+            # readable but is not valid UTF-8 sailed past this guard and killed
+            # the audit before format_report ran — a cannot-run condition
+            # delivered as a traceback plus exit 1, the FINDINGS code.
             add("BLIND", f"{rel} is unreadable ({e}) — this run asserted nothing about it",
-                "fix permissions on the file, then re-audit")
+                "fix permissions or encoding on the file, then re-audit")
             surface_refs[rel] = 0
             continue
 
@@ -376,8 +393,19 @@ def audit(brain_dir):
     packet_path = os.path.join(brain_dir, packet_rel)
     packet_names = set()
     if os.path.isfile(packet_path):
-        with open(packet_path, encoding="utf-8") as fh:
-            packet_names = set(ANY_WIKILINK_RE.findall(fh.read()))
+        # Guarded exactly like the sibling read in section 2. Unguarded, a
+        # packet.md that exists but is unreadable (mode 000) or not valid UTF-8
+        # raised out of audit() before format_report ever ran: the operator saw a
+        # traceback and no report, and Python's uncaught-exception status is 1 —
+        # this script's FINDINGS code — so a cannot-run condition was delivered
+        # as "audited fine, found problems". BLIND is the honest answer.
+        try:
+            with open(packet_path, encoding="utf-8") as fh:
+                packet_names = set(ANY_WIKILINK_RE.findall(fh.read()))
+        except (OSError, UnicodeDecodeError) as e:
+            add("BLIND", f"{packet_rel} is unreadable ({e}) — the packet/index "
+                         "reconciliation did not run",
+                "fix permissions or encoding on the file, then re-audit")
 
     indexed = 0
     reach_checked = 0

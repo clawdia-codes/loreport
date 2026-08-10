@@ -496,5 +496,77 @@ class DriverScriptTests(unittest.TestCase):
         self.assertIn("needs a value", r.stderr)
 
 
+class NonAsciiPathsAreNotSilentlySkipped(unittest.TestCase):
+    """The audit reads item paths out of `git ls-tree`. With git's default
+    `core.quotePath=true` any path carrying a non-ASCII byte comes back C-quoted
+    AND double-quoted, so it stops ending in `.md`, gets filtered out of
+    `item_paths`, and is never classification-checked. Because it is also not
+    counted, the unconditional vacuity guard stays quiet as long as one ASCII
+    item exists — so the instrument reports a clean brain on precisely the
+    published-by-omission defect its docstring cites as its reason to exist.
+
+    Not exotic input: item slugs are derived from names, and this brain's owner
+    writes names with non-ASCII letters in them.
+    """
+
+    def setUp(self):
+        # é as U+0065 U+0301 (combining acute) — non-ASCII bytes in UTF-8, and
+        # deliberately not anyone's real name (tests/test_no_personal_
+        # identifiers.py scans every tracked file).
+        self.nonascii = "café-note"
+        self.brain = BrainFixture({
+            "plain-note": _item("plain-note"),
+            self.nonascii: _item(self.nonascii),
+        })
+        self.addCleanup(self.brain.cleanup)
+
+    def test_a_non_ascii_item_is_read_from_main_at_all(self):
+        """Mutation run: drop `"-c", "core.quotePath=false"` from `_run_git`.
+        Observed below in the test that names the harm; this one localises it.
+        """
+        paths = brain_audit.list_main_files(self.brain.dir, "memories")
+        self.assertEqual(len(paths), 2, paths)
+        for p in paths:
+            self.assertTrue(p.endswith(".md"), p)
+            self.assertFalse(p.startswith('"'), p)
+
+    def test_a_non_ascii_item_missing_visibility_is_still_reported(self):
+        """The assertion that matters: two brains differing only in one
+        filename's encoding must produce the identical finding. Pre-fix the
+        non-ASCII one returned `items=1, findings=[], exit 0`.
+
+        Mutation run: drop `"-c", "core.quotePath=false"` from `_run_git`.
+        """
+        self.brain.commit_item(self.nonascii, _item(self.nonascii, visibility=""))
+        findings, counts = brain_audit.audit(self.brain.dir)
+        self.assertEqual(counts["items"], 2)
+        self.assertIn("RISK", [f.severity for f in findings])
+        self.assertIn("no explicit `visibility:`",
+                      "\n".join(f.message for f in findings))
+
+
+class AnUnreadablePacketIsBlindNotATraceback(unittest.TestCase):
+    """Section 2 turns an unreadable surface into a BLIND finding; section 3
+    re-opened the same packet unguarded, so the audit died with a traceback,
+    `format_report` never ran, and Python's exit status for an uncaught
+    exception (1) collided with this script's FINDINGS code."""
+
+    def setUp(self):
+        self.brain = BrainFixture({"alpha-note": _item("alpha-note")})
+        self.addCleanup(self.brain.cleanup)
+
+    def test_a_packet_that_is_not_utf8_is_reported_not_raised(self):
+        """Mutation run: remove the try/except around section 3's
+        `open(packet_path)` (revert to the bare `with open(...)`).
+        """
+        packet = os.path.join(self.brain.dir, brain_audit.PUBLISHED_SURFACES[0])
+        with open(packet, "wb") as fh:
+            fh.write(b"\xff\xfe- [[alpha-note]]\n")
+        findings, _ = brain_audit.audit(self.brain.dir)
+        self.assertIn("BLIND", [f.severity for f in findings])
+        self.assertIn("the packet/index reconciliation did not run",
+                      "\n".join(f.message for f in findings))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

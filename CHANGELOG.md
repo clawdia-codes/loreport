@@ -37,6 +37,26 @@
   covers `brain_audit.effective_visibility` so it cannot drift.
 
 ### Fixed
+- **The audit went blind on any item whose filename carries a non-ASCII byte.** `git ls-tree`
+  runs with `core.quotePath=true` by default, so such a path comes back C-quoted *and*
+  double-quoted — `"memories/caf\314\201-note.md"` — no longer ends in `.md`, and was
+  filtered out of `item_paths`. The item was then never classification-checked (no RISK for
+  a missing `visibility:`, no META for a missing `domain:`) and, because it was also never
+  counted, the unconditional vacuity guard stayed quiet as long as one ASCII item existed.
+  Measured, one variable changed: a brain whose only unclassified item had a non-ASCII
+  filename reported `items=1, findings=[], exit 0`; the byte-identical brain with an ASCII
+  filename reported the RISK and exit 1. So the instrument certified clean on exactly the
+  published-by-omission defect it was built to detect, silently. `_run_git` now passes
+  `-c core.quotePath=false`, and `encoding="utf-8"` with it — `text=True` alone decodes with
+  the locale encoding, and this runs from a systemd user unit that may carry no `LANG`.
+  Item slugs are derived from names, so non-ASCII item names are ordinary input.
+- **An unreadable or non-UTF-8 surface killed the audit instead of being reported BLIND.**
+  `UnicodeDecodeError` is not an `OSError`, so the section-2 guard did not catch it, and
+  section 3 re-opened `hub/published/packet.md` with no guard at all. Either path raised out
+  of `audit()`: `format_report` never ran, the operator saw a traceback and no report, and
+  Python's uncaught-exception status (1) is this script's *findings* code — a cannot-run
+  condition delivered as "audited fine, found problems", the exact conflation the 0/1/2 exit
+  design exists to prevent. Both reads now produce a `BLIND` finding.
 - `scripts/loreport-audit` deliberately does **not** copy two idioms from its siblings.
   `--config` with no value: `shift 2 || true` shifts nothing when one argument remains and
   swallows the failure, so `$1` stays `--config` and the loop spins forever — verified,
