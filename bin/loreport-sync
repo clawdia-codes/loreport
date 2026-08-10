@@ -218,7 +218,18 @@ if [ "$head_ref" != "main" ] || [ -n "$dirty" ]; then
   alert "Loreport sync HALTED: repo state unsafe after merge (HEAD=$head_ref, dirty=$([ -n "$dirty" ] && echo yes || echo no), merge_rc=$merge_rc). Not publishing or pushing."
   exit 1
 fi
-[ "$merge_rc" -ne 0 ] && alert "Loreport merge exited $merge_rc — tree is clean on main, check hub/digest-$(date +%F).md"
+# brain_merge exit 3 is NEEDS REVIEW: it merged, main is publishable, and some
+# items are parked for a human. Routing that through alert() would push "Loreport
+# merge exited 3" to Telegram every night until the human got around to it — a
+# failure-shaped message, repeated, for a healthy pipeline. That is the exact
+# misread this split exists to prevent, so it goes to the log and nowhere else.
+# It must also NOT set _lp_alerted, which would suppress the EXIT trap's
+# last-resort alarm if something genuinely died later in this run.
+if [ "$merge_rc" -eq 3 ]; then
+  echo "sync: merge completed with items awaiting review — publishing normally; see hub/digest-$(date +%F).md" >&2
+elif [ "$merge_rc" -ne 0 ]; then
+  alert "Loreport merge FAILED (exit $merge_rc) — nothing merged tonight; tree is clean on main, check hub/digest-$(date +%F).md"
+fi
 
 python3 "$HUB/snapshot_publish.py" --brain-dir "$BRAIN" || {
   alert "Loreport publish failed — the packet served to providers may be stale"

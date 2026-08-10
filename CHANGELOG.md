@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.14.0] — 2026-08-10
+
+### Changed
+- **The health check emitted one failure state for three different conditions, and it caused
+  a real false diagnosis.** `Loreport health FAIL: merge digest needs review` was the single
+  line produced by a secret-scrub abort, a quarantined block, and a PROFILE conflict. On
+  2026-08-10 two separate readers took it to mean the merge had failed and reported the brain
+  as stuck for three days. It had merged and published every night. The states are separate
+  now: **BROKEN** (exit 1) is a merge that did not complete, **STALE** (exit 1) is no
+  completed merge inside the freshness budget, and **NEEDS REVIEW** (exit 0) is items waiting
+  on a human with the pipeline otherwise healthy. Each message names its subsystem and what
+  actually happened. `brain_merge.py` gained the matching distinction — exit **1** for the
+  fail-closed aborts, exit **3** for needs-review — and `bin/loreport-sync` publishes and
+  pushes on 3 without paging anyone.
+- **Notifications fire on state CHANGE, not on every run**, and a recovery is announced so a
+  reader who got a failure notice learns when it cleared. A first run on a new brain does not
+  claim a recovery it never had.
+
+### Added
+- **Nothing asserted that the merge had actually run.** Check #1 looks at the age of `main`'s
+  last commit, which only moves when content changes, and the digest check graded the newest
+  `hub/digest-*.md` without ever asking how old it was — so a merge that died a month ago kept
+  being graded on its last good day, green. A completed merge (a quiet no-op night included)
+  now stamps `hub/merge-state.json`; the abort paths deliberately do not. `loreport-health`
+  fails when that stamp exceeds `LOREPORT_MERGE_MAX_AGE_HOURS` (default 36), with distinct
+  messages for "never merged here" and "merged N hours ago".
+
+### Fixed
+- **The three digest conditions were an `elif` chain**, so only the first ever surfaced — and
+  the first, quarantine, is the one that never clears without a human. They are independent
+  now.
+- **`count_quarantine_items` counted `.gitkeep`.** The brain's `.gitignore` keeps that marker
+  deliberately, so any brain having it reported one pending item forever — a count that can
+  never reach zero, and therefore a check nobody reads.
+- **The ChatGPT paste reminder sat behind a 30-day nag throttle that also gated the state.**
+  Week 0 reported review; week 1 the throttle suppressed the item, the state fell back to
+  healthy and the banner was deleted — which, once recovery announcements existed, would have
+  reported "all checks green" while the surface was still unpasted, on a 30-day loop. The
+  state-change gate is the only throttle now.
+- **`index_item_count` returned the string `"0\n0"` on an INDEX with no items.** `grep -c`
+  prints `0` *and* exits 1, so the `|| echo 0` fallback appended a second zero; the capture
+  check then died with a `ValueError` that the script (no `set -e`) swallowed, leaving a
+  crashed check reporting healthy.
+
 ## [1.13.2] — 2026-08-07
 
 ### Fixed

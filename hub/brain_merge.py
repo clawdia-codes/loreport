@@ -31,8 +31,23 @@ Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
   6. INDEX rebuild — deterministic: same input item set -> same INDEX.md bytes, always.
   7. Fast-forward each provider branch to the new `main`.
 
-Exit code is nonzero whenever a human should look: PROFILE conflicts, add/add
-renames, secret-scrub warnings, or provenance-gate violations.
+Exit codes distinguish two very different outcomes that used to share code 1:
+
+  0  merged (or nothing to merge) and nothing is waiting on a human.
+  1  BROKEN — the merge did not complete. Fail-closed scrub abort, or a merge
+     that never started. Nothing landed on `main`; the tree was rolled back.
+  3  NEEDS REVIEW — the merge completed normally and `main` is publishable;
+     items are parked for a human decision (PROFILE conflicts, add/add renames,
+     scrub warnings, provenance or human-region violations). This is NOT a
+     failure and must not be reported as one: on 2026-08-10 two readers saw a
+     "needs review" signal, read it as "the merge failed", and told the owner
+     the brain had been stuck for three days. It had merged and published every
+     night.
+
+A completed merge — including a no-op one — stamps `hub/merge-state.json` with
+`last_success_epoch`. That file is the only positive assertion that the pipeline
+actually ran; the fail-closed aborts deliberately do not write it, so a brain
+whose merge dies stops looking fresh instead of coasting on an old digest.
 
 CLI:
     python3 hub/brain_merge.py [--brain-dir PATH] [--test-determinism] [--dry-run]
@@ -46,6 +61,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import date, datetime
 
 # Sibling import: this module is imported by tooling that does not put hub/ on the
@@ -59,6 +75,22 @@ import synth_detect  # noqa: E402
 # Gitignored alongside the other hub state files: it is a report artifact, and a
 # tracked file rewritten nightly would leave the tree dirty for sync.sh's guard.
 SYNTHESIS_REPORT_FILE = "hub/synthesis-report.json"
+
+# The merge's liveness stamp. Written ONLY when a merge actually completed, which
+# is what makes it usable as a freshness assertion: hub/digest-*.md is written on
+# the abort paths too, so "a recent digest exists" proves nothing about whether
+# the pipeline ran. Gitignored for the same reason as the digest — local report
+# state, not brain content, and a tracked file rewritten nightly would leave the
+# tree dirty for loreport-sync's post-merge guard.
+MERGE_STATE_FILE = "hub/merge-state.json"
+
+# Exit codes. 1 and 3 are both "nonzero", and telling them apart is the whole
+# point: 1 means nothing merged, 3 means everything merged and a human has some
+# reading to do. Callers that collapse them re-create the false "the merge is
+# broken" diagnosis this split exists to prevent.
+EXIT_OK = 0
+EXIT_BROKEN = 1
+EXIT_NEEDS_REVIEW = 3
 
 # --- constants -------------------------------------------------------------
 
@@ -611,15 +643,72 @@ def scan_brain_for_secrets(brain_dir):
     return fail_closed, warnings
 
 
+# Files under hub/quarantine/ that are NOT parked blocks. `.gitkeep` is the
+# tracked directory marker (.gitignore keeps it and ignores everything else), so
+# counting it would report one permanently-pending item in every brain that has
+# the marker — and a count that never reaches zero pins the health check into
+# NEEDS REVIEW forever, which is exactly the "always-red, therefore ignored"
+# signal this sprint is removing.
+QUARANTINE_NON_ITEMS = ("digest.md", ".gitkeep")
+
+
 def count_quarantine_items(brain_dir):
     """Count quarantined blocks under hub/quarantine/ (excluding the digest.md
-    log itself) for the daily digest's summary line."""
+    log and the .gitkeep directory marker) for the daily digest's summary line."""
     qdir = os.path.join(brain_dir, "hub", "quarantine")
     count = 0
     if os.path.isdir(qdir):
         for _root, _dirs, files in os.walk(qdir):
-            count += sum(1 for f in files if f != "digest.md")
+            count += sum(1 for f in files if f not in QUARANTINE_NON_ITEMS)
     return count
+
+
+def write_merge_state(brain_dir, report):
+    """Stamp hub/merge-state.json — the merge's positive liveness assertion.
+
+    Called on exactly one path: a merge that ran to completion. A no-op run
+    counts (the pipeline ran; there was simply nothing to merge), and a run that
+    parked items for review counts (main is merged and publishable). The
+    fail-closed aborts do not call this, so `last_success_epoch` going stale is
+    the signal that the merge stopped working rather than merely stayed quiet.
+    Never raises: a brain on a read-only mount should still get its digest.
+    """
+    path = os.path.join(brain_dir, MERGE_STATE_FILE)
+    payload = {
+        "last_success_epoch": int(time.time()),
+        "last_success_iso": datetime.now().isoformat(timespec="seconds"),
+        "quarantine_pending": count_quarantine_items(brain_dir),
+        "needs_review": bool(needs_review_reasons(report)),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError as e:
+        print(f"warning: could not write {MERGE_STATE_FILE}: {e}", file=sys.stderr)
+    return path
+
+
+def needs_review_reasons(report):
+    """The things a completed merge parks for a human, named individually.
+
+    Returned as a list rather than a bool so the caller can say WHICH subsystem
+    is waiting. "needs review" with no subsystem is the wording that got read as
+    "the merge failed".
+    """
+    reasons = []
+    if report.get("profile_conflicts"):
+        reasons.append(f"PROFILE conflicts: {report['profile_conflicts']}")
+    if report.get("renamed"):
+        reasons.append(f"add/add renames: {report['renamed']}")
+    if report.get("scrub_warnings"):
+        reasons.append(f"secret-scrub warnings on local items: {report['scrub_warnings']}")
+    if report.get("provenance_violations"):
+        reasons.append(f"provenance violations reverted: {report['provenance_violations']}")
+    if report.get("human_region_violations"):
+        reasons.append(f"human-region violations quarantined: {report['human_region_violations']}")
+    return reasons
 
 
 def run_synthesis_report(brain_dir, dry_run):
@@ -1187,7 +1276,9 @@ def do_merge(brain_dir, dry_run):
                         write_digest(brain_dir, today, report)
                     git(brain_dir, "merge", "--abort", check=False)
                     git(brain_dir, "reset", "--hard", orig_head, check=False)
-                    sys.exit(1)
+                    # BROKEN: nothing merged, main rolled back. No merge-state
+                    # stamp -- this run must not make the pipeline look alive.
+                    sys.exit(EXIT_BROKEN)
 
                 if r.returncode != 0:
                     for f in conflicted_files(brain_dir):
@@ -1235,7 +1326,9 @@ def do_merge(brain_dir, dry_run):
                 # may not exist yet in --dry-run mode, where no commit is meant
                 # to persist regardless).
                 git(brain_dir, "reset", "--hard", orig_head, check=False)
-                sys.exit(1)
+                # BROKEN, same as above: the merge is gone, so liveness is not
+                # stamped and the freshness budget will start counting.
+                sys.exit(EXIT_BROKEN)
             elif report["scrub_warnings"]:
                 report["scrub"] = "PASS (local-visibility warnings — see scrub_warnings)"
 
@@ -1309,20 +1402,24 @@ def do_merge(brain_dir, dry_run):
 
     write_digest(brain_dir, today, report)
 
-    # Nonzero exit whenever something needs a human's attention (REVIEW.md
-    # #15): PROFILE conflicts, add/add renames, scrub warnings, or
-    # provenance-gate violations. This runs AFTER the lock is released and
-    # outside the try/except above -- it's a reporting decision on an
-    # already-successful merge, never confused with the fail-closed abort
-    # path (which exits 1 from inside the lock, above).
-    if (
-        report["profile_conflicts"]
-        or report["renamed"]
-        or report["scrub_warnings"]
-        or report["provenance_violations"]
-        or report["human_region_violations"]
-    ):
-        sys.exit(1)
+    # The merge completed. Stamp liveness BEFORE deciding the exit code, because
+    # "items need review" is an outcome of a healthy run, not a reason to look
+    # dead: a brain with one un-triaged quarantine file would otherwise go stale
+    # forever, since nothing decrements that count without a human.
+    write_merge_state(brain_dir, report)
+
+    # EXIT_NEEDS_REVIEW, not EXIT_BROKEN. Everything merged; main is publishable
+    # and downstream (loreport-sync) must go on to publish and push. This runs
+    # AFTER the lock is released and outside the try/except above -- it is a
+    # reporting decision on an already-successful merge, and must never be
+    # confused with the fail-closed abort path, which exits EXIT_BROKEN from
+    # inside the lock, above, having rolled main back.
+    reasons = needs_review_reasons(report)
+    if reasons:
+        print("NEEDS REVIEW (merge completed, main is publishable):")
+        for reason in reasons:
+            print(f"  - {reason}")
+        sys.exit(EXIT_NEEDS_REVIEW)
 
     return report
 

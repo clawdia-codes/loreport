@@ -12,7 +12,11 @@ usage: loreport-health [--config PATH] [--pasted]
   -h, --help      this message
 
 Required config keys: LOREPORT_BRAIN, LOREPORT_ENGINE
-Optional:             LOREPORT_NOTIFY, LOREPORT_BANNER
+Optional:             LOREPORT_NOTIFY, LOREPORT_BANNER,
+                      LOREPORT_MERGE_MAX_AGE_HOURS (default 36)
+
+Exit codes: 0 = healthy (items may be pending review — that is not a failure),
+            1 = unhealthy and already reported, 2 = the check could not start.
 USAGE
 }
 
@@ -51,6 +55,11 @@ FRAMEWORK="${LOREPORT_ENGINE:?loreport-health: LOREPORT_ENGINE not set in $CONFI
 # notifier at all. Neither can fake a healthy brain.
 BANNER="${LOREPORT_BANNER:-${HOME}/.config/loreport/health-report}"
 TG_NOTIFY="${LOREPORT_NOTIFY:-}"
+# Freshness budget for the nightly merge. 36h, not 24h: the merge runs once a
+# night, so a 24h budget goes red on any single late run, a reboot, or a DST
+# shift, and a check that cries wolf gets muted. 36h still catches "it did not
+# run last night" by the following evening.
+MERGE_MAX_AGE_HOURS="${LOREPORT_MERGE_MAX_AGE_HOURS:-36}"
 
 for d in "$BRAIN" "$FRAMEWORK"; do
   [ -d "$d" ] || { echo "loreport-health: not a directory: $d (check $CONFIG)" >&2; exit 2; }
@@ -58,14 +67,34 @@ done
 
 HEALTH_STATE="${BRAIN}/hub/health-state.json"
 MANIFEST="${BRAIN}/hub/projection-manifest.json"
+MERGE_STATE="${BRAIN}/hub/merge-state.json"
 NOW=$(date +%s)
 
+# Three states, not one. This check used to collapse "the merge blew up",
+# "nothing has merged in days" and "two files are parked for you to look at"
+# into a single line reading `Loreport health FAIL: merge digest needs review`.
+# On 2026-08-10 two separate readers took that to mean the merge had failed and
+# reported the brain as stuck for three days; it had merged and published every
+# night. Failures and pending-review items are therefore kept in separate lists,
+# rendered separately, worded separately, and only failures set the exit code.
 failures=()
 fixes=()
+reviews=()
+review_fixes=()
 
+# BROKEN or STALE: something is not working. Sets the banner, the FAIL notice
+# and exit 1.
 note_failure() {
   failures+=("$1")
   fixes+=("$2")
+}
+
+# NEEDS REVIEW: the pipeline is healthy and nothing is blocked; a human owes it
+# a decision. Never sets the exit code, and its wording must say so — a reader
+# who sees this must not be able to mistake it for a merge that failed.
+note_review() {
+  reviews+=("$1")
+  review_fixes+=("$2")
 }
 
 tg_notify() {
@@ -75,11 +104,21 @@ tg_notify() {
 }
 
 index_item_count() {
-  grep -c '\[\[[^]]\+\]\]' "$BRAIN/INDEX.md" 2>/dev/null || echo 0
+  # `grep -c` prints 0 AND exits 1 when it matches nothing, so the old
+  # `|| echo 0` emitted the string "0\n0" on an empty INDEX — which then blew up
+  # the baseline writer with a ValueError and left check 5 crashed but silent
+  # (this script runs without -e). Capture, then substitute only on failure.
+  local n
+  n=$(grep -c '\[\[[^]]\+\]\]' "$BRAIN/INDEX.md" 2>/dev/null) || n=0
+  printf '%s' "${n:-0}"
 }
 
 json_get() {
-  python3 - "$HEALTH_STATE" "$1" <<'PY'
+  json_get_from "$HEALTH_STATE" "$1"
+}
+
+json_get_from() {
+  python3 - "$1" "$2" <<'PY'
 import json, sys
 path, key = sys.argv[1], sys.argv[2]
 try:
@@ -295,15 +334,58 @@ while IFS=$'\t' read -r target fix; do
   note_failure "$target" "$fix"
 done <<< "$provider_out"
 
-# --- 6. Merge hygiene --------------------------------------------------------
+# --- 6. Merge liveness (STALE) -----------------------------------------------
+# Nothing used to assert that the merge had actually run. Check #1 looks at the
+# age of main's last commit, which only moves when content changes — a brain
+# where the merge died on a quiet week still looks fine — and check #6b below
+# grades the newest hub/digest-*.md without ever asking how old it is, so a
+# merge that stopped a month ago kept being graded on its last good day.
+# hub/merge-state.json is written by brain_merge.py on exactly one path: a run
+# that completed. Its age is therefore the honest liveness signal.
+merge_last_success=$(json_get_from "$MERGE_STATE" "last_success_epoch")
+if [ ! -f "$MERGE_STATE" ] || [ -z "$merge_last_success" ]; then
+  # Distinct from "old": nothing has ever recorded a completed merge here. On a
+  # brain that just took this engine version it clears on the first nightly run.
+  note_failure "merge liveness: no completed merge on record (hub/merge-state.json absent or unreadable)" \
+    "run the merge once — python3 hub/brain_merge.py --brain-dir $BRAIN — then re-check"
+else
+  merge_age_h=$(( (NOW - merge_last_success) / 3600 ))
+  if [ "$merge_age_h" -ge "$MERGE_MAX_AGE_HOURS" ]; then
+    note_failure "merge liveness: last completed merge ${merge_age_h}h ago, budget ${MERGE_MAX_AGE_HOURS}h — the nightly merge is not running" \
+      "journalctl --user -u loreport-brain-sync.service -n 80; the merge aborts do not stamp hub/merge-state.json"
+  fi
+fi
+
+# --- 6b. Merge outcome: what the last completed merge left behind -------------
+# Three independent conditions, deliberately no longer an elif chain: they can
+# hold at once, they belong to different subsystems, and reporting only the
+# first hid the other two. Each message names its subsystem and what actually
+# happened, so none of them can be read as "the merge failed" unless it did.
 latest_digest=$(ls -1 "$BRAIN"/hub/digest-*.md 2>/dev/null | sort | tail -1 || true)
 if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
-  if grep -qiE 'quarantine items pending review: [1-9]' "$latest_digest"; then
-    note_failure "merge digest needs review" "open $latest_digest and resolve quarantine items"
-  elif grep -qiE 'secret-scrub: FAIL' "$latest_digest"; then
-    note_failure "merge digest needs review" "secret-scrub failed — inspect $latest_digest"
-  elif ! grep -qi 'PROFILE conflicts (human review required): none' "$latest_digest"; then
-    note_failure "merge digest needs review" "PROFILE conflict in $latest_digest"
+  # BROKEN. A fail-closed scrub hit rolls main back and merges nothing; the
+  # packet providers are served is whatever last succeeded.
+  if grep -qiE 'secret-scrub: (FAIL|ABORT)' "$latest_digest"; then
+    note_failure "secret-scrub: merge ABORTED — a shared item, PROFILE or skill contains a secret, so nothing merged" \
+      "inspect $latest_digest, remove or mark the item visibility: local, then re-run the merge"
+  fi
+
+  # NEEDS REVIEW. Quarantined blocks are parked copies; main kept its own
+  # version and the merge went on to publish. Nothing is blocked by them, and
+  # the count never falls on its own, so this must not be a failure — it would
+  # be a permanently-red check, which is a check nobody reads.
+  q_line=$(grep -iE 'quarantine items pending review: [0-9]+' "$latest_digest" | tail -1 || true)
+  q_count=$(printf '%s' "${q_line:-}" | grep -oE '[0-9]+$' || true)
+  if [ -n "${q_count:-}" ] && [ "$q_count" -gt 0 ]; then
+    note_review "merge quarantine: ${q_count} block(s) awaiting your decision — the merge and publish completed normally" \
+      "review hub/quarantine/ (listed in $latest_digest); delete or re-file each block"
+  fi
+
+  # NEEDS REVIEW. An identity conflict is resolved --ours and flagged; the merge
+  # completed either way.
+  if ! grep -qi 'PROFILE conflicts (human review required): none' "$latest_digest"; then
+    note_review "PROFILE conflict: two providers edited identity, main's version was kept and flagged — the merge and publish completed normally" \
+      "compare the flagged files named in $latest_digest and pick the correct PROFILE.md content"
   fi
 fi
 
@@ -340,56 +422,134 @@ PY
   done <<< "$synth_out"
 fi
 
-# --- 7. ChatGPT surface staleness (monthly nag max) ----------------------------
+# --- 7. ChatGPT surface staleness ---------------------------------------------
+# Review, not failure: the pipeline produced a correct new surface, and the only
+# outstanding action is a human pasting it, since ChatGPT has no write path.
+# Grading it as a failure made every genuinely broken run arrive in a mailbox
+# that was already red.
+#
+# The old 30-day nag throttle is GONE, and its removal is load-bearing. It gated
+# whether the item entered the list at all, so it gated the state as well: week 0
+# reported `review`, week 1 the throttle suppressed the item, the state fell back
+# to `ok`, the banner was deleted — and once recovery announcements existed, the
+# check would cheerfully report "all checks green" while the surface was still
+# unpasted, on a 30-day loop. Throttling belongs to the state-change gate below,
+# which is one throttle; two stacked ones oscillate.
 chatgpt_surface="$BRAIN/hub/surface-chatgpt.md"
 pasted_hash=$(json_get "chatgpt_pasted.region_hash")
-pasted_epoch=$(json_get "chatgpt_pasted.recorded_epoch")
-last_nag=$(json_get "chatgpt_last_nag.recorded_epoch")
 if [ -f "$chatgpt_surface" ] && [ -n "$pasted_hash" ]; then
   current_hash=$(region_hash_file "$chatgpt_surface" block)
   if [ "$current_hash" != "$pasted_hash" ]; then
-    if [ -z "$last_nag" ] || [ $((NOW - last_nag)) -ge $((30 * 86400)) ]; then
-      note_failure "ChatGPT surface changed since last paste" "re-paste hub/surface-chatgpt.md into ChatGPT, then run: loreport-health --pasted --config $CONFIG"
-      python3 - "$HEALTH_STATE" "$NOW" <<'PY'
-import json, os, sys
-state_path, now = sys.argv[1], int(sys.argv[2])
+    note_review "ChatGPT surface: regenerated since your last paste — nothing is broken, ChatGPT is just serving older content" \
+      "re-paste hub/surface-chatgpt.md into ChatGPT, then run: loreport-health --pasted --config $CONFIG"
+  fi
+fi
+
+# --- outcome -----------------------------------------------------------------
+# One of exactly three states. `review` is a healthy state: it exits 0, it keeps
+# the weekly heartbeat alive, and its notice never contains the word FAIL.
+if [ "${#failures[@]}" -gt 0 ]; then
+  state="failing"
+elif [ "${#reviews[@]}" -gt 0 ]; then
+  state="review"
+else
+  state="ok"
+fi
+
+if [ "$state" != "ok" ]; then
+  mkdir -p "$(dirname "$BANNER")"
+  {
+    echo "=== Loreport health ($(date '+%Y-%m-%d %H:%M %Z')) ==="
+    echo
+    if [ "${#failures[@]}" -gt 0 ]; then
+      echo "FAILING — these are broken or stale:"
+      echo
+      for i in "${!failures[@]}"; do
+        echo "✗ ${failures[$i]}"
+        echo "  fix: ${fixes[$i]}"
+        echo
+      done
+    fi
+    if [ "${#reviews[@]}" -gt 0 ]; then
+      echo "NEEDS REVIEW — the pipeline is healthy and nothing is blocked;"
+      echo "these are waiting on a decision from you:"
+      echo
+      for i in "${!reviews[@]}"; do
+        echo "⧗ ${reviews[$i]}"
+        echo "  next: ${review_fixes[$i]}"
+        echo
+      done
+    fi
+    echo "When nothing is failing or pending, this file is removed automatically."
+  } >"$BANNER"
+else
+  rm -f "$BANNER"
+fi
+
+# Alert on state CHANGE, not on every run. A weekly timer that re-sends the same
+# line indefinitely trains the reader to ignore it, and a quarantine count never
+# falls without a human, so an unchanged "needs review" would repeat forever.
+# The signature covers the message set as well as the state, so a NEW failure
+# arriving while an old one is unresolved still speaks up.
+liveness_changed=$(python3 - "$HEALTH_STATE" "$state" "$NOW" \
+  ${failures[@]+"${failures[@]}"} ${reviews[@]+"${reviews[@]}"} <<'PY'
+import hashlib, json, os, sys
+
+state_path, state, now = sys.argv[1], sys.argv[2], int(sys.argv[3])
+messages = sys.argv[4:]
+signature = "sha256:" + hashlib.sha256("\n".join(messages).encode("utf-8")).hexdigest()
 try:
     with open(state_path, encoding="utf-8") as fh:
         data = json.load(fh)
 except (OSError, json.JSONDecodeError):
     data = {}
-data["chatgpt_last_nag"] = {"recorded_epoch": now}
-with open(state_path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2, sort_keys=True)
-    fh.write("\n")
+previous = data.get("liveness") or {}
+changed = previous.get("state") != state or previous.get("signature") != signature
+# "changed" alone would make a brand-new brain's FIRST run announce a recovery
+# from a state it was never in. Recovery is only meaningful against a recorded
+# prior state, so it is reported separately from mere change.
+recovered = changed and state == "ok" and previous.get("state") in ("failing", "review")
+print("recovered" if recovered else ("changed" if changed else "same"))
+if changed:
+    data["liveness"] = {"state": state, "signature": signature, "reported_epoch": now}
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
 PY
-    fi
-  fi
-fi
+)
 
-# --- outcome -----------------------------------------------------------------
-if [ "${#failures[@]}" -gt 0 ]; then
-  mkdir -p "$(dirname "$BANNER")"
-  {
-    echo "=== Loreport health ($(date '+%Y-%m-%d %H:%M %Z')) ==="
-    echo
-    for i in "${!failures[@]}"; do
-      echo "✗ ${failures[$i]}"
-      echo "  fix: ${fixes[$i]}"
-      echo
-    done
-    echo "When healthy, this file is removed automatically."
-  } >"$BANNER"
-  msg="🧠 Loreport health FAIL: ${failures[0]}"
-  if [ "${#failures[@]}" -gt 1 ]; then
-    msg="$msg (+$(( ${#failures[@]} - 1 )) more)"
-  fi
-  tg_notify "$msg"
+case "${liveness_changed}:${state}" in
+  changed:failing)
+    msg="🧠 Loreport health FAIL: ${failures[0]}"
+    [ "${#failures[@]}" -gt 1 ] && msg="$msg (+$(( ${#failures[@]} - 1 )) more)"
+    tg_notify "$msg"
+    ;;
+  changed:review)
+    # Deliberately not "FAIL", and it says what still works. This is the line
+    # that got misread; it now has to be read correctly.
+    msg="🧠 Loreport OK — merge and publish are running; ${#reviews[@]} item(s) awaiting your review: ${reviews[0]}"
+    tg_notify "$msg" --silent
+    ;;
+  recovered:*)
+    # Only after a RECORDED failing/review state — never on a first run, where
+    # there is nothing to have recovered from. Closing the loop matters: the
+    # failure notice was pushed, so without this the reader never learns it
+    # cleared and keeps treating the brain as broken.
+    tg_notify "🧠 Loreport health recovered — all checks green" --silent
+    ;;
+esac
+
+if [ "$state" = "failing" ]; then
   exit 1
 fi
 
-rm -f "$BANNER"
-
+# Below here the pipeline is alive — `ok` and `review` both qualify. The
+# heartbeat must NOT be gated on an empty review list: a quarantine count only
+# falls when a human clears it, so one un-triaged block would otherwise silence
+# the weekly "brain OK" ping forever and turn a review item into a liveness
+# blackout — the exact failure this sprint exists to remove.
+#
 # 6 days, not 7, against a weekly timer. Two consecutive Monday 09:05 firings are
 # exactly 7.00 days apart, so a 7-day threshold loses a slot to any manual run,
 # Persistent= catch-up, or DST shift — and a silently-skipped heartbeat reads as

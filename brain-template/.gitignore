@@ -10,3 +10,11 @@ hub/surface-chatgpt.md
 hub/surface-claude-ai.md
 hub/health-state.json
 hub/synthesis-report.json
+
+# Local merge artifacts, rewritten every nightly run. merge-state.json is the
+# merge's liveness stamp and digest-*.md its per-day report; both are derived
+# from a run, not brain content, and tracking either would leave the tree dirty
+# every night and halt loreport-sync's post-merge guard. The engine's own
+# .gitignore does not reach here — a brain gets this file once, at init.
+hub/merge-state.json
+hub/digest-*.md
