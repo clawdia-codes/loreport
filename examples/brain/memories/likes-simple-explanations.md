@@ -2,6 +2,7 @@
 name: likes-simple-explanations
 description: likes simple, jargon-free explanations
 type: feedback
+visibility: shared
 ---
 When something gets explained to me, I get the most out of a short, concrete walkthrough
 — plain words, small steps, no dense terminology up front.

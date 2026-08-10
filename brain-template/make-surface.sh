@@ -52,6 +52,75 @@ item_file() {
   return 1
 }
 
+# Is this item file allowed into a surface? FAIL CLOSED: yes ONLY on an explicit
+# `visibility: shared` inside the frontmatter block. An unmarked item, a malformed
+# value, a quoted or comment-trailed value, or a file with no frontmatter at all
+# all answer no and are withheld.
+#
+# This used to be the inverse test -- `grep -qiE '^visibility:[[:space:]]*local[[:space:]]*$'`,
+# include unless that exact line appeared -- which meant surface.md carried items the
+# published packet withheld, because hub/*.py has always parsed this fail-closed.
+# surface.md is pasted into a cloud assistant, so the looser rule was on the wrong side.
+#
+# Skills are the one exception, and not a new one: a skill is a package, not an item,
+# and carries no `visibility:` field at all (docs/format-spec.md section 1).
+#
+# That exception is a DEFAULT, not an override. It supplies the answer for a key skills
+# do not carry; it may not overrule one a human wrote. Unconditional, `visibility: local`
+# on a SKILL.md was a privacy control that reported success and still pasted the skill
+# into a cloud assistant. Same shape as the resolvers in hub/snapshot_publish.py,
+# hub/mcp_server.py, hub/project.py and hub/report_build.py.
+item_has_explicit_visibility() {
+  awk '
+    NR == 1 {
+      sub(/^\357\273\277/, "")                     # strip a UTF-8 BOM
+      if ($0 !~ /^---[ \t]*$/) exit 1                # no frontmatter block -> no explicit key
+      next
+    }
+    /^---[ \t]*$/ { exit found ? 0 : 1 }
+    {
+      i = index($0, ":")
+      if (i == 0) next
+      k = substr($0, 1, i - 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", k)
+      if (tolower(k) == "visibility") found = 1
+    }
+    # NOTE: a bare `exit 0` above would NOT work -- awk`s exit runs END, and an
+    # unconditional `exit 1` there would overrule it. Same reason item_is_shared
+    # computes the identical expression in both places.
+    END { exit found ? 0 : 1 }                       # unterminated frontmatter -> same rule
+  ' "$1"
+}
+
+item_is_shared() {
+  case "$1" in
+    skills/*) item_has_explicit_visibility "$1" || return 0 ;;
+  esac
+  awk '
+    NR == 1 {
+      sub(/^\357\273\277/, "")                     # strip a UTF-8 BOM
+      if ($0 !~ /^---[ \t]*$/) exit 1                # no frontmatter block -> withhold
+      next
+    }
+    /^---[ \t]*$/ { exit (seen == "shared") ? 0 : 1 }
+    {
+      i = index($0, ":")
+      if (i == 0) next
+      k = substr($0, 1, i - 1)
+      v = substr($0, i + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", k)
+      if (tolower(k) != "visibility") next
+      j = index(v, "#")
+      if (j > 0) v = substr(v, 1, j - 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      gsub(/^["\047]|["\047]$/, "", v)
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      seen = tolower(v)
+    }
+    END { exit (seen == "shared") ? 0 : 1 }           # unterminated frontmatter -> same rule
+  ' "$1"
+}
+
 # THE ARCHIVE SEAM, again — a paste host cannot lazy-fetch a cold shelf any more
 # than a cloud provider can. surface.md is the whole catalog such a host will ever
 # see, so an archived SHARED item must appear here exactly like it appears in the
@@ -73,10 +142,10 @@ index_out=$(
       echo "make-surface: WARNING no file for [[$name]] — keeping its index line" >&2
       printf '%s\n' "$line"; continue
     fi
-    if grep -qiE '^visibility:[[:space:]]*local[[:space:]]*$' "$file"; then
-      dropped=$((dropped + 1))
-    else
+    if item_is_shared "$file"; then
       printf '%s\n' "$line"
+    else
+      dropped=$((dropped + 1))
     fi
   done < <(cat "${indexes[@]}")
   printf '%s' "__DROPPED__$dropped"            # subshell can't export; smuggle the count

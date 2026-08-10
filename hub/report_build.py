@@ -116,14 +116,14 @@ def parse_frontmatter(text):
 def visibility_from_text(text):
     """Return "shared" or "private" for an item's raw text on `main`.
 
-    Ported from hub/snapshot_publish.py's `_visibility_from_text` (same
+    Ported from hub/brain_merge.py's `_visibility_from_text` (same
     fail-closed rule, duplicated here on purpose per the no-cross-import
-    convention). FAIL CLOSED: anything we cannot parse as a well-formed
-    frontmatter block is treated as private. Within a well-formed block, a
-    missing `visibility:` key defaults to shared (the documented frontmatter
-    contract); an explicit non-"shared" value (e.g. "local") is private. A
-    false "private" merely hides an item from this report's shareable count
-    — visible and recoverable. A false "shared" would be a leak.
+    convention; scripts/check-docs.sh §4b proves the two agree case-by-case).
+    FAIL CLOSED: an item is "shared" ONLY on an explicit `visibility: shared`.
+    A missing `visibility:` key, a malformed value, or no well-formed
+    frontmatter block at all is private. A false "private" merely hides an
+    item from this report's shareable count — visible and recoverable. A
+    false "shared" would be a leak.
     """
     if text is None:
         return "private"
@@ -140,8 +140,6 @@ def visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "private"
 
 
@@ -314,7 +312,24 @@ def load_entries(brain_dir):
             "type": "skill",
             "source": fm.get("source", "—"),
             "captured": fm.get("captured", ""),
-            "shared": visibility_from_text(text) == "shared",
+            # NOT visibility_from_text(text). A skill is a package, not an item,
+            # and carries no `visibility:` field at all (docs/format-spec.md §1);
+            # the parser fails closed on an absent key, so a skill run through it
+            # bare reads "private" and every skill in the brain would get a
+            # private badge and drop out of the shareable count. Same carve-out,
+            # same reason, as snapshot_publish._item_visibility and
+            # mcp_server._visibility_of — it belongs at the resolver that knows
+            # the path is a skill, never in the parser.
+            #
+            # DEFAULT, not override: `visibility:` written on a SKILL.md is a
+            # human's explicit marking and wins. `"visibility" in fm` is this
+            # file's spelling of brain_merge._has_explicit_visibility (fm keys
+            # are lowercased by parse_frontmatter and the block must be
+            # well-formed for fm to be non-empty at all); the value is then
+            # graded by the same visibility_from_text §4b pins against the
+            # canonical parser, never by a fourth rule written here.
+            "shared": ("visibility" not in fm
+                       or visibility_from_text(text) == "shared"),
             "body": body,
         })
 

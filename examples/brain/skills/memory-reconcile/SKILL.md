@@ -51,8 +51,9 @@ The test: *will this still be useful in six months?* When a native fact fails th
 skip it silently — reconciliation is not an archive of everything, it is a repair of the
 durable record.
 
-Visibility on every add/update: default `shared`; mark `visibility: local` when the fact
-touches health, finances, credentials, or another person's private details. Never write
+Visibility on every add/update: always state it — `shared`, or `visibility: local` when
+the fact touches health, finances, credentials, or another person's private details. An
+item that omits the field is withheld from every provider, not shared. Never write
 secrets, credentials, or API keys to the brain at all.
 
 ## ⑤ Report

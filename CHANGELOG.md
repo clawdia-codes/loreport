@@ -2,7 +2,107 @@
 
 ## [1.14.0] — 2026-08-10
 
+### Changed — `visibility:` is now REQUIRED, and absent means `local`
+
+- **The last fail-open default in a fail-closed engine is closed.** `docs/format-spec.md`
+  §1 made `visibility:` optional and defaulted it to `shared` — cloud-published. The publish
+  filter itself was never wrong; it drops items marked `local`. The defect was that nothing
+  asserted an item had been classified *at all*, so an unmarked item was not merely
+  unfiltered — it was positively **published**. Three batches leaked that way on 2026-08-07.
+  An item is now `shared` only on an explicit `visibility: shared`; an absent field, an
+  unparseable value, and a file with no frontmatter all read `local`.
+
+- **Both halves shipped, because either alone is a half-measure.** The default protects;
+  a publish gate reports. `hub/snapshot_publish.py` now enumerates `memories/`/`knowledge/`
+  on `main` before building anything and refuses the whole republish while any item lacks
+  the field, naming each one to stdout and to `hub/quarantine/digest.md` — the same channel
+  and the same nonzero exit as the egress secret scrub, which `bin/loreport-sync` already
+  turns into an alert. A safe default that is *also* silent would only convert a leak into a
+  growing pile of items no provider can see.
+
+- **Every site where the default was materialised, not just the parser.** The five
+  `_visibility_from_text` copies had one rule; `hub/project.py`, `brain-template/make-surface.sh`
+  and `examples/brain/make-surface.sh` had a *different* one — "include unless an exact
+  `^visibility:\s*local\s*$` line appears". Those write `hub/surface-*.md`, the files whose
+  entire purpose is to be pasted into a cloud assistant. The two rules disagreed on every
+  input they could differ on: an unmarked item, `visibility: "local"` (quoted),
+  `visibility: local  # temp` (trailing comment), and a file with no frontmatter — the packet
+  withheld all of them while the surface published them, and `doctor.sh` used the *producer's*
+  rule and reported green. Flipping the parser alone would have left that path wide open. All
+  three implementations now answer identically; verified case-by-case across 14 inputs.
+
+- **Skills are exempt in FOUR places, and missing one of them is the easy mistake.**
+  `hub/report_build.py` walks `skills/` and badges each entry shared/private; it got the
+  parser flip but no carve-out in the first pass, which would have turned every skill in the
+  brain private and dropped it from the report's shareable count. Caught in review, before
+  merge, by grepping the call sites rather than trusting that the parser change was local —
+  the live-brain diff would NOT have caught it, because that diff compared parsers, not the
+  resolver paths through them.
+
+- **Skills are exempt, and that is not a new exception.** A skill is a package, not an item,
+  and carries no `visibility:` field at all (format-spec.md §1) — `hub/brain_merge.py`'s
+  secret scrub and `mcp_server`'s status counter have always said so. Under the old default
+  that fell out for free; now it must be stated, and it is stated at the **resolvers** that
+  know a path is a skill, never in the parser, which only ever sees text and must stay
+  byte-identical across its copies. Without it, flipping the default would have silently
+  deleted every skill from every packet and surface.
+
+- **The secret scrub was NOT loosened along the way.** `scan_brain_for_secrets` demotes a
+  secret hit from "abort the merge" to "a line in a digest" for `local` items. Routing that
+  through the flipped parser would have quietly extended the demotion to every unclassified
+  item — a directional loosening bought by a change meant to tighten. The demotion now
+  requires an *explicit* `visibility: local` (`_has_explicit_visibility`, drift-checked
+  against its second copy by `scripts/check-docs.sh` like the other duplicated primitives).
+
+- **Producer and checker both moved, or the change would not stick.** The `emit-grammar v1`
+  spec slice told assistants to "omit for shared (default)"; left alone, captures would keep
+  omitting the field and everything would silently become `local`. Updated in all four synced
+  copies, plus `prompts/bootstrap.md`, `prompts/onboard.md`, `README.md`,
+  `docs/visibility-design.md`, the `brain-template/` READMEs and the example skills.
+
+- **No existing item is reclassified.** Verified against the author's live 90-item brain by
+  running old and new rules over every INDEX item on both delivery paths: 0 changes to the
+  packet, 0 to the surface, 0 unclassified items found by the new gate. The five items in
+  `examples/brain/` were unmarked and are now explicitly `visibility: shared` — a shipped
+  example must demonstrate the required field, not the omission.
+- **The skills carve-out is a DEFAULT, not an override.** Skills carry no `visibility:`
+  field (format-spec.md §1), so the resolvers supply `shared` for them; written
+  unconditionally, that also overruled a `visibility:` a human had written. The result was a
+  privacy control that reported success and changed nothing:
+  `loreport_change_memory_settings(name="secret-skill", visibility="local")` returned
+  `{'status': 'changed', 'visibility': 'local'}` and really did commit the line to `main`,
+  while the skill stayed in `hub/published/packet.md`, stayed in `hub/surface-*.md`, was
+  still served in full at cloud trust, and was still reported back as `shared` by
+  `loreport_view_memory_settings`. An explicit `visibility:` now wins at every resolver:
+  `snapshot_publish._item_visibility`, `mcp_server._visibility_of`,
+  `project.filter_index_make_surface`, `report_build.load_entries`, and `item_is_shared` in
+  **both** copies of `make-surface.sh`. The shape is
+  `skills/… and not _has_explicit_visibility(…)`, never a blanket removal — the three skills
+  in the author's live brain carry no `visibility:` line, and a blanket removal would
+  withhold every one of them. `hub/mcp_server.py` gained a byte-identical copy of
+  `_has_explicit_visibility` and `scripts/check-docs.sh` §2c now drift-checks it too;
+  `hub/project.py` got the disk-reading sibling it needs (it reads the worktree, not `main`).
+- **`brain-template/make-surface.sh` is now covered by `scripts/check-docs.sh` §4.** It is
+  the copy `scripts/init-brain.sh` installs into every real brain, and it was the only
+  duplicated file in the repo with no checker of any kind — reverting its fail-closed rule
+  left every gate green. §4 now runs the same fixture and the same assertions against both
+  copies, including a new one: a SKILL a human marked `visibility: local` must not reach the
+  default surface.
+
 ### Added
+
+- `tests/test_visibility_failclosed.py` — 22 tests. Each names the single-line production
+  mutation it reddens, and all 23 mutations (21 Python, 2 shell) were run: every one turned
+  a test or a `check-docs.sh` assertion red. One of them pins the migration path this
+  changelog promises — `loreport_change_memory_settings` must be able to INSERT a
+  `visibility:` line on an item that has none, or a brain could be left permanently unable
+  to publish by the very gate meant to prompt a fix. Running them found a real defect in the suite —
+  the ownership test passed under the old default too, because `check_ownership` also denies
+  on a foreign `source:`; it now pins `source:` so only visibility can decide.
+- `scripts/check-docs.sh` §4 now asserts the *positive* as well: a `visibility: shared` item
+  and a skill must still reach the surface. The previous assertions ("no local item leaked")
+  were all satisfied by an empty surface — which a fail-closed filter makes a live failure
+  mode rather than a theoretical one.
 - **A leak check you can point at a brain — `scripts/loreport-audit --config <brain>/loreport.conf`.**
   On 2026-08-07 three batches of memories reached cloud-published surfaces and there was no
   runnable check that could have said so. Two separate reasons: `brain-template/doctor.sh`

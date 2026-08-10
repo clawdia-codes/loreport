@@ -6,6 +6,13 @@ hub/snapshot_publish.py — pinned-packet build + fail-closed egress scrub
 Single-file, Python-3-stdlib-only.
 
 Pipeline:
+  0. Classification gate — refuse to publish at all while any `memories/` or
+     `knowledge/` item on `main` carries no explicit `visibility:` key
+     (find_unclassified_items). The parser defaults an unmarked item to
+     `local`, so it is already withheld and nothing leaks; this gate exists so
+     that withholding is LOUD rather than a silently growing pile of items no
+     provider can see. Same failure channel and same nonzero exit as the
+     egress scrub below. Skills are exempt — they carry no `visibility:` at all.
   1. Build the packet — read from `main` (via `git show main:<path>`, NEVER
      the working tree, which the shared repo can have parked on any
      provider/* branch at any moment — mid-capture, or between merges):
@@ -26,7 +33,8 @@ Pipeline:
      is applied — it is never applied to bootstrap.md/PROFILE.md/INDEX.md
      themselves (none of which carry item frontmatter; running the parser on
      them would silently empty the packet, since it treats "no `---`
-     frontmatter block" as `local`).
+     frontmatter block" as `local`), nor to skills, which have no
+     `visibility:` field at all and are always shared (_item_visibility).
   2. Fail-closed egress scrub — the same secret-regex patterns as
      brain_merge.py, run over the assembled packet. Any hit blocks the ENTIRE
      republish (exit nonzero, alert to stdout, alert written to
@@ -127,9 +135,21 @@ INDEX_ITEM_RE = re.compile(r"\[\[([^\]]+)\]\]")
 def _visibility_from_text(text):
     """Return "shared" or "local" for an item's raw text.
 
-    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
-    as `local`. A false `local` merely hides an item from cloud providers --
-    visible and recoverable. A false `shared` leaks it -- neither.
+    FAIL CLOSED: an item is `shared` ONLY when its frontmatter carries an
+    explicit `visibility: shared`. Everything else -- an ABSENT `visibility:`
+    key, a malformed value, no frontmatter block at all -- is `local`. A false
+    `local` merely hides an item from cloud providers -- visible and
+    recoverable. A false `shared` leaks it -- neither.
+
+    The absent-key case used to return "shared" (the old `absent = shared`
+    frontmatter default). That was the only fail-OPEN default in the engine:
+    an item nobody had classified was not merely unfiltered, it was positively
+    published. See docs/format-spec.md 1 -- `visibility:` is now REQUIRED on
+    items, and this parser is what makes forgetting it safe instead of costly.
+
+    Skills are NOT items and never carry `visibility:` (format-spec.md 1).
+    They are always shared. That carve-out lives in the RESOLVERS that know a
+    path is a skill, never here -- this function only ever sees text.
     """
     if text.startswith("﻿"):
         text = text[1:]
@@ -144,9 +164,43 @@ def _visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "local"
+
+
+def _has_explicit_visibility(text):
+    """True when the item's frontmatter carries a `visibility:` key at all,
+    whatever its value.
+
+    `_visibility_from_text` deliberately collapses "absent", "malformed" and
+    "explicitly local" into one answer -- `local` -- because for EGRESS that
+    is the whole point: all three must be withheld. But "absent" and
+    "explicitly local" are not the same fact, and anything that RELAXES a
+    control on the strength of `local` has to tell them apart, or the new
+    default silently buys that relaxation for every unclassified item. Three
+    callers need the distinction: the publish gate in snapshot_publish.py
+    (which refuses while any item is unclassified), the secret-scrub split
+    in brain_merge.py (which may only demote a hit to a warning for an item a
+    human actually marked local), and the skills-are-shared carve-out in the
+    egress resolvers, which exists to supply a default for a key skills do not
+    carry and must not OVERRIDE one a human wrote.
+
+    Same line-scan and same fail-closed framing as `_visibility_from_text`: no
+    `---` frontmatter block means no explicit visibility.
+    """
+    if text is None:
+        return False
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, _value = line.partition(":")
+        if sep and key.strip().lower() == "visibility":
+            return True
+    return False
 
 
 def _candidate_item_relpaths(name):
@@ -163,15 +217,36 @@ def _item_visibility(brain_dir, name):
     memories/knowledge/skills path by that name exists on main) defaults to
     "shared" — never silently drop an INDEX line the filter can't positively
     identify as an item at all. Once a path DOES resolve, its visibility is
-    decided by _visibility_from_text, which fails CLOSED (treats anything it
-    can't parse as an explicit `shared` -- including no-frontmatter-at-all --
-    as `local`). This function is only ever called from filter_index_text on
-    resolved memories/knowledge/skills items; it is never applied to
+    decided by _visibility_from_text, which fails CLOSED (shared ONLY on an
+    explicit `visibility: shared`; an absent key, a malformed value and
+    no-frontmatter-at-all are all `local`).
+
+    SKILLS ARE THE ONE EXCEPTION, and it is not new policy — a skill is a
+    package, not an item, and carries no `visibility:` field at all
+    (docs/format-spec.md §1). hub/brain_merge.py's secret scrub and
+    mcp_server's status counter have always said the same thing. Before the
+    absent-key default was flipped to `local` this fell out for free; now it
+    has to be stated, and it is stated HERE, at the resolver that knows the
+    path is a skill, rather than in the parser (which only ever sees text and
+    must stay byte-identical across its four copies).
+
+    The carve-out is DEFEASIBLE, and that is load-bearing. It exists to supply a
+    default for the key skills do not carry — it may not OVERRIDE the key when a
+    human has written one. Unconditional, it made a `visibility: local` on a
+    SKILL.md a control that reports success and changes nothing: the tool wrote
+    the line, and the skill stayed in the packet, stayed in the paste surfaces,
+    was still served at cloud trust, and was still reported back as `shared`.
+    So: skills default to shared, but an EXPLICIT `visibility:` always wins.
+
+    This function is only ever called from filter_index_text on resolved
+    memories/knowledge/skills items; it is never applied to
     bootstrap.md/PROFILE.md/INDEX.md, which carry no item frontmatter and
     would otherwise be misclassified as local by the fail-closed parser."""
     for relpath in _candidate_item_relpaths(name):
         text = read_from_main(brain_dir, relpath)
         if text is not None:
+            if relpath.startswith("skills/") and not _has_explicit_visibility(text):
+                return "shared"
             return _visibility_from_text(text)
     return "shared"
 
@@ -241,6 +316,70 @@ def build_packet_text(brain_dir):
     footer = f"<!-- loreport packet: main@{main_sha} {today} -->\n"
 
     return bootstrap + profile + index + archive + footer
+
+
+def find_unclassified_items(brain_dir):
+    """Return the sorted relpaths of every `memories/`/`knowledge/` item on
+    `main` that carries no explicit `visibility:` key.
+
+    THE POINT OF THIS FUNCTION. Defaulting an unclassified item to `local`
+    (see `_visibility_from_text`) makes forgetting the field safe, but it also
+    makes forgetting it INVISIBLE: the item is quietly withheld from every
+    provider, forever, and nothing ever says so. Silence is how a fail-open
+    default went unnoticed in the first place; a fail-CLOSED default that is
+    equally silent just moves the pile rather than draining it. So the default
+    protects, and this gate reports.
+
+    Skills are excluded: a skill is a package, not an item, and has no
+    `visibility:` field to omit (docs/format-spec.md §1).
+
+    Enumerated from `main` via `git ls-tree`, never a working-tree listing —
+    the shared repo can be parked on any provider/* branch at any moment, and
+    the packet this gates is built from `main` too, so the gate must judge
+    exactly the tree that gets published."""
+    r = _run_git(brain_dir, "ls-tree", "-r", "--name-only", "main")
+    if r.returncode != 0:
+        raise MainUnresolvable(
+            "cannot enumerate `main` to check item classification — "
+            "refusing to publish from an unknown tree"
+        )
+    unclassified = []
+    for relpath in r.stdout.splitlines():
+        if not relpath.endswith(".md"):
+            continue
+        if not (relpath.startswith("memories/") or relpath.startswith("knowledge/")):
+            continue
+        text = read_from_main(brain_dir, relpath)
+        if text is None:
+            continue  # raced with a concurrent write between ls-tree and show
+        if not _has_explicit_visibility(text):
+            unclassified.append(relpath)
+    return sorted(unclassified)
+
+
+def write_unclassified_alert(brain_dir, relpaths):
+    """Log a blocked publish to the same quarantine digest the egress scrub
+    uses. Deliberately the SAME channel and the same exit code: bin/loreport-sync
+    already treats a nonzero snapshot_publish as "publish failed" and raises an
+    alert (stderr + $LOREPORT_NOTIFY), so this reuses a signal path that is known
+    to reach a human instead of inventing a second one nobody watches."""
+    digest_path = os.path.join(brain_dir, "hub", "quarantine", "digest.md")
+    os.makedirs(os.path.dirname(digest_path), exist_ok=True)
+    is_new = not os.path.isfile(digest_path)
+    from datetime import datetime
+    ts = datetime.now().isoformat(timespec="seconds")
+    with open(digest_path, "a", encoding="utf-8") as fh:
+        if is_new:
+            fh.write("# Quarantine digest\n\n"
+                     "Every block that failed the inbox_ingest.py scan-before-commit\n"
+                     "gate is logged here — nothing is silently dropped.\n\n")
+        fh.write(f"## {ts} — PUBLISH BLOCKED (unclassified items)\n")
+        fh.write(f"- reason: {len(relpaths)} item(s) carry no explicit `visibility:` "
+                 "and are being withheld from every provider:\n")
+        for relpath in relpaths:
+            fh.write(f"  - {relpath}\n")
+        fh.write("- action: add `visibility: shared` or `visibility: local` to each, "
+                 "commit to main, then re-run snapshot_publish.py\n\n")
 
 
 def write_alert(brain_dir, hit):
@@ -327,6 +466,27 @@ def main():
     if args.test_scrub:
         run_test_scrub(brain_dir)
         return
+
+    # Classification gate — runs BEFORE the packet is built, so an unclassified
+    # item is reported as itself rather than as a mysteriously shorter INDEX.
+    # Blocks the whole republish, exactly as a secret hit does: the last good
+    # packet.md stays on disk, so providers keep working from a slightly stale
+    # index while a human classifies. Withholding is the safe half; refusing to
+    # go on quietly is the half that keeps the pile from growing.
+    try:
+        unclassified = find_unclassified_items(brain_dir)
+    except MainUnresolvable as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    if unclassified:
+        print(f"PUBLISH BLOCKED: {len(unclassified)} item(s) carry no explicit "
+              "`visibility:` and are being withheld from every provider:")
+        for relpath in unclassified:
+            print(f"  {relpath}")
+        print("Add `visibility: shared` or `visibility: local` to each, commit to "
+              "main, then re-run.")
+        write_unclassified_alert(brain_dir, unclassified)
+        sys.exit(1)
 
     try:
         packet = build_packet_text(brain_dir)

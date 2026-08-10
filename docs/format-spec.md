@@ -14,7 +14,7 @@ description: <one line>       # becomes the INDEX line hook; feeds provider retr
 type: user | feedback | project | reference | knowledge | person | decision
 source: <host>               # provenance — assistant/app the capture came from (claude, chatgpt, openclaw, …)
 captured: <YYYY-MM-DD>       # provenance — capture date
-visibility: shared | local   # optional — see below; absent = shared
+visibility: shared | local   # REQUIRED — see below; absent = local, and publish refuses
 lifespan: permanent | active | temporary   # optional — absent = permanent
 expires: <YYYY-MM-DD>        # optional — the archival trigger; only on temporary
 domain: work | personal | both             # optional — which side of life this belongs to
@@ -36,10 +36,23 @@ domain: work | personal | both             # optional — which side of life thi
   writing one brain. `source` is stamped from the pinned **Host** value and matches the
   writing provider's Tier-2 branch (`provider/<source>`). Hand-authored / seed items may
   omit both; consolidation preserves them.
-- **`visibility`** (optional) is `shared` or `local`. **`shared`** (the default when the
-  field is absent) participates in the published packet and is readable by all connected
+- **`visibility`** is `shared` or `local`, and it is **required on every item**.
+  **`shared`** participates in the published packet and is readable by all connected
   providers. **`local`** never leaves this machine — excluded from publish, and cloud
   provider reads refuse it.
+  An item is treated as `shared` **only** on an explicit `visibility: shared`. Every other
+  state — the field absent, a value that doesn't parse, no frontmatter block at all — is
+  `local`. Two consequences, and they are the point:
+  - **Forgetting the field withholds; it never publishes.** Until 2026-08 the field was
+    optional and absent meant `shared`, so an item nobody had classified was not merely
+    unfiltered — it was positively published. That was the one fail-open default in an
+    otherwise fail-closed engine, and it leaked three batches on 2026-08-07.
+  - **Forgetting the field is loud.** `hub/snapshot_publish.py` refuses to publish *at all*
+    while any `memories/`/`knowledge/` item lacks the field, naming each one. A safe default
+    that is also silent would just turn a leak into a growing pile of items no provider can
+    see; the default protects, the gate reports.
+  Skills are exempt because they are not items: a skill package carries `meta.yaml`, not
+  item frontmatter (below), has no `visibility:` field to omit, and is always shared.
 - **`lifespan`** (optional) is `permanent` | `active` | `temporary`; absent = `permanent`.
   `permanent` — identity, long-term goals, durable knowledge, architecture, decisions.
   `active` — current projects and present responsibilities. `temporary` — travel,
@@ -207,7 +220,7 @@ description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
-visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+visibility: shared | local    # REQUIRED — always state it; omitting it withholds the item AND blocks publish
 lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
 expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
 domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility

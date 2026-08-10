@@ -277,9 +277,21 @@ def _is_real_date(value):
 def _visibility_from_text(text):
     """Return "shared" or "local" for an item's raw text.
 
-    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
-    as `local`. A false `local` merely hides an item from cloud providers --
-    visible and recoverable. A false `shared` leaks it -- neither.
+    FAIL CLOSED: an item is `shared` ONLY when its frontmatter carries an
+    explicit `visibility: shared`. Everything else -- an ABSENT `visibility:`
+    key, a malformed value, no frontmatter block at all -- is `local`. A false
+    `local` merely hides an item from cloud providers -- visible and
+    recoverable. A false `shared` leaks it -- neither.
+
+    The absent-key case used to return "shared" (the old `absent = shared`
+    frontmatter default). That was the only fail-OPEN default in the engine:
+    an item nobody had classified was not merely unfiltered, it was positively
+    published. See docs/format-spec.md 1 -- `visibility:` is now REQUIRED on
+    items, and this parser is what makes forgetting it safe instead of costly.
+
+    Skills are NOT items and never carry `visibility:` (format-spec.md 1).
+    They are always shared. That carve-out lives in the RESOLVERS that know a
+    path is a skill, never here -- this function only ever sees text.
     """
     if text.startswith("﻿"):
         text = text[1:]
@@ -294,8 +306,6 @@ def _visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "local"
 
 
@@ -371,7 +381,10 @@ def check_ownership(brain_dir, provider, trust, rel_path):
       is decided via the same fail-closed parser as the read path
       (_visibility_from_text) so a hand-edited/malformed `visibility: local`
       field can't be used to bypass this check the way it could bypass a
-      naive `== "local"` string compare.
+      naive `== "local"` string compare. Since that parser now reads an
+      ABSENT `visibility:` as `local` too, an unclassified item on main is
+      update-protected as well: a cloud provider's write to one is refused
+      and quarantined with this reason attached, rather than applied.
     """
     if trust == "local":
         return None

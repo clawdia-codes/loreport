@@ -110,27 +110,107 @@ def _item_relpaths(name):
 
 
 def _item_file_on_disk(brain_dir, name):
+    """Return (relpath, abspath) for the first candidate that exists, else
+    (None, None). The relpath comes back too because the caller has to know
+    whether it resolved a SKILL — skills carry no `visibility:` at all."""
     for relpath in _item_relpaths(name):
         abspath = os.path.join(brain_dir, relpath)
         if os.path.isfile(abspath):
-            return abspath
-    return None
+            return relpath, abspath
+    return None, None
 
 
-def _is_local_visibility_file(path):
-    """True when the item file carries an explicit `visibility: local` line."""
+def _is_shared_visibility_file(path):
+    """True ONLY when the item file's frontmatter carries an explicit
+    `visibility: shared`.
+
+    This projector writes hub/surface-*.md — files whose entire purpose is to
+    be pasted into a cloud assistant. It therefore has to ask the same
+    question hub/snapshot_publish.py asks and get the same answer.
+
+    It used to ask the INVERSE question ("does an exact
+    `^visibility:\\s*local\\s*$` line appear anywhere?") and include the item
+    whenever the answer was no. That is the same fail-OPEN default reached by
+    a different route, and it disagreed with the fail-closed
+    `_visibility_from_text` on every input the two could differ on: an
+    UNMARKED item, `visibility: "local"` (quoted), `visibility: local  # temp`
+    (trailing comment), and a file with no frontmatter block at all.
+    snapshot_publish withheld all of those from the packet while this function
+    put them in the surface — and brain-template/doctor.sh, the only thing
+    that audits the surfaces for leaks, used the producer's rule and so
+    reported green.
+
+    Frontmatter only: a `visibility: shared` line in prose below the closing
+    `---` grants nothing."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                if re.match(r"^visibility:\s*local\s*$", line, re.IGNORECASE):
-                    return True
+            text = fh.read()
     except OSError:
-        pass
+        return False
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    seen = None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if not sep or key.strip().lower() != "visibility":
+            continue
+        seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
+    return seen == "shared"
+
+
+def _has_explicit_visibility_file(path):
+    """True when the item file's frontmatter carries a `visibility:` key at
+    all, whatever its value.
+
+    The disk-reading sibling of hub/brain_merge.py's `_has_explicit_visibility`
+    (this projector reads the working tree, not `main`; see
+    `_item_file_on_disk`). Same job: `_is_shared_visibility_file` collapses
+    "absent" and "explicitly local" into one answer, and the skills carve-out
+    below RELAXES a control on the strength of that answer, so it has to tell
+    the two apart or it buys the relaxation for a key a human actually wrote.
+
+    Frontmatter only, and unreadable means "no explicit key" — the caller then
+    falls through to `_is_shared_visibility_file`, which is also False on an
+    unreadable file, so the item is withheld either way."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, _value = line.partition(":")
+        if sep and key.strip().lower() == "visibility":
+            return True
     return False
 
 
 def filter_index_make_surface(brain_dir, index_text, include_local):
-    """Drop INDEX lines for `visibility: local` items unless include_local."""
+    """Keep only INDEX lines whose item is explicitly `visibility: shared`,
+    unless include_local.
+
+    Two carve-outs, both matching hub/snapshot_publish.py's filter_index_text:
+      - a SKILL is a package, not an item, and carries no `visibility:`
+        (docs/format-spec.md §1) — kept UNLESS it carries an explicit
+        `visibility:` anyway, in which case the human's marking wins. The
+        carve-out supplies a default for an absent key; it may not override a
+        present one, or `visibility: local` on a SKILL.md becomes a privacy
+        control that reports success and still pastes the skill into a cloud
+        assistant;
+      - an INDEX line whose [[name]] resolves to no file on disk is kept, so
+        the filter never silently drops a line it cannot positively identify
+        as an item at all."""
     if include_local:
         return index_text, 0
 
@@ -141,14 +221,16 @@ def filter_index_make_surface(brain_dir, index_text, include_local):
         if not m:
             out_lines.append(line)
             continue
-        item_path = _item_file_on_disk(brain_dir, m.group(1))
+        relpath, item_path = _item_file_on_disk(brain_dir, m.group(1))
         if item_path is None:
             out_lines.append(line)
             continue
-        if _is_local_visibility_file(item_path):
-            dropped += 1
-        else:
+        skill_default = (relpath.startswith("skills/")
+                         and not _has_explicit_visibility_file(item_path))
+        if skill_default or _is_shared_visibility_file(item_path):
             out_lines.append(line)
+        else:
+            dropped += 1
     return "".join(out_lines), dropped
 
 

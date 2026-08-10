@@ -16,7 +16,7 @@ description: <one line — this becomes the index line>
 type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
-visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+visibility: shared | local    # REQUIRED — always state it; omitting it withholds the item AND blocks publish
 lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
 expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
 domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
@@ -44,9 +44,9 @@ local = stays on this machine only.** Ask me which topics I want **always local*
 these defaults and let me add/remove: **health, finances, relationships,
 credentials/security, employer.** Keep my answer as a small rule set for the rest of this
 session: any item that matches one of these topics gets `visibility: local` in its
-frontmatter; everything else defaults to `visibility: shared` (the field may simply be
-omitted for shared items). Use this rule set in Phase 1's seed memories and Phase 2's
-import alike.
+frontmatter; everything else gets `visibility: shared`. State the field on every item —
+it is required, and an item that omits it is withheld from every provider rather than
+shared. Use this rule set in Phase 1's seed memories and Phase 2's import alike.
 
 ## Phase 1 — Interview
 Ask me **one question at a time**, at most eight in total, covering: who I am (role,

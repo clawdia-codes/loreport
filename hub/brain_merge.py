@@ -160,9 +160,21 @@ def read_file(path):
 def _visibility_from_text(text):
     """Return "shared" or "local" for an item's raw text.
 
-    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
-    as `local`. A false `local` merely hides an item from cloud providers --
-    visible and recoverable. A false `shared` leaks it -- neither.
+    FAIL CLOSED: an item is `shared` ONLY when its frontmatter carries an
+    explicit `visibility: shared`. Everything else -- an ABSENT `visibility:`
+    key, a malformed value, no frontmatter block at all -- is `local`. A false
+    `local` merely hides an item from cloud providers -- visible and
+    recoverable. A false `shared` leaks it -- neither.
+
+    The absent-key case used to return "shared" (the old `absent = shared`
+    frontmatter default). That was the only fail-OPEN default in the engine:
+    an item nobody had classified was not merely unfiltered, it was positively
+    published. See docs/format-spec.md 1 -- `visibility:` is now REQUIRED on
+    items, and this parser is what makes forgetting it safe instead of costly.
+
+    Skills are NOT items and never carry `visibility:` (format-spec.md 1).
+    They are always shared. That carve-out lives in the RESOLVERS that know a
+    path is a skill, never here -- this function only ever sees text.
     """
     if text.startswith("﻿"):
         text = text[1:]
@@ -177,9 +189,43 @@ def _visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "local"
+
+
+def _has_explicit_visibility(text):
+    """True when the item's frontmatter carries a `visibility:` key at all,
+    whatever its value.
+
+    `_visibility_from_text` deliberately collapses "absent", "malformed" and
+    "explicitly local" into one answer -- `local` -- because for EGRESS that
+    is the whole point: all three must be withheld. But "absent" and
+    "explicitly local" are not the same fact, and anything that RELAXES a
+    control on the strength of `local` has to tell them apart, or the new
+    default silently buys that relaxation for every unclassified item. Three
+    callers need the distinction: the publish gate in snapshot_publish.py
+    (which refuses while any item is unclassified), the secret-scrub split
+    in brain_merge.py (which may only demote a hit to a warning for an item a
+    human actually marked local), and the skills-are-shared carve-out in the
+    egress resolvers, which exists to supply a default for a key skills do not
+    carry and must not OVERRIDE one a human wrote.
+
+    Same line-scan and same fail-closed framing as `_visibility_from_text`: no
+    `---` frontmatter block means no explicit visibility.
+    """
+    if text is None:
+        return False
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, _value = line.partition(":")
+        if sep and key.strip().lower() == "visibility":
+            return True
+    return False
 
 
 # --- lifecycle ---------------------------------------------------------------
@@ -540,24 +586,30 @@ def scan_brain_for_secrets(brain_dir):
     """Scan the merged-but-not-yet-committed tree for secret-shaped hits, split
     into two buckets (REVIEW.md P3 #17/egress-scope fix):
 
-      - fail_closed: a hit in a SHARED item (per `_visibility_from_text`: an
-        explicit `visibility: shared`, or well-formed frontmatter with no
-        `visibility:` key at all — the documented absent-field default), in
-        `skills/` (no visibility frontmatter exists for skills, so they're
-        always egress-critical), or in PROFILE.md -> cloud egress must stay
-        strictly gated. The FIRST such hit found is returned (same "abort on
-        first hit" contract as before). An item with NO parseable frontmatter
-        at all classifies as `local` (fail-closed toward hiding, not leaking —
-        see `_visibility_from_text`'s docstring), so it lands in warnings
-        below rather than here; such an item is degenerate enough that
-        `build_index_bytes` already excludes it from INDEX/publish entirely.
-      - warnings: a hit in a LOCAL-visibility item -> never aborts the merge.
+      - fail_closed: a hit in a SHARED item (an explicit `visibility: shared`),
+        in an item carrying NO explicit `visibility:` at all, in `skills/` (no
+        visibility frontmatter exists for skills, so they're always
+        egress-critical), or in PROFILE.md -> cloud egress must stay strictly
+        gated. The FIRST such hit found is returned (same "abort on first hit"
+        contract as before).
+      - warnings: a hit in an explicitly LOCAL item -> never aborts the merge.
         `local` items never reach a cloud provider (never-capture rule +
         the private backup are the real controls there; publish/read/search
         already refuse `local` items to cloud callers), so a secret-shaped
         false positive in local infra prose ("token: stored in the keyring")
         must not block SHARED-item propagation to every provider. ALL such
         hits are collected, not just the first.
+
+    NOTE the deliberate asymmetry with `_visibility_from_text`. That parser
+    now classifies an UNMARKED item as `local`, so routing this split through
+    it alone would quietly move every unmarked secret hit out of fail_closed
+    and into warnings — turning "abort the merge" into "a line in a digest".
+    The warnings bucket is only defensible because a `local` item is KNOWN to
+    be withheld from every egress path; an unmarked item is not known to be
+    anything, because no human has classified it yet. So the demotion requires
+    an EXPLICIT `visibility: local`, which is what `_has_explicit_visibility`
+    below is for. Withholding an item from publish on a default is safe;
+    relaxing a secret gate on the same default is not.
 
     Every egress-critical file is scanned regardless of what's found in
     local-visibility files first (and vice versa) — a local-hit warning must
@@ -582,8 +634,11 @@ def scan_brain_for_secrets(brain_dir):
             if not hit:
                 continue
             rel = os.path.join(sub, fname)
-            visibility = _visibility_from_text(text)
-            if visibility == "local":
+            explicitly_local = (
+                _has_explicit_visibility(text)
+                and _visibility_from_text(text) == "local"
+            )
+            if explicitly_local:
                 warnings.append((rel, mask(hit)))
             elif fail_closed is None:
                 fail_closed = (rel, mask(hit))

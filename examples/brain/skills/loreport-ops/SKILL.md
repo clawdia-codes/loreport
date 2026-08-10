@@ -64,10 +64,13 @@ it captured itself. If a change is refused, say so plainly — don't retry again
 
 ## ③ Rules that always apply
 
-- **`shared` vs `local`.** `shared` (default) syncs to every provider. `local` never
-  leaves the machine — health, finances, credentials, employer details, another person's
-  private information. When capturing something sensitive, set `visibility: local`
-  without being asked. When unsure, ask before defaulting to shared.
+- **`shared` vs `local`.** State `visibility:` on every item — it is required, and there
+  is no shared-by-default. `shared` syncs to every provider. `local` never leaves the
+  machine — health, finances, credentials, employer details, another person's private
+  information. When capturing something sensitive, set `visibility: local` without being
+  asked. When unsure, ask; an item left unclassified is withheld from every provider and
+  blocks the next publish, so guessing `shared` to avoid the question is the one move that
+  can actually expose something.
 - **Never store secrets.** No credentials, API keys, or tokens, ever — even if pasted.
   Describe the fact without the value ("the deploy key lives in 1Password").
 - **Fetch before update.** Never emit `action="update"` for an item whose current body you

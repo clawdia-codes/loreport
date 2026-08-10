@@ -2,6 +2,7 @@
 name: deploy-notes-buildserver
 description: deploy notes and build-server config for Pixel Farm
 type: reference
+visibility: shared
 ---
 Notes for the headless build server that produces Pixel Farm's export builds.
 
