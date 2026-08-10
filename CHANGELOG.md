@@ -2,6 +2,25 @@
 
 ## [1.14.0] — 2026-08-10
 
+### Added — the leak audit runs on the timer, instead of only when asked
+
+- **`scripts/loreport-audit` had no caller.** No unit, no timer, not from
+  `loreport-health`, not from `bin/loreport-sync` — the one thing asserting that
+  unclassified items stay unpublished ran only when a human typed it, which is the
+  same producer-with-no-consumer shape that produced the leaks it exists to catch.
+  `loreport-health` now runs it, because a second timer is a second thing to forget.
+  Severity is **mapped, not flattened**: `LEAK`/`BLIND` fail, `RISK`/`META` go to
+  NEEDS REVIEW, and an audit that *cannot run* fails rather than passing quietly.
+
+### Fixed — skills read as leaks after the visibility flip
+
+- **Nine false leaks on the live brain.** A skill carries no `visibility:` field at
+  all (§1); once an absent key meant `local`, every skill in every published surface
+  read as a leak. `check-docs.sh` §2 stayed green because it compares the *parsers*,
+  and the carve-out has never lived in a parser. `hub/brain_audit.py` now applies the
+  same **defeasible** carve-out as `snapshot_publish._item_visibility`, at the
+  resolver — an explicit `visibility:` on a SKILL.md still wins.
+
 ### Fixed — the audit checker agreed with the old default (merge-introduced)
 
 - **`hub/brain_audit.effective_visibility` returned `shared` for an absent `visibility:`**
