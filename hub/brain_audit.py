@@ -193,20 +193,34 @@ def parse_frontmatter(text):
 
 def effective_visibility(text):
     """FAIL CLOSED: `shared` only for an explicit, parseable `shared`; anything
-    else — absent frontmatter, an unparseable value, a typo — is `local`.
+    else — absent frontmatter, an absent key, an unparseable value, a typo — is
+    `local`.
 
-    Note the deliberate asymmetry with the *spec*, where an ABSENT `visibility:`
-    means shared. That default is the leak: an item nobody classified is
-    cloud-published by omission. `visibility_problem` below reports the absence
-    as a finding, while this function keeps the publisher's own semantics so the
-    leak assertions compare like with like.
+    This mirrors the PUBLISHER's semantics exactly, so the leak assertions
+    compare like with like. It previously returned `shared` for an absent key,
+    matching the old `absent = shared` frontmatter default. That default WAS the
+    leak, `docs/format-spec.md` §1 no longer states it, and every publisher
+    (`hub/brain_merge.py`, `hub/snapshot_publish.py`, `hub/project.py`,
+    `hub/mcp_server.py`, both `make-surface.sh` copies) now reads an absent key
+    as `local`.
+
+    Leaving the old value here was MERGE-INTRODUCED: green on `main` and on each
+    source branch, red only once the parser flip and this checker landed
+    together. It made the checker fail OPEN on the very assertion it exists to
+    enforce — an unmarked item that HAD reached a surface would not be flagged,
+    while a correctly withheld one raised a false "shared item missing from the
+    packet" finding.
+
+    Absence is still reported, but as its own finding: `visibility_problem`
+    names an unclassified item explicitly rather than inferring intent.
+    `scripts/check-docs.sh` §2 pins this function against `hub/brain_merge.py`.
     """
     ok, fields, _ = parse_frontmatter(text)
     if not ok:
         return "local"
     seen = fields.get("visibility")
     if seen is None:
-        return "shared"
+        return "local"
     return "shared" if seen == "shared" else "local"
 
 
