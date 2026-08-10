@@ -64,9 +64,37 @@ item_file() {
 #
 # Skills are the one exception, and not a new one: a skill is a package, not an item,
 # and carries no `visibility:` field at all (docs/format-spec.md section 1).
+#
+# That exception is a DEFAULT, not an override. It supplies the answer for a key skills
+# do not carry; it may not overrule one a human wrote. Unconditional, `visibility: local`
+# on a SKILL.md was a privacy control that reported success and still pasted the skill
+# into a cloud assistant. Same shape as the resolvers in hub/snapshot_publish.py,
+# hub/mcp_server.py, hub/project.py and hub/report_build.py.
+item_has_explicit_visibility() {
+  awk '
+    NR == 1 {
+      sub(/^\357\273\277/, "")                     # strip a UTF-8 BOM
+      if ($0 !~ /^---[ \t]*$/) exit 1                # no frontmatter block -> no explicit key
+      next
+    }
+    /^---[ \t]*$/ { exit found ? 0 : 1 }
+    {
+      i = index($0, ":")
+      if (i == 0) next
+      k = substr($0, 1, i - 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", k)
+      if (tolower(k) == "visibility") found = 1
+    }
+    # NOTE: a bare `exit 0` above would NOT work -- awk`s exit runs END, and an
+    # unconditional `exit 1` there would overrule it. Same reason item_is_shared
+    # computes the identical expression in both places.
+    END { exit found ? 0 : 1 }                       # unterminated frontmatter -> same rule
+  ' "$1"
+}
+
 item_is_shared() {
   case "$1" in
-    skills/*) return 0 ;;
+    skills/*) item_has_explicit_visibility "$1" || return 0 ;;
   esac
   awk '
     NR == 1 {

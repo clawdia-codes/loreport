@@ -201,11 +201,13 @@ def _has_explicit_visibility(text):
     is the whole point: all three must be withheld. But "absent" and
     "explicitly local" are not the same fact, and anything that RELAXES a
     control on the strength of `local` has to tell them apart, or the new
-    default silently buys that relaxation for every unclassified item. Two
+    default silently buys that relaxation for every unclassified item. Three
     callers need the distinction: the publish gate in snapshot_publish.py
-    (which refuses while any item is unclassified) and the secret-scrub split
+    (which refuses while any item is unclassified), the secret-scrub split
     in brain_merge.py (which may only demote a hit to a warning for an item a
-    human actually marked local).
+    human actually marked local), and the skills-are-shared carve-out in the
+    egress resolvers, which exists to supply a default for a key skills do not
+    carry and must not OVERRIDE one a human wrote.
 
     Same line-scan and same fail-closed framing as `_visibility_from_text`: no
     `---` frontmatter block means no explicit visibility.

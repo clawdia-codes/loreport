@@ -320,7 +320,16 @@ def load_entries(brain_dir):
             # same reason, as snapshot_publish._item_visibility and
             # mcp_server._visibility_of — it belongs at the resolver that knows
             # the path is a skill, never in the parser.
-            "shared": True,
+            #
+            # DEFAULT, not override: `visibility:` written on a SKILL.md is a
+            # human's explicit marking and wins. `"visibility" in fm` is this
+            # file's spelling of brain_merge._has_explicit_visibility (fm keys
+            # are lowercased by parse_frontmatter and the block must be
+            # well-formed for fm to be non-empty at all); the value is then
+            # graded by the same visibility_from_text §4b pins against the
+            # canonical parser, never by a fourth rule written here.
+            "shared": ("visibility" not in fm
+                       or visibility_from_text(text) == "shared"),
             "body": body,
         })
 

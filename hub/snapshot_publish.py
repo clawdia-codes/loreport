@@ -176,11 +176,13 @@ def _has_explicit_visibility(text):
     is the whole point: all three must be withheld. But "absent" and
     "explicitly local" are not the same fact, and anything that RELAXES a
     control on the strength of `local` has to tell them apart, or the new
-    default silently buys that relaxation for every unclassified item. Two
+    default silently buys that relaxation for every unclassified item. Three
     callers need the distinction: the publish gate in snapshot_publish.py
-    (which refuses while any item is unclassified) and the secret-scrub split
+    (which refuses while any item is unclassified), the secret-scrub split
     in brain_merge.py (which may only demote a hit to a warning for an item a
-    human actually marked local).
+    human actually marked local), and the skills-are-shared carve-out in the
+    egress resolvers, which exists to supply a default for a key skills do not
+    carry and must not OVERRIDE one a human wrote.
 
     Same line-scan and same fail-closed framing as `_visibility_from_text`: no
     `---` frontmatter block means no explicit visibility.
@@ -228,6 +230,14 @@ def _item_visibility(brain_dir, name):
     path is a skill, rather than in the parser (which only ever sees text and
     must stay byte-identical across its four copies).
 
+    The carve-out is DEFEASIBLE, and that is load-bearing. It exists to supply a
+    default for the key skills do not carry — it may not OVERRIDE the key when a
+    human has written one. Unconditional, it made a `visibility: local` on a
+    SKILL.md a control that reports success and changes nothing: the tool wrote
+    the line, and the skill stayed in the packet, stayed in the paste surfaces,
+    was still served at cloud trust, and was still reported back as `shared`.
+    So: skills default to shared, but an EXPLICIT `visibility:` always wins.
+
     This function is only ever called from filter_index_text on resolved
     memories/knowledge/skills items; it is never applied to
     bootstrap.md/PROFILE.md/INDEX.md, which carry no item frontmatter and
@@ -235,7 +245,7 @@ def _item_visibility(brain_dir, name):
     for relpath in _candidate_item_relpaths(name):
         text = read_from_main(brain_dir, relpath)
         if text is not None:
-            if relpath.startswith("skills/"):
+            if relpath.startswith("skills/") and not _has_explicit_visibility(text):
                 return "shared"
             return _visibility_from_text(text)
     return "shared"

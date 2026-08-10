@@ -163,13 +163,51 @@ def _is_shared_visibility_file(path):
     return seen == "shared"
 
 
+def _has_explicit_visibility_file(path):
+    """True when the item file's frontmatter carries a `visibility:` key at
+    all, whatever its value.
+
+    The disk-reading sibling of hub/brain_merge.py's `_has_explicit_visibility`
+    (this projector reads the working tree, not `main`; see
+    `_item_file_on_disk`). Same job: `_is_shared_visibility_file` collapses
+    "absent" and "explicitly local" into one answer, and the skills carve-out
+    below RELAXES a control on the strength of that answer, so it has to tell
+    the two apart or it buys the relaxation for a key a human actually wrote.
+
+    Frontmatter only, and unreadable means "no explicit key" — the caller then
+    falls through to `_is_shared_visibility_file`, which is also False on an
+    unreadable file, so the item is withheld either way."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, _value = line.partition(":")
+        if sep and key.strip().lower() == "visibility":
+            return True
+    return False
+
+
 def filter_index_make_surface(brain_dir, index_text, include_local):
     """Keep only INDEX lines whose item is explicitly `visibility: shared`,
     unless include_local.
 
     Two carve-outs, both matching hub/snapshot_publish.py's filter_index_text:
       - a SKILL is a package, not an item, and carries no `visibility:`
-        (docs/format-spec.md §1) — always kept;
+        (docs/format-spec.md §1) — kept UNLESS it carries an explicit
+        `visibility:` anyway, in which case the human's marking wins. The
+        carve-out supplies a default for an absent key; it may not override a
+        present one, or `visibility: local` on a SKILL.md becomes a privacy
+        control that reports success and still pastes the skill into a cloud
+        assistant;
       - an INDEX line whose [[name]] resolves to no file on disk is kept, so
         the filter never silently drops a line it cannot positively identify
         as an item at all."""
@@ -187,7 +225,9 @@ def filter_index_make_surface(brain_dir, index_text, include_local):
         if item_path is None:
             out_lines.append(line)
             continue
-        if relpath.startswith("skills/") or _is_shared_visibility_file(item_path):
+        skill_default = (relpath.startswith("skills/")
+                         and not _has_explicit_visibility_file(item_path))
+        if skill_default or _is_shared_visibility_file(item_path):
             out_lines.append(line)
         else:
             dropped += 1

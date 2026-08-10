@@ -65,6 +65,29 @@
   packet, 0 to the surface, 0 unclassified items found by the new gate. The five items in
   `examples/brain/` were unmarked and are now explicitly `visibility: shared` — a shipped
   example must demonstrate the required field, not the omission.
+- **The skills carve-out is a DEFAULT, not an override.** Skills carry no `visibility:`
+  field (format-spec.md §1), so the resolvers supply `shared` for them; written
+  unconditionally, that also overruled a `visibility:` a human had written. The result was a
+  privacy control that reported success and changed nothing:
+  `loreport_change_memory_settings(name="secret-skill", visibility="local")` returned
+  `{'status': 'changed', 'visibility': 'local'}` and really did commit the line to `main`,
+  while the skill stayed in `hub/published/packet.md`, stayed in `hub/surface-*.md`, was
+  still served in full at cloud trust, and was still reported back as `shared` by
+  `loreport_view_memory_settings`. An explicit `visibility:` now wins at every resolver:
+  `snapshot_publish._item_visibility`, `mcp_server._visibility_of`,
+  `project.filter_index_make_surface`, `report_build.load_entries`, and `item_is_shared` in
+  **both** copies of `make-surface.sh`. The shape is
+  `skills/… and not _has_explicit_visibility(…)`, never a blanket removal — the three skills
+  in the author's live brain carry no `visibility:` line, and a blanket removal would
+  withhold every one of them. `hub/mcp_server.py` gained a byte-identical copy of
+  `_has_explicit_visibility` and `scripts/check-docs.sh` §2c now drift-checks it too;
+  `hub/project.py` got the disk-reading sibling it needs (it reads the worktree, not `main`).
+- **`brain-template/make-surface.sh` is now covered by `scripts/check-docs.sh` §4.** It is
+  the copy `scripts/init-brain.sh` installs into every real brain, and it was the only
+  duplicated file in the repo with no checker of any kind — reverting its fail-closed rule
+  left every gate green. §4 now runs the same fixture and the same assertions against both
+  copies, including a new one: a SKILL a human marked `visibility: local` must not reach the
+  default surface.
 
 ### Added
 

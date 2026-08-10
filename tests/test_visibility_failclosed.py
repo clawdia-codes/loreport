@@ -434,6 +434,87 @@ class ReportBadgeTests(BrainRepo, unittest.TestCase):
         self.assertTrue(e["shared-one"]["shared"])
 
 
+class SkillCarveOutIsADefaultNotAnOverride(BrainRepo, unittest.TestCase):
+    """The carve-out above supplies the answer for a key skills do not carry.
+    Written unconditionally it also OVERRODE the key when a human wrote one, and
+    a `visibility: local` on a SKILL.md became a privacy control that reports
+    success and changes nothing about egress: `change_memory_settings` returned
+    `{'status': 'changed', 'visibility': 'local'}` and really did commit the
+    line to main, while the skill stayed in hub/published/packet.md, stayed in
+    the paste surfaces, was still served in full at cloud trust, and was still
+    reported back as `shared` by `view_memory_settings`.
+
+    Five resolvers hold the carve-out (four Python, one shell in two copies), so
+    each gets its own assertion — a fix at three of them is not a fix.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write("skills/secret-skill/SKILL.md",
+                   "---\nname: secret-skill\ndescription: secret-skill hook\n"
+                   "visibility: local\n---\n\nBody of secret-skill.\n")
+        self.write_index()
+        self.commit("add a skill the human marked local")
+
+    def test_packet_withholds_a_skill_marked_local(self):
+        """MUTATION: in `snapshot_publish._item_visibility`, drop the
+        `and not _has_explicit_visibility(text)` guard.
+        Observed: 1 failed — this test.
+        """
+        self.assertNotIn("secret-skill", snapshot_publish.build_packet_text(self.repo))
+
+    def test_surface_withholds_a_skill_marked_local(self):
+        """MUTATION: in `project.filter_index_make_surface`, revert `skill_default`
+        to a bare `relpath.startswith("skills/")`.
+        Observed: 1 failed — this test.
+        """
+        with open(os.path.join(self.repo, "INDEX.md"), encoding="utf-8") as fh:
+            index = fh.read()
+        out, _dropped = project.filter_index_make_surface(self.repo, index, False)
+        self.assertNotIn("secret-skill", out)
+
+    def test_a_cloud_caller_cannot_read_a_skill_marked_local(self):
+        """MUTATION: in `mcp_server._visibility_of`, drop the
+        `and not _has_explicit_visibility(content)` guard.
+        Observed: 2 failed — this test and
+        `test_view_memory_settings_reports_the_marking_the_human_wrote`.
+        """
+        out = mcp_server.tool_loreport_read_memory(self.repo, "secret-skill", "cloud")
+        self.assertNotIn("content", out, out)
+        self.assertIn("error", out, out)
+
+    def test_view_memory_settings_reports_the_marking_the_human_wrote(self):
+        """The control lying about itself is the part that makes this a blocker
+        rather than a leak you can see. Same mutation as above."""
+        rows = mcp_server.tool_loreport_view_memory_settings(self.repo, "local")
+        row = [r for r in rows["items"] if r["name"] == "secret-skill"][0]
+        self.assertEqual(row["visibility"], "local", row)
+
+    def test_report_badges_a_skill_marked_local_as_private(self):
+        """MUTATION: in `report_build.load_entries`, revert the skills loop's
+        `"shared"` back to the unconditional `True`.
+        Observed: 1 failed — this test.
+        """
+        entries = {e["name"]: e for e in report_build.load_entries(self.repo)}
+        self.assertFalse(entries["secret-skill"]["shared"])
+
+    def test_an_unmarked_skill_is_still_shared_everywhere(self):
+        """The guard against over-correcting. The fix must be
+        `and not _has_explicit_visibility(...)`, NOT a blanket removal of the
+        carve-out — the three skills in the author's live brain carry no
+        `visibility:` line at all, and a blanket removal would withhold every
+        one of them.
+        MUTATION: at any of the four Python sites, delete the skills carve-out
+        entirely. Observed: 4 failed — this test plus the three pre-existing
+        `..._still_published/reach_the_surface/badged_shared` guards.
+        """
+        self.assertIn("a-skill", snapshot_publish.build_packet_text(self.repo))
+        entries = {e["name"]: e for e in report_build.load_entries(self.repo)}
+        self.assertTrue(entries["a-skill"]["shared"])
+        out = mcp_server.tool_loreport_read_memory(self.repo, "a-skill", "cloud")
+        self.assertIn("content", out, out)
+
+
 class MigrationPathTests(unittest.TestCase):
     """`docs/visibility-design.md` §6 now names
     `loreport_change_memory_settings` as the way to clear the gate's list. That
