@@ -132,9 +132,9 @@ class AuditTests(unittest.TestCase):
         pass by finding nothing.
 
         Mutation run: in `audit`, `item_paths.sort()` -> `item_paths = []`.
-        Observed: 6 failed, 5 passed — this test plus every test that depends on
-        an item being read at all (both classification tests, the quoted-local
-        leak, the empty-packet guard, and the exit-0 contract).
+        Observed: 8 failed, 11 passed — this test plus every test that depends on an
+        item being read at all: both classification tests, the quoted-local leak,
+        the empty-packet guard, the exit-0 contract, and both driver tests.
         """
         findings, counts = self.run_audit()
         self.assertEqual(findings, [], self.messages(findings))
@@ -152,7 +152,7 @@ class AuditTests(unittest.TestCase):
 
         Mutation run: in `visibility_problem`, neutralise
         `if "visibility" not in fields: return ...` (body -> `pass`).
-        Observed: 1 failed, 10 passed — this test alone.
+        Observed: 1 failed, 18 passed — this test alone.
         """
         self.brain.commit_item("alpha-note", _item("alpha-note", visibility=""))
         findings, _ = self.run_audit()
@@ -166,7 +166,7 @@ class AuditTests(unittest.TestCase):
 
         Mutation run: in `domain_problem`, `if seen is None: return ...` ->
         `if seen is None: return None`.
-        Observed: 1 failed, 10 passed — this test alone.
+        Observed: 1 failed, 18 passed — this test alone.
         """
         self.brain.commit_item("beta-note", _item("beta-note", domain=""))
         findings, _ = self.run_audit()
@@ -179,7 +179,7 @@ class AuditTests(unittest.TestCase):
         """
         Mutation run: in `audit`, `if effective_visibility(item_text) == "local":`
         -> `if False:` (the packet/surface leak branch).
-        Observed: 3 failed, 8 passed — this test and both leak tests below
+        Observed: 3 failed, 16 passed — this test and both leak tests below
         (paste-surface and quoted-local). Nothing else moved, so the leak
         assertions are the only thing that branch is holding up.
         """
@@ -197,7 +197,7 @@ class AuditTests(unittest.TestCase):
         invisible.
 
         Mutation run: `PUBLISHED_SURFACES` -> `("hub/published/packet.md",)`.
-        Observed: 3 failed, 8 passed — this test, the quoted-local leak, and the
+        Observed: 3 failed, 16 passed — this test, the quoted-local leak, and the
         missing-surface blind-spot test. `test_local_item_in_the_published_packet_is_a_leak`
         stayed GREEN throughout, which is exactly the half-blind state being
         guarded against: the packet looks watched while the paste path is not.
@@ -219,7 +219,7 @@ class AuditTests(unittest.TestCase):
         Mutation run: `effective_visibility` body replaced with
         `return "local" if re.search(r"(?mi)^visibility:\\s*local\\s*$", text) else "shared"`
         (hub/project.py's rule).
-        Observed: 1 failed, 10 passed — ONLY this test. The quoted-local item was
+        Observed: 1 failed, 18 passed — ONLY this test. The quoted-local item was
         reported as shared, exactly reproducing the green-on-a-real-leak
         behaviour, while both other leak tests stayed green. That isolation is
         the point: no other test in this file distinguishes the two rules.
@@ -247,7 +247,7 @@ class AuditTests(unittest.TestCase):
         be unconditional.
 
         Mutation run: in `audit`, `if not catalog:` -> `if False:` (the BLIND
-        guard). Observed: 1 failed, 10 passed — this test alone; the audit
+        guard). Observed: 1 failed, 18 passed — this test alone; the audit
         returned zero findings and exit 0 on a brain whose three published
         surfaces contained no items at all.
         """
@@ -272,7 +272,7 @@ class AuditTests(unittest.TestCase):
 
         Mutation run: in `audit`, drop the `add("BLIND", ...)` from the
         `if not os.path.isfile(path):` branch, leaving the bare `continue`.
-        Observed: 1 failed, 10 passed — this test alone; the audit reported a
+        Observed: 1 failed, 18 passed — this test alone; the audit reported a
         clean brain while one of its three egress surfaces was simply absent.
         """
         os.remove(os.path.join(self.brain.dir, "hub/surface-chatgpt.md"))
@@ -288,7 +288,7 @@ class AuditTests(unittest.TestCase):
         it — the archive-seam failure, which has no error anywhere else.
 
         Mutation run: in `audit`, `if name not in packet_names:` -> `if False:`.
-        Observed: 1 failed, 10 passed — this test alone.
+        Observed: 1 failed, 18 passed — this test alone.
         """
         self.brain.write(
             "hub/published/packet.md",
@@ -296,6 +296,38 @@ class AuditTests(unittest.TestCase):
         findings, _ = self.run_audit()
         self.assertIn("[[beta-note]]", self.messages(findings))
         self.assertIn("absent", self.messages(findings))
+
+    def test_published_name_that_resolves_to_nothing_is_a_finding(self):
+        """A checker cannot certify a name it cannot resolve. snapshot_publish
+        deliberately defaults an unresolvable `[[name]]` to "shared" — correct
+        for a PRODUCER, which must not silently drop an INDEX line — but a
+        checker inheriting that default would quietly bless whatever the name
+        turns out to be.
+
+        Mutation run: in `audit`, the catalogue loop's `if item_rel is None:
+        add("RISK", ...)` -> `continue`.
+        Observed: 1 failed, 18 passed — this test alone.
+        """
+        self.brain.write(
+            "hub/published/packet.md",
+            BrainFixture.index_text(self.brain.items) + "- [[ghost-note]] — nothing\n")
+        findings, _ = self.run_audit()
+        self.assertIn("resolves to no item on main", self.messages(findings))
+        self.assertIn("[[ghost-note]]", self.messages(findings))
+
+    def test_brain_with_no_index_on_main_is_a_blind_spot(self):
+        """The reconciliation walks INDEX lines. With no INDEX on main that walk
+        is vacuous, so the on-disk/classified/published comparison asserted
+        nothing — same shape as the empty packet, different collection.
+
+        Mutation run: in `audit`, `if indexed == 0:` -> `if False:`.
+        Observed: 1 failed, 18 passed — this test alone.
+        """
+        self.brain._git("rm", "-q", "INDEX.md")
+        self.brain._git("commit", "-qm", "drop index")
+        findings, counts = self.run_audit()
+        self.assertEqual(counts["indexed"], 0)
+        self.assertIn("no INDEX catalogue lines on main", self.messages(findings))
 
     # --- exit-code contract --------------------------------------------------
 
@@ -306,7 +338,7 @@ class AuditTests(unittest.TestCase):
 
         Mutation run: in `audit`, `if main_sha is None: raise CannotAudit(...)`
         -> `main_sha = "unknown"` with the raise disabled.
-        Observed: 1 failed, 10 passed — this test alone; main() returned 1 (a
+        Observed: 1 failed, 18 passed — this test alone; main() returned 1 (a
         findings exit) on a directory that is not a git repo at all.
         """
         empty = tempfile.mkdtemp(prefix="my-brain-not-a-repo-")
@@ -320,10 +352,12 @@ class AuditTests(unittest.TestCase):
         three directions, since a driver script and a human both read them.
 
         Mutation run: in `main`, `return 1 if findings else 0` -> `return 0`.
-        Observed: 1 failed, 10 passed — the failure was
-        `test_empty_packet_fails_even_when_every_item_is_local` (a brain with an
-        empty packet exited 0). This test stays green under that mutation by
-        construction, which is why the exit-1 assertion lives over there.
+        Observed: 3 failed, 16 passed — and NONE of them was this test:
+        `test_empty_packet_fails_even_when_every_item_is_local`,
+        `test_findings_exit_1_and_a_bad_config_exits_2` and
+        `test_quiet_drops_the_counts_and_keeps_every_fix_line` carry the exit-1
+        half. This test stays green under that mutation by construction — it is
+        the exit-0 half of the same contract, and both halves are needed.
         """
         self.assertEqual(brain_audit.main(["--brain-dir", self.brain.dir]), 0)
 
@@ -354,8 +388,9 @@ class DriverScriptTests(unittest.TestCase):
 
         Mutation run: in scripts/loreport-audit, `--brain-dir "$BRAIN"` ->
         `--brain-dir "$(dirname "$0")"` (doctor.sh's rule).
-        Observed: this test failed — exit 2, "cannot resolve `main`", because the
-        engine checkout's scripts/ directory is not a brain.
+        Observed: 2 failed, 17 passed — this test (exit 2, "cannot resolve `main`",
+        because the engine checkout's scripts/ directory is not a brain) and
+        `test_runs_from_any_working_directory`.
         """
         r = self._run("--config", self.conf)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -366,16 +401,62 @@ class DriverScriptTests(unittest.TestCase):
         """A leak check whose failure is indistinguishable from a broken
         invocation is not a check. 1 = found something, 2 = could not look.
 
+        The stderr assertion is load-bearing, not decoration. Once the required
+        keys are checked explicitly (see the next test), deleting the
+        `[ ! -r "$CONFIG" ]` gate no longer changes the exit code — the empty
+        LOREPORT_BRAIN catches it and still exits 2 — so the only observable
+        difference is which repair the message sends a human off to do:
+        "config not found" (you mistyped the path) versus "LOREPORT_BRAIN not
+        set" (go edit a config that was never the problem). Measured: without
+        this assertion the mutation below survived with all tests green.
+
         Mutation run: in scripts/loreport-audit, the `[ ! -r "$CONFIG" ]` gate
         -> `CONFIG=/dev/null` fallback instead of `exit 2`.
-        Observed: 1 failed, 13 passed — this test; a nonexistent config exited 1,
-        i.e. it claimed to have audited a brain and found problems.
+        Observed: 1 failed, 18 passed — this test, on the message.
         """
-        self.brain.write("hub/published/packet.md",
-                         BrainFixture.index_text(self.brain.items))
         self.brain.commit_item("alpha-note", _item("alpha-note", visibility=""))
         self.assertEqual(self._run("--config", self.conf).returncode, 1)
-        self.assertEqual(self._run("--config", self.conf + ".nope").returncode, 2)
+        missing = self._run("--config", self.conf + ".nope")
+        self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+        self.assertIn("config not found or unreadable", missing.stderr)
+
+    def test_quiet_drops_the_counts_and_keeps_every_fix_line(self):
+        """`--quiet` exists so a cron wrapper can mail the findings. A findings
+        report without its `fix:` lines is a strictly worse artefact than no
+        report, and the first implementation produced exactly that: quiet mode
+        was a filter over the RENDERED text that dropped every indented line,
+        and `    fix: …` is indented. Nothing caught it because the flag was
+        documented in two places and asserted in none.
+
+        Mutation run: in `format_report`, build the full report and return
+        `"\\n".join(ln for ln in out if not ln.startswith("  "))`.
+        Observed: 1 failed, 18 passed — this test; the `fix:` line vanished
+        while the finding itself still printed, so the output still looked fine.
+        """
+        self.brain.commit_item("alpha-note", _item("alpha-note", visibility=""))
+        r = self._run("--config", self.conf, "--quiet")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("✗", r.stdout)
+        self.assertIn("fix:", r.stdout)
+        self.assertIn("FAIL", r.stdout)
+        self.assertNotIn("items on main", r.stdout)
+
+    def test_runs_from_any_working_directory(self):
+        """`--config` is the whole point; nothing may depend on where the caller
+        stood. Run it from the filesystem root, where `./loreport.conf` — the
+        documented default — definitively does not exist.
+
+        Mutation run: in scripts/loreport-audit, `--brain-dir "$BRAIN"` ->
+        `--brain-dir "$PWD"`.
+        Observed: 2 failed, 17 passed — this test (exit 2, "cannot resolve
+        `main`", because "/" is not a brain) and
+        `test_config_aims_the_audit_at_another_directory_entirely`, which runs
+        from the engine checkout.
+        """
+        r = subprocess.run(["bash", self.SCRIPT, "--config", self.conf],
+                           cwd="/", capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(self.brain.dir, r.stdout)
 
     def test_config_missing_a_required_key_exits_2_not_1(self):
         """Found while testing the above, and fixed here rather than copied: the
@@ -388,7 +469,7 @@ class DriverScriptTests(unittest.TestCase):
         Mutation run: in scripts/loreport-audit, the two explicit `[ -n ... ] ||
         exit 2` guards -> `BRAIN="${LOREPORT_BRAIN:?...}"` /
         `FRAMEWORK="${LOREPORT_ENGINE:?...}"`.
-        Observed: 1 failed, 14 passed — this test; exit was 1, not 2.
+        Observed: 1 failed, 18 passed — this test; exit was 1, not 2.
         """
         halfconf = os.path.join(self.brain.dir, "half.conf")
         with open(halfconf, "w", encoding="utf-8") as fh:
@@ -407,8 +488,8 @@ class DriverScriptTests(unittest.TestCase):
 
         Mutation run: in scripts/loreport-audit, the guarded `--config` case ->
         `--config) CONFIG="${2:-}"; shift 2 || true ;;` (the sibling form).
-        Observed: this test failed with subprocess.TimeoutExpired after 10s —
-        the script never terminated.
+        Observed: 1 failed, 18 passed — this test, with subprocess.TimeoutExpired
+        after 10s; the script never terminated.
         """
         r = self._run("--config", timeout=10)
         self.assertEqual(r.returncode, 2)

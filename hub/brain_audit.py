@@ -411,19 +411,27 @@ def audit(brain_dir):
 
 # --- reporting ---------------------------------------------------------------
 
-def format_report(brain_dir, findings, counts):
+def format_report(brain_dir, findings, counts, quiet=False):
+    """`quiet` drops the counts block and nothing else.
+
+    Built by NOT APPENDING the counts, rather than by filtering the rendered
+    text afterwards: an indentation-based filter also ate every `    fix:` line,
+    so quiet mode printed findings with no remediation. Deciding what to include
+    while building it is the only version that cannot silently lose content.
+    """
     out = []
     out.append(f"=== Loreport audit: {brain_dir} (main@{counts['main']}) ===")
     out.append("")
-    out.append(f"  items on main            {counts['items']}  ({counts['memories']} in memories/)")
-    out.append(f"    explicit visibility    {counts['visibility_ok']}")
-    out.append(f"    explicit domain        {counts['domain_ok']}")
-    out.append(f"    shared / local         {counts['shared']} / {counts['local']}")
-    out.append(f"  catalogued in INDEX      {counts['indexed']}")
-    out.append(f"    shared, reach-checked  {counts['reach_checked']}")
-    for rel, n in counts["surface_refs"].items():
-        out.append(f"  {rel:<24} {n} catalogued item(s)")
-    out.append("")
+    if not quiet:
+        out.append(f"  items on main            {counts['items']}  ({counts['memories']} in memories/)")
+        out.append(f"    explicit visibility    {counts['visibility_ok']}")
+        out.append(f"    explicit domain        {counts['domain_ok']}")
+        out.append(f"    shared / local         {counts['shared']} / {counts['local']}")
+        out.append(f"  catalogued in INDEX      {counts['indexed']}")
+        out.append(f"    shared, reach-checked  {counts['reach_checked']}")
+        for rel, n in counts["surface_refs"].items():
+            out.append(f"  {rel:<24} {n} catalogued item(s)")
+        out.append("")
     if not findings:
         out.append("PASS — every item is explicitly classified and no local item reaches a "
                    "published surface.")
@@ -453,11 +461,7 @@ def main(argv=None):
         print(f"loreport-audit: CANNOT AUDIT: {e}", file=sys.stderr)
         return 2
 
-    report = format_report(args.brain_dir, findings, counts)
-    if args.quiet:
-        report = "\n".join(ln for ln in report.splitlines()
-                           if not ln.startswith("  ")) + "\n"
-    print(report, end="")
+    print(format_report(args.brain_dir, findings, counts, quiet=args.quiet), end="")
     return 1 if findings else 0
 
 
