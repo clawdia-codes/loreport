@@ -54,6 +54,17 @@ from datetime import date, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Sibling import, same pattern as brain_merge.py's `synth_detect`: make hub/
+# importable rather than relying on being run as a script. Narrow, deliberate
+# exception to the single-file doctrine — hub/attention.py owns the attention
+# queue's schema and its ONE rendering path, and re-implementing either here is
+# how the same condition ends up with two names. It carries no security
+# primitive, so nothing below is imported from it: SECRET_PATTERNS,
+# _visibility_from_text and friends stay duplicated-and-checked as they are.
+sys.path.insert(0, HERE)
+
+import attention  # noqa: E402
+
 _FALLBACK_PROVIDERS = ("chatgpt", "claude", "codex", "openclaw")
 
 
@@ -437,7 +448,16 @@ def is_noop_commit(brain_dir):
 
 # --- quarantine / commit --------------------------------------------------------
 
-def quarantine(brain_dir, provider, block_file, reason, detail):
+def quarantine(brain_dir, provider, block_file, reason, detail, item_path=None):
+    """Set the raw block aside AND raise it on the attention queue.
+
+    The quarantine artifact alone reached nobody: hub/quarantine/ is gitignored,
+    so a failed capture existed only as a local file — of nine audited events,
+    seven files were already gone. `item_path` is the relpath the block tried to
+    write (None when it failed before anyone could tell, e.g. a parse error);
+    the queue turns it into a `parked` annotation on the projected surface the
+    next session unavoidably reads.
+    """
     qdir = os.path.join(brain_dir, "hub", "quarantine", provider)
     os.makedirs(qdir, exist_ok=True)
     today = date.today().isoformat()
@@ -469,6 +489,21 @@ def quarantine(brain_dir, provider, block_file, reason, detail):
 
     print(f"QUARANTINED: {reason} — {detail}")
     print(f"Quarantine file: {dest}")
+
+    # Best-effort, and deliberately so: this is the FAILURE handler. If raising
+    # the entry fails too, the block is still set aside and still in the digest,
+    # and the exit code is still 1 — turning a reportable capture failure into an
+    # unhandled traceback would lose the report we just wrote.
+    try:
+        attention.record_parked(
+            brain_dir,
+            item_path,
+            reason,
+            detail,
+            artifact=os.path.relpath(dest, brain_dir),
+        )
+    except Exception as exc:  # noqa: BLE001 - see comment above
+        print(f"warning: could not record the parked capture: {exc}", file=sys.stderr)
 
 
 class CleanupError(RuntimeError):
@@ -651,29 +686,32 @@ def main():
 
     schema_err = validate_schema(block)
     if schema_err:
-        quarantine(brain_dir, args.provider, args.block_file, "schema-invalid", schema_err)
+        quarantine(brain_dir, args.provider, args.block_file, "schema-invalid", schema_err,
+                   item_path=block.get("file"))
         sys.exit(1)
 
     secret_hit = scan_secrets(block["raw"])
     if secret_hit:
         masked = secret_hit[:6] + "…" if len(secret_hit) > 6 else secret_hit
         quarantine(brain_dir, args.provider, args.block_file, "secret-scan",
-                   f"matched a secret pattern: {masked}")
+                   f"matched a secret pattern: {masked}", item_path=block.get("file"))
         sys.exit(1)
 
     imp_hit = scan_imperative(block["raw"])
     if imp_hit:
         quarantine(brain_dir, args.provider, args.block_file, "imperative-scan",
-                   f"unattributed standing instruction: \"{imp_hit}\"")
+                   f"unattributed standing instruction: \"{imp_hit}\"", item_path=block.get("file"))
         sys.exit(1)
 
     try:
         result = commit_block(brain_dir, args.provider, block, args.trust)
     except OwnershipError as e:
-        quarantine(brain_dir, args.provider, args.block_file, "ownership-denied", str(e))
+        quarantine(brain_dir, args.provider, args.block_file, "ownership-denied", str(e),
+                   item_path=block.get("file"))
         sys.exit(1)
     except Exception as e:
-        quarantine(brain_dir, args.provider, args.block_file, "git-error", str(e))
+        quarantine(brain_dir, args.provider, args.block_file, "git-error", str(e),
+                   item_path=block.get("file"))
         sys.exit(1)
 
     if result == "skipped: no change":
