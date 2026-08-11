@@ -2,6 +2,17 @@
 
 ## [1.15.0] — 2026-08-11
 
+### Fixed — an alert asserted a subsystem it had not determined
+
+- **An unclassifiable quarantine file was reported as "a rejected merge update".**
+  `kind` is inferred from content — a `<MEMORY>` tag means capture, frontmatter means
+  merge-update, neither means *unknown* — but the merge-update text sat in the final
+  `else`, so every unknown (notably the 0-byte `empty-block` case) was told the wrong
+  subsystem as fact, with a remedy that does not apply. Three branches now, and the
+  unknown one says it cannot classify the file and where the content is actually
+  recoverable. Naming the wrong subsystem had two agents report a healthy brain as
+  three days dead this week.
+
 Five feature branches (P3, P4, P6, P7, P8), each independently reviewed, plus the
 fixes for every blocker that review found. 250 tests at 1.14.0 -> 398 here.
 
