@@ -251,7 +251,7 @@ def _truncate_index_lines(index_text, budget_for_index):
     lines can be dropped, but the section headings and blank lines between them
     (`# Index`, `## Memories`, `## Knowledge`, `## Skills`) are emitted too, so
     budgeting against the item lines alone let the finished surface land over
-    budget with truncation reporting itself complete — measured 936 chars
+    budget with truncation reporting itself complete — measured 937 chars
     against a 900-char budget after cutting 7 lines. Structure is charged to the
     budget; only items are cut to pay for it."""
     lines = index_text.splitlines(keepends=True)
