@@ -249,6 +249,53 @@ class OverdueForcesTheDecision(BrainTmp, unittest.TestCase):
         self.assertEqual(nr.overdue(self._ledger_pending_since("2026-08-01"),
                                     TODAY), [])
 
+    def test_a_broken_clock_does_not_crash_the_whole_nightly_review(self):
+        """Mutation: `pending_rows.sort(key=lambda r: (-r["pending_days"], ...))`
+        and `if r["pending_days"] > PENDING_MAX_DAYS` — i.e. arithmetic straight
+        on the value, which is what stood before _days_between learned to
+        return None.
+
+        REGRESSION GUARD ON THE FAIL-CLOSED FIX ITSELF. `pending_days` is not
+        only consumed by _is_overdue: it goes into the dated artifact, gets
+        sorted on, and is formatted into the digest. A TypeError there is raised
+        inside build_attestation, which brain_merge swallows into
+        `{"error": ...}` — so one malformed date in a hand-editable ledger would
+        cost the entire night's review AND the dated artifact that health §9
+        requires. Fail-closed must not mean fail-loudly-elsewhere.
+
+        Asserts the whole chain: the artifact builds, the value is null rather
+        than a made-up number, the entry is still graded overdue, and
+        format_lines renders it without crashing."""
+        ledger = self._ledger_pending_since("garbage")
+        att = nr.build_attestation(
+            ledger, report(), {"added": [], "suppressed": [], "changed": False},
+            {"status": "in-sync", "source_count": 1, "sources": [],
+             "detail": "1 source(s)"}, TODAY)
+        self.assertEqual(att["synthesis"]["overdue"], ["pid0"])
+        row = att["synthesis"]["pending"][0]
+        self.assertIsNone(row["pending_days"],
+                          "an unknown age must not be reported as a number")
+        self.assertEqual(row["clock"], "unreadable")
+        # json-serialisable (it IS written to hub/nightly/<date>.json)
+        json.loads(json.dumps(att))
+        text = "\n".join(nr.format_lines({"attestation": att}))
+        self.assertIn("UNREADABLE", text)
+        self.assertIn("OVERDUE", text)
+
+    def test_a_readable_clock_still_reports_its_age_as_a_number(self):
+        """Mutation: `"pending_days": None` unconditionally in
+        build_attestation. The null must mean something."""
+        att = nr.build_attestation(
+            self._ledger_pending_since("2026-07-01"), report(),
+            {"added": [], "suppressed": [], "changed": False},
+            {"status": "in-sync", "source_count": 1, "sources": [],
+             "detail": "1 source(s)"}, TODAY)
+        row = att["synthesis"]["pending"][0]
+        self.assertEqual(row["pending_days"], 41)
+        self.assertEqual(row["clock"], "ok")
+        self.assertIn("pending 41d", "\n".join(
+            nr.format_lines({"attestation": att})))
+
     def test_the_attestation_carries_the_overdue_ids(self):
         ledger = self._ledger_pending_since("2026-07-01")
         att = nr.build_attestation(

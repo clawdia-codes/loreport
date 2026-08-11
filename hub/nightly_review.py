@@ -532,10 +532,24 @@ def build_attestation(ledger, synthesis, refreshed, reconciliation, today):
                 "signal": entry.get("signal"),
                 "members": entry.get("members"),
                 "pending_since": _clock_start(entry, today),
+                # None when the clock is unreadable — see _days_between. It goes
+                # into the artifact as null rather than as a made-up number,
+                # because "unknown" and "0 days old" must not share a value; the
+                # sort and the grading below both handle it explicitly.
                 "pending_days": _days_between(_clock_start(entry, today), today),
+                "clock": "ok" if _clock_start(entry, today) is not None
+                         and _days_between(_clock_start(entry, today), today)
+                         is not None else "unreadable",
             })
-    pending_rows.sort(key=lambda r: (-r["pending_days"], r["id"] or ""))
-    overdue_ids = [r["id"] for r in pending_rows if r["pending_days"] > PENDING_MAX_DAYS]
+    # An unreadable clock sorts FIRST and grades OVERDUE, matching _is_overdue:
+    # an entry nobody can date is exactly an entry nobody has looked at. Never
+    # arithmetic on None — that would raise inside build_attestation, which
+    # brain_merge swallows into `{"error": ...}`, costing the whole night's
+    # review and the dated artifact health §9 requires.
+    def _age(row):
+        return row["pending_days"] if row["pending_days"] is not None else 10 ** 6
+    pending_rows.sort(key=lambda r: (-_age(r), r["id"] or ""))
+    overdue_ids = [r["id"] for r in pending_rows if _age(r) > PENDING_MAX_DAYS]
 
     synthesis = synthesis or {}
     return {
@@ -605,6 +619,10 @@ def format_lines(summary):
         lines.append(
             f"    - [{row['id']}] {row['topic']} [{row['signal']}] "
             f"pending {row['pending_days']}d{flag}"
+            if row.get("pending_days") is not None else
+            f"    - [{row['id']}] {row['topic']} [{row['signal']}] "
+            f"pending for an UNREADABLE length of time "
+            f"(first_seen={row['pending_since']!r}){flag}"
         )
     if syn.get("suppressed"):
         lines.append(
