@@ -233,6 +233,18 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         self.assertEqual(1, len(notes), self.notifications())
         return notes[0].replace(" --silent", "")
 
+    def review_region(self):
+        """Only the NEEDS REVIEW half of the banner.
+
+        The negatives below must be scoped: the banner's own failure header
+        reads `FAILING — these are broken or stale:`, so asserting "broken" is
+        absent from the whole file would go red the first time a real failure
+        co-occurred with a pending item — on production text that is correct."""
+        banner = self.banner_text()
+        self.assertIsNotNone(banner, "a pending review item left no banner at all")
+        self.assertIn("NEEDS REVIEW", banner)
+        return banner.split("NEEDS REVIEW", 1)[1]
+
     def setUp(self):
         super().setUp()
         self.write_digest(_quarantine_digest(1))
@@ -245,24 +257,46 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         from the banner writer in scripts/loreport-health."""
         result = self.run_health()
         self.assertEqual(result.returncode, 0, result.stderr)
-        banner = self.banner_text()
-        self.assertIsNotNone(banner)
+        region = self.review_region()
         # what happened
-        self.assertIn("the merge and publish completed normally", banner)
-        self.assertIn("NEEDS REVIEW", banner)
+        self.assertIn("the merge and publish completed normally", region)
         # which item
-        self.assertIn("backup-schedule", banner)
-        self.assertIn("schema-invalid", banner)
-        self.assertIn("Nightly restic backup", banner)
+        self.assertIn("backup-schedule", region)
+        self.assertIn("schema-invalid", region)
+        self.assertIn("Nightly restic backup", region)
         # what to do — one command per outcome
-        self.assertIn("show: cat '", banner)
-        self.assertIn("inbox_ingest.py", banner)
-        self.assertIn("discard", banner)
+        self.assertIn("show: cat '", region)
+        self.assertIn("inbox_ingest.py", region)
+        self.assertIn("discard", region)
         # and nothing that reads as a different failure
         for word in self.MISLEADING:
-            self.assertNotIn(word, banner,
-                             f"the banner contains {word!r}, which is how the "
-                             f"original alert was misdiagnosed")
+            self.assertNotIn(word, region,
+                             f"the review section contains {word!r}, which is "
+                             f"how the original alert was misdiagnosed")
+
+    def test_review_wording_survives_a_co_occurring_failure(self):
+        """Mutation: delete the `printf '%s\\n' "${review_details[$i]:-}"` line
+        from the banner writer in scripts/loreport-health.
+
+        A real failure and a pending item can hold at once. The failure must not
+        borrow the review's wording, and — the direction that caused the
+        incident — the review must not borrow the failure's: it still says the
+        merge and publish completed, and still carries its own commands."""
+        self.set_merge_age(hours=100)  # merge liveness goes red
+        result = self.run_health()
+        self.assertEqual(result.returncode, 1, "the failure was not graded as one")
+        banner = self.banner_text()
+        self.assertIn("FAILING", banner)
+        region = self.review_region()
+        self.assertIn("the merge and publish completed normally", region)
+        self.assertIn("backup-schedule", region)
+        # Assert on text only the DETAIL block can supply: the item name and the
+        # word "discard" both appear in the summary line and the `next:` hint,
+        # so asserting those alone would stay green with the detail block gone.
+        self.assertIn("show: cat '", region)
+        self.assertIn("schema-invalid", region)
+        for word in self.MISLEADING:
+            self.assertNotIn(word, region)
 
     def test_notification_alone_names_the_item_and_clears_the_pipeline(self):
         """Mutation: delete `[ -n "${q_names:-}" ] && q_msg="${q_msg}: ${q_names}"`
