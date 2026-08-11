@@ -97,7 +97,12 @@ class HealthHarness:
         os.makedirs(self.stubs)
         self._script(os.path.join(self.stubs, "systemctl"), "echo success\n")
         self.notifier = os.path.join(self.tmp, "notify")
-        self._script(self.notifier, f'printf "%s\\n" "$*" >> "{self.notify_log}"\n')
+        # \x1e (record separator) delimits one INVOCATION. A notification is one
+        # message, and since the failing alert became three lines — what
+        # happened / what it means / what to do — splitting the log on newlines
+        # counted one message as three and broke six assertions that were
+        # correct about the content.
+        self._script(self.notifier, f'printf "%s\\n===NOTIFY-END===\\n" "$*" >> "{self.notify_log}"\n')
 
         self.config = os.path.join(self.tmp, "loreport.conf")
         with open(self.config, "w", encoding="utf-8") as fh:
@@ -199,7 +204,7 @@ class HealthHarness:
         if not os.path.isfile(self.notify_log):
             return []
         with open(self.notify_log, encoding="utf-8") as fh:
-            return [ln for ln in fh.read().splitlines() if ln.strip()]
+            return [rec.strip() for rec in fh.read().split("===NOTIFY-END===") if rec.strip()]
 
 
 class BaselineIsGreen(HealthHarness, unittest.TestCase):
@@ -265,7 +270,7 @@ class QuarantineIsReviewNotFailure(HealthHarness, unittest.TestCase):
     def test_notification_does_not_say_FAIL(self):
         self.run_health()
         notes = self.notifications()
-        self.assertFalse([n for n in notes if "FAIL" in n],
+        self.assertFalse([n for n in notes if "needs a look" in n],
                          f"a pending review item was announced as a failure: {notes}")
         review = [n for n in notes if "awaiting your review" in n]
         self.assertEqual(len(review), 1, notes)
@@ -310,7 +315,7 @@ class FreshnessBudget(HealthHarness, unittest.TestCase):
         result = self.run_health()
         self.assertEqual(result.returncode, 1)
         banner = self.banner_text()
-        self.assertIn("no completed merge on record", banner)
+        self.assertIn("has never completed", banner)
         self.assertNotIn("ago, budget", banner)
 
 
@@ -325,9 +330,9 @@ class BrokenIsStillBroken(HealthHarness, unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         banner = self.banner_text()
         self.assertIn("secret-scrub", banner)
-        self.assertIn("nothing merged", banner)
+        self.assertIn("nothing was published", banner)
         self.assertNotIn("merge digest needs review", banner)
-        self.assertIn("FAIL", self.notifications()[0])
+        self.assertIn("needs a look", self.notifications()[0])
 
     def test_a_failure_and_a_review_item_are_reported_separately(self):
         self.write_digest(CLEAN_DIGEST
@@ -369,7 +374,7 @@ class AlertOnStateChangeOnly(HealthHarness, unittest.TestCase):
         self.run_health()
         self.run_health()
         self.run_health()
-        fails = [n for n in self.notifications() if "FAIL" in n]
+        fails = [n for n in self.notifications() if "needs a look" in n]
         self.assertEqual(len(fails), 1, self.notifications())
 
     def test_a_new_condition_breaks_through_the_silence(self):
@@ -377,7 +382,7 @@ class AlertOnStateChangeOnly(HealthHarness, unittest.TestCase):
         self.run_health()
         self.write_digest(CLEAN_DIGEST.replace("Secret-scrub: PASS", "Secret-scrub: FAIL"))
         self.run_health()
-        fails = [n for n in self.notifications() if "FAIL" in n]
+        fails = [n for n in self.notifications() if "needs a look" in n]
         self.assertEqual(len(fails), 2, self.notifications())
 
     def test_recovery_is_announced(self):
@@ -792,7 +797,7 @@ class TheLeakAuditIsActuallyConsumed(HealthHarness, unittest.TestCase):
         r = subprocess.run(["bash", HEALTH, "--config", conf],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("not running", self.banner_text() or "")
+        self.assertIn("nothing is verifying what gets published", self.banner_text() or "")
 
     def test_a_clean_audit_says_nothing(self):
         # The feature must not add noise on a healthy brain.
@@ -1025,7 +1030,7 @@ class TruncationIsAFailureAndFilteringIsNot(HealthHarness, unittest.TestCase):
                          f"withholding 68 local items was graded as a failure: {result.stderr}")
         self.assertIsNone(self.banner_text(),
                           f"a correctly filtered projection wrote a banner: {self.banner_text()}")
-        self.assertEqual([n for n in self.notifications() if "FAIL" in n], [])
+        self.assertEqual([n for n in self.notifications() if "needs a look" in n], [])
 
     def test_budget_truncation_is_a_failure_that_reaches_the_owner(self):
         """Reddened by deleting the `if truncated:` print in
@@ -1037,7 +1042,7 @@ class TruncationIsAFailureAndFilteringIsNot(HealthHarness, unittest.TestCase):
         banner = self.banner_text() or ""
         self.assertIn("FAILING", banner)
         self.assertIn("3 index line(s)", banner)
-        self.assertTrue([n for n in self.notifications() if "FAIL" in n],
+        self.assertTrue([n for n in self.notifications() if "needs a look" in n],
                         f"truncation never reached the notifier: {self.notifications()}")
 
     def test_the_truncation_message_does_not_reuse_the_word_dropped(self):
