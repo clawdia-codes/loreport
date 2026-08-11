@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Regenerate the redacted replay corpus in this directory.
+"""Operator tool, run by hand — NOT part of the test suite.
 
-Run with a directory of REAL quarantine artifacts to check the reproductions
-still match the originals structurally:
+The corpus beside this file is a redacted reproduction of real quarantine
+artifacts; this asserts that a reproduction still matches its original. It
+cannot run in CI and is not meant to: the originals exist only in the private
+archive they were taken from, on whichever machine holds it. Nothing imports
+this file and pytest does not collect it. Point it at that archive:
 
-    python3 tests/fixtures/quarantine/_build.py --verify /path/to/originals
+    python3 tests/fixtures/quarantine/verify_against_originals.py \\
+        --verify /path/to/unpacked/archive
+
+Last run 2026-08-11 against the archive that produced the corpus: 8 OK, 0 DIFF.
 
 It compares, per file: byte size for empty files, and for the rest the line
 "skeleton" — the `<MEMORY …>` tag verbatim, each frontmatter key name in order,
