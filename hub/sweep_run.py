@@ -83,8 +83,9 @@ def process_candidate(brain_dir, candidate, block_path, trust):
     provider = candidate["provider"]
     block, err = ingest.parse_block(candidate["block"])
     if err:
-        ingest.quarantine(brain_dir, provider, block_path, "parse-error", err)
-        return f"quarantined: parse-error ({err})"
+        reason = ingest.quarantine_reason(err)
+        ingest.quarantine(brain_dir, provider, block_path, reason, err)
+        return f"quarantined: {reason} ({err})"
 
     schema_err = ingest.validate_schema(block)
     if schema_err:

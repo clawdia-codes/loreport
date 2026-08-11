@@ -1067,7 +1067,19 @@ def dispatch(brain_dir, credential, name, arguments):
         if provider_from_credential is None:
             return {"status": "quarantined",
                     "detail": "no recognized credential; refusing to route capture"}
-        return tool_loreport_save_memory(brain_dir, provider_from_credential, arguments.get("block", ""), trust)
+        # `block` is declared required in the tool schema, but this server is
+        # the only thing enforcing it: defaulting a missing argument to "" wrote
+        # a 0-byte temp file, ran the whole ingest gate on it, and filed a
+        # quarantine entry reading "no <MEMORY> block found" — which describes a
+        # malformed block, not a caller that sent no block at all. Two such
+        # 0-byte quarantine artifacts (2026-08-07 21:43, 19s apart) were
+        # unexplainable from the digest for three days because of it. Refuse
+        # here instead, with isError set so the caller retries.
+        block = arguments.get("block")
+        if not isinstance(block, str) or not block.strip():
+            return {"error": "loreport_save_memory requires a non-empty `block` argument "
+                             "(the emit-grammar v1 block text); nothing was captured"}
+        return tool_loreport_save_memory(brain_dir, provider_from_credential, block, trust)
     if name == "loreport_read_memory":
         return tool_loreport_read_memory(brain_dir, arguments.get("name", ""), trust)
     if name == "loreport_search_memories":

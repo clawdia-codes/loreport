@@ -128,8 +128,25 @@ MEMORY_RE = re.compile(
     r'<MEMORY\s+file="(?P<file>[^"]+)"\s+action="(?P<action>[^"]+)"\s*>(?P<body>.*?)</MEMORY>',
     re.DOTALL,
 )
+# Fallback for the ONE malformation that produced six of the eleven observed
+# quarantines: a `<MEMORY>` opening tag with the file=/action= attributes absent
+# (or only one of them present). The content is intact and the block carries a
+# valid `name:` in its own frontmatter, so the attributes are recoverable —
+# see _infer_attrs, which refuses rather than guessing when they are not.
+MEMORY_ANY_RE = re.compile(r"<MEMORY(?P<attrs>[^>]*)>(?P<body>.*?)</MEMORY>", re.DOTALL)
+ATTR_RE = re.compile(r'(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"(?P<val>[^"]*)"')
 INDEX_LINE_RE = re.compile(r"^INDEX:\s*(.*)$", re.MULTILINE)
+EMPTY_BLOCK_DETAIL = ("empty-block: the capture block was empty (0 bytes or whitespace only) — "
+                      "the caller emitted nothing to ingest; the block never reached this gate")
 FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.DOTALL)
+# Used ONLY by _repair_headless_frontmatter, to decide whether the lines at the
+# top of a body are a frontmatter block that lost its opening `---`. The key set
+# is the schema's own vocabulary (validate_schema below): an unknown key means
+# "this is prose, leave it alone", which is what keeps a line like
+# `Continuation doc: …` from being swallowed as metadata.
+FM_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):\s+(?=\S)")
+FM_KEYS = {"name", "description", "type", "visibility", "source", "captured",
+           "domain", "lifespan", "expires"}
 
 
 # --- parsing helpers ---------------------------------------------------------
@@ -166,25 +183,147 @@ def strip_fence(text):
     return "\n".join(lines) + "\n"
 
 
+def _repair_headless_frontmatter(body):
+    """Restore a frontmatter block whose OPENING `---` the emitter dropped.
+    Returns (body, repaired).
+
+    Every one of the four archived bare-`<MEMORY>` captures has this shape too —
+    the tag's attributes and the opening delimiter went missing together, in the
+    same emit. Three end their key lines with `---`; one has no delimiter at all
+    and runs into prose after a blank line. Inferring the path but committing
+    the body as-is would trade a quarantine for something worse: a committed
+    file whose frontmatter no parser in hub/ can read, so it lands in no INDEX
+    and is invisible to every visibility check.
+
+    This only ever ADDS delimiters. It never edits, reorders or supplies a key,
+    and it refuses (returning the body untouched, for the schema gate to reject
+    as before) unless the leading lines are unambiguously frontmatter: every
+    line up to the terminator is `<known-key>: <value>`, and `name:` and `type:`
+    are both among them. A body starting with prose, or with one unrecognised
+    key, is left alone rather than guessed at."""
+    if FRONTMATTER_RE.match(body):
+        return body, False
+    lines = body.split("\n")
+    keys, i = [], 0
+    while i < len(lines) and lines[i].strip() not in ("---", ""):
+        m = FM_KEY_RE.match(lines[i])
+        if not m or m.group(1) not in FM_KEYS:
+            return body, False
+        keys.append(m.group(1))
+        i += 1
+    if i >= len(lines) or "name" not in keys or "type" not in keys:
+        return body, False
+    head = "\n".join(lines[:i])
+    # `---` terminator: consume it (it is the frontmatter's closing delimiter).
+    # Blank-line terminator: keep the blank line, it separates body from
+    # frontmatter once the closing `---` is inserted above it.
+    rest = "\n".join(lines[i + 1:] if lines[i].strip() == "---" else lines[i:])
+    return f"---\n{head}\n---\n{rest}", True
+
+
+def _infer_attrs(attrs, body):
+    """Fill in a `<MEMORY>` tag's missing `file=`/`action=` from the block's OWN
+    frontmatter. Returns (file, action, err).
+
+    FAIL CLOSED: this may only ever RE-READ a name the block already states. It
+    never falls back to the block file's name (a temp file called
+    `mpb-capture-9x7u7u37.txt` would become `memories/mpb-capture-9x7u7u37.md`),
+    never to a slug derived from the description, and never to a folder for a
+    `type:` the schema doesn't know. Anything it cannot read from the
+    frontmatter is a refusal, i.e. the same quarantine as before — the point of
+    the inference is to stop losing recoverable captures, not to accept more.
+
+    `action` defaults to "new" and NOT to "delete": an absent attribute must
+    never resolve to the one action that destroys an item. "new" vs "update" is
+    safe to guess because ownership is enforced per PATH, not per action
+    (check_ownership takes no action argument) and commit_block writes the file
+    identically for both; the action reaches only the commit trailer.
+
+    The folder comes from `type:` per docs/format-spec.md ("user/feedback/
+    project/reference live in memories/; knowledge in knowledge/"). Skills are
+    deliberately not inferrable — they are a directory with a meta.yaml, not a
+    single item file."""
+    file_attr = attrs.get("file")
+    action = attrs.get("action") or "new"
+    if file_attr:
+        return file_attr, action, None
+
+    missing = 'parse-error: <MEMORY> tag has no file="…" attribute'
+    fm, _ = parse_frontmatter(body)
+    if not fm:
+        return None, None, f"{missing} and the block has no frontmatter to infer one from"
+    name = fm.get("name")
+    if not name:
+        return None, None, f"{missing} and the block's frontmatter has no `name:` to infer one from"
+    if not KEBAB_RE.match(name):
+        return None, None, (f"{missing} and its frontmatter `name: {name[:60]}` is not a "
+                            "kebab-case slug, so it cannot be turned into a path")
+    typ = fm.get("type")
+    if typ not in ITEM_TYPES:
+        return None, None, (f"{missing} and its frontmatter `type: {str(typ)[:40]}` is not a "
+                            "known item type, so the target folder is unknown")
+    folder = "knowledge" if typ == "knowledge" else "memories"
+    return f"{folder}/{name}.md", action, None
+
+
 def parse_block(raw_text):
+    """Parse one emit-grammar block. Returns (block, err); `err` is the
+    quarantine DETAIL, and quarantine_reason() maps it to the reason."""
+    # An empty input is its own condition, not a malformed block. Every 0-byte
+    # quarantine artifact ever written here came from this path (quarantine()
+    # copies the input verbatim, so an empty input yields an empty artifact),
+    # and it was reported with the same "no <MEMORY> block found" wording as a
+    # genuinely malformed block — one message covering two conditions, which
+    # left two 2026-08-07 events unexplainable from the digest alone.
+    if not raw_text.strip():
+        return None, EMPTY_BLOCK_DETAIL
     text = strip_fence(raw_text)
     m = MEMORY_RE.search(text)
-    if not m:
-        return None, "parse-error: no <MEMORY file=\"…\" action=\"…\">…</MEMORY> block found"
-    body = m.group("body")
-    if body.startswith("\n"):
-        body = body[1:]
+    if m:
+        # A well-formed tag stays on the strict path, byte for byte as before:
+        # the recovery below is for an emitter that demonstrably lost the
+        # grammar, not a licence to repair blocks that kept it.
+        file_attr, action, body = m.group("file"), m.group("action"), m.group("body")
+        body = body[1:] if body.startswith("\n") else body
+        inferred = []
+    else:
+        bare = MEMORY_ANY_RE.search(text)
+        if not bare:
+            return None, "parse-error: no <MEMORY …>…</MEMORY> block found"
+        body = bare.group("body")
+        body = body[1:] if body.startswith("\n") else body
+        attrs = dict(ATTR_RE.findall(bare.group("attrs")))
+        body, repaired = _repair_headless_frontmatter(body)
+        file_attr, action, err = _infer_attrs(attrs, body)
+        if err:
+            return None, err
+        inferred = [k for k in ("file", "action") if k not in attrs]
+        if repaired:
+            inferred.append("frontmatter delimiters")
+    # A missing trailing `INDEX:` line is NOT an error. Nothing reads it: the
+    # parsed value has no consumer anywhere in hub/, and INDEX.md is rebuilt
+    # deterministically from item frontmatter by brain_merge.build_index_bytes.
+    # It cannot even serve as a truncation check — the item's content is
+    # already bounded by the `</MEMORY>` tag that MEMORY_ANY_RE requires. So
+    # discarding a whole capture over it lost real content for no signal.
     idx_m = INDEX_LINE_RE.search(text)
-    if not idx_m:
-        return None, "parse-error: no trailing INDEX: line found"
     block = {
-        "file": m.group("file"),
-        "action": m.group("action"),
+        "file": file_attr,
+        "action": action,
         "body": body,
-        "index_line": idx_m.group(0),
+        "index_line": idx_m.group(0) if idx_m else None,
+        "inferred": inferred,
         "raw": text,
     }
     return block, None
+
+
+def quarantine_reason(err):
+    """The quarantine REASON for a parse_block error detail. An empty capture
+    gets its own reason: "parse-error" says the emitter sent something this
+    gate could not read, which is a different diagnosis (and a different fix)
+    from the emitter having sent nothing at all."""
+    return "empty-block" if err == EMPTY_BLOCK_DETAIL else "parse-error"
 
 
 def validate_schema(block):
@@ -646,8 +785,14 @@ def main():
 
     block, err = parse_block(raw)
     if err:
-        quarantine(brain_dir, args.provider, args.block_file, "parse-error", err)
+        quarantine(brain_dir, args.provider, args.block_file, quarantine_reason(err), err)
         sys.exit(1)
+
+    if block["inferred"]:
+        # Say so on stdout: an inferred path is a decision the emitter did not
+        # make, and the MCP tool relays this text back to the caller.
+        print(f"INFERRED {', '.join(block['inferred'])} from frontmatter: "
+              f"file=\"{block['file']}\" action=\"{block['action']}\"")
 
     schema_err = validate_schema(block)
     if schema_err:

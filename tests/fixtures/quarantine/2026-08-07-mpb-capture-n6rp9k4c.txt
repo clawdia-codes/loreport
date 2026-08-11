@@ -1,0 +1,25 @@
+<MEMORY file="memories/feedback-use-absolute-paths.md" action="update">
+---
+name: feedback-use-absolute-paths
+description: Give full absolute file paths, never bare or relative ones, when the session is remote-controlled - and in every handover document
+type: feedback
+source: claude
+captured: 2026-07-24
+visibility: shared
+domain: personal
+---
+When a session is driven remotely (phone or remote access rather than at the keyboard),
+every file mentioned in a reply - status docs, code, config, logs - gets its full absolute
+path from `/`, not a path relative to an assumed working directory.
+
+**Why:** a bare `docs/plans/STATUS.md` forced a "where is this file?" round trip. Remote,
+there is no prompt to glance at to infer the working directory.
+
+**Extends to handover documents.** The same rule applies to any handover, plan or status
+file written for a *later* session to pick up. A handover is read cold, in an unknown
+working directory, often by a different tool.
+
+Related: [[project-alpha-pipeline]]
+</MEMORY>
+
+INDEX: feedback-use-absolute-paths — Give full absolute file paths, never bare or relative ones, when the session is remote-controlled

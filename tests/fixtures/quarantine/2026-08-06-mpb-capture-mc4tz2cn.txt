@@ -1,0 +1,20 @@
+<MEMORY>
+name: feedback-avoid-display-commands
+type: feedback
+visibility: local
+description: Commands that DISPLAY a credential leak it irreversibly into the session transcript - prefer commands that USE one
+---
+Twice in 24 hours, a live credential leaked into a session transcript through an entirely
+ordinary read-only command:
+
+1. a process listing printed a sandbox argv including an injected token
+2. a grep over a unit drop-in (to look up a connection string) printed the live password
+
+**Why:** the transcript is transmitted on every turn, so the credential leaves the machine
+the instant it is rendered, and no later redaction can recall it.
+
+**Instead:** pipe the value into the command that needs it, or reference the file by path
+without printing it.
+
+Related: [[feedback-verify-before-assert]].
+</MEMORY>

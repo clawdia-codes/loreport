@@ -1,0 +1,14 @@
+<MEMORY>
+name: project-alpha-pipeline
+type: project
+visibility: shared
+description: Batch pipeline for project alpha - four lanes on one clock, built but never installed
+
+Project alpha is the batch pipeline that watches, maintains and repairs reported issues. Small isolated ones are handled unattended; the rest are pooled into a reviewed batch with explicit decision points.
+
+Continuation doc: /srv/example/project-alpha/HANDOFF.md - written for an operator with zero context.
+
+Central finding: the runner was fully built and merged, and had simply never been installed - no unit file anywhere. It has still never run on a schedule.
+
+Traps found: the runbook had drifted from the checklist on which failures are known, so an unlisted failure reads as self-inflicted. Merging is not deploying: nothing pulls the live tree by itself, which is what makes the automatic merge safe.
+</MEMORY>
