@@ -250,13 +250,42 @@ def _commands(item, brain_dir, engine_dir):
             f"{shlex.quote(path)} "
             f"--brain-dir {shlex.quote(brain_dir)} --trust local",
         ))
-    else:
+    elif item["kind"] == "capture":
+        # A capture we cannot re-run: no provider could be determined.
+        out.append((
+            "accept",
+            "not automatic — this is a CAPTURE with no provider recorded "
+            f"(reason: {item['reason']}), so there is no command that re-runs "
+            "it through the gate. Read it with `show` above and re-emit it from "
+            "a session that can.",
+        ))
+    elif item["kind"] == "merge-update":
         target = item["target"] or "the item it was meant to update"
         out.append((
             "accept",
             "not automatic — this is a rejected merge update, not a capture "
             "block, and applying it by hand skips the secret scrub. Compare it "
             f"with {target} and re-file it through a provider branch.",
+        ))
+    else:
+        # `kind` is inferred from CONTENT: a <MEMORY> tag means capture,
+        # frontmatter means merge-update, NEITHER means unknown — which is
+        # exactly what an `empty-block` (0-byte) quarantine looks like.
+        #
+        # This branch used to be the merge-update branch, so every unknown was
+        # told "this is a rejected merge update, not a capture block": a
+        # subsystem the code had never determined, with a remedy that does not
+        # apply, stated as fact. Naming the wrong subsystem had two separate
+        # agents report a healthy brain as three days dead this week, so an
+        # honest "I cannot tell" is strictly better than a confident guess.
+        out.append((
+            "accept",
+            "not automatic — this file could not be classified: it carries "
+            "neither a <MEMORY> block nor frontmatter, so it is neither a "
+            f"recognisable capture nor a merge update (reason: {item['reason']}). "
+            "A 0-byte file means the emitting session sent nothing, and the "
+            "content is recoverable only from that session, not from here. Read "
+            "it with `show` above before discarding.",
         ))
     out.append(("discard (deletes the parked copy)", f"rm {shlex.quote(path)}"))
     return out

@@ -182,6 +182,25 @@ class RenderedDetailNamesTheItem(unittest.TestCase):
         self.assertIn("secret scrub", block)
         self.assertNotIn("inbox_ingest.py", block.split("discard", 1)[0])
 
+    def test_an_empty_capture_is_not_called_a_rejected_merge_update(self):
+        """Mutation: delete the `elif item["kind"] == "capture":` branch in
+        quarantine_report._commands so an unclassifiable file falls back to the
+        merge-update wording.
+
+        An `empty-block` (0-byte) quarantine IS a capture — it just carries no
+        provider to re-run it with. Falling through told the reader it was "a
+        rejected merge update, not a capture block": the wrong subsystem, with a
+        remedy that does not apply. Two separate agents reported a healthy brain
+        as three days dead this week off the back of one mislabelled subsystem,
+        which is why this is worth a test rather than a shrug."""
+        self._park("claude/2026-08-10-capture-empty00.txt", "")
+        text = self.render()
+        block = text.split("empty00", 1)[1]
+        head = block.split("discard", 1)[0]
+        self.assertNotIn("rejected merge update", head)
+        self.assertIn("could not be classified", head)
+        self.assertIn("0-byte", head)
+
     def test_a_digest_disk_count_mismatch_is_stated_outright(self):
         """Mutation: delete the `if digest_count is not None and digest_count
         != len(items)` branch in quarantine_report.render.
