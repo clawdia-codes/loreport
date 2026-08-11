@@ -1,6 +1,106 @@
 # Changelog
 
-## [Unreleased]
+## [1.15.0] — 2026-08-11
+
+Five feature branches (P3, P4, P6, P7, P8), each independently reviewed, plus the
+fixes for every blocker that review found. 250 tests at 1.14.0 -> 398 here.
+
+### Fixed — the alert stops handing out a command that waives its own gate
+
+- **A parked block refused BY the ownership check was offered an "accept
+  (re-runs the capture gate)" one-liner whose `--trust local` switches that
+  check OFF.** `check_ownership()` returns None on its first line under local
+  trust, and the resulting commit carries `Trust: local`, which
+  `collect_provenance_violations()` skips — so one pasted line waived both
+  defences against a cross-provider takeover. Reproduced end to end using only
+  commands the alert printed: a `visibility: local, source: openclaw` item came
+  back shared, foreign-authored, and in the published cloud packet. That class
+  now gets words, not a command, and says what to change on `main` instead.
+  A verb in this alert never claims a gate it does not run.
+- The actionable `· what to do: cat <banner>` was appended *before* the
+  notification clamp, which cuts from the end — a long item name evicted the one
+  actionable element of the phone payload. Clamp the body, then append. Item
+  names are capped individually, not only counted; they come out of a block that
+  failed the schema gate, so they are unvalidated caller text.
+- `quarantine_detail()` returned empty when `hub/quarantine_report.py` was
+  missing, leaving "each block below carries a show/accept/discard command"
+  standing over nothing. It now names the helper it could not run.
+- Printed paths go through `shlex.quote()`: these lines exist to be pasted into
+  a shell.
+
+### Fixed — the disposition ledger was never committed on the default path
+
+- **A quiet night is "most days", and the ledger only rode the INDEX commit.**
+  Measured: run 1 gave `noop=True, ledger_changed=True`, one proposal detected,
+  and `git ls-files hub/proposals/ledger.json` came back EMPTY; run 2 never
+  staged it again. Live proposals and every disposition against them existed
+  only as an untracked local file — gone on re-clone, at which point every
+  rejected proposal returns as pending and every `first_seen` clock resets.
+  A no-op night now commits the ledger on its own. It must be a *commit*, not
+  just a `git add`: `loreport-sync`'s post-merge guard reads `git status
+  --porcelain --untracked-files=no`, which sees staged changes, so the naive fix
+  would have halted the sync every night.
+- The no-op arm shared `git reset --hard` with `--dry-run`. Once the ledger is
+  tracked that REVERTS it — throwing away the decision `--dispose` wrote that
+  afternoon. The arms are now split, and staging is unconditional rather than
+  keyed on `ledger_changed`, which `--dispose` never sets.
+
+### Fixed — reconciliation was unusable exactly as documented
+
+- **Every `~` path resolved to `<brain>/~/...`.** `hub/HUB.md` ships a
+  copy-paste config whose every example starts with `~` and says "`~` expands";
+  the code joined onto the brain root first, and `expanduser` only expands a
+  *leading* `~`. Each source configured as documented came back `unreadable`,
+  making the whole reconciliation `error`. Expand first, then resolve.
+- The multi-source return carried no top-level `detail`, so health rendered the
+  literal string `None` — a weekly FAIL naming neither source, path, nor reason.
+  Every status now names the offender.
+
+### Fixed — three fail-open holes, each routing a crash to "healthy"
+
+- **`loreport-health` §9's inline python** caught only OSError/JSONDecodeError/
+  UnicodeDecodeError while being invoked as `2>/dev/null || true`. Any other
+  exception — an AttributeError on parseable-but-wrong-shape JSON, say — killed
+  the checker, emitted nothing, and silently disabled ALL THREE of §9's
+  assertions at exit 0. Measured on five payloads. The body is now a function
+  under an outer guard; a crash is a named FAIL.
+- **A broken `first_seen`** (absent, null or unparseable) recomputed a
+  proposal's age as 0 every night, so it was never overdue — fail-open in the
+  one assertion that forces a decision. It now fails closed.
+  Failing closed is not allowed to fail loudly elsewhere: `pending_days` is also
+  sorted on and formatted into the digest, so the artifact keeps `null` plus an
+  explicit `clock: ok|unreadable` rather than arithmetic on a missing value.
+- **`hub/attention.json` validated its container but not its entries.** Four
+  shapes raised straight through `build_attention`'s documented promise never
+  to, failing all five projection targets; `project.py` then rewrote the
+  manifest with `targets: []`, at which point every projection check in health
+  iterates an empty list and asserts nothing while the surfaces sit frozen.
+  Entries are validated on load, and the guard now covers the whole body.
+
+### Fixed — the attention feature's real producer was never wired up
+
+- **`hub/sweep_run.py` is what the nightly timer runs**, and none of its six
+  `quarantine()` call sites passed `item_path`. Entries stored `path: None`, so
+  no marker was ever placed on the item's index line — the primary delivery
+  hook, because injection beats retrieval. The suite was green at 270 with the
+  production producer entirely unwired.
+
+### Fixed — projection accounting, and a recovery that left no trace
+
+- **`dropped=` covered two conditions**: index lines withheld by the visibility
+  filter (the system working) and index lines cut to fit `budget_chars` (a
+  memory that reaches no session). Now `filtered=` and `truncated=`, with
+  truncation a health FAILURE and filtering not.
+- **The bare-tag recovery had no durable consumer.** It synthesizes
+  `file`/`action` and rewrites the committed body, and said so only on stdout —
+  so a repaired capture was byte-indistinguishable in `git log` from a correct
+  one, and the sweep (which prints nothing) left no record at all. Commits now
+  carry an `Inferred:` trailer; `git log --grep='^Inferred:'` answers how often
+  the emitter is actually losing the grammar.
+- `docs/format-spec.md` claimed "none of this widens what may be written" and
+  that a well-formed tag keeps the strict frontmatter rule. Both were false —
+  a stated `action="delete"` with no `file=` infers its path and executes, and
+  the carve-out is keyed on the regex's attribute ORDER. Documented as they are.
 
 ### Added — the synthesis detector finally has a consumer
 
@@ -37,9 +137,29 @@
   health script). Each names the single-line production mutation it reddens, and all 20
   mutations were run: deleting §9 wholesale reddens 11, and the only mutation that
   stays green is a deliberate cosmetic control.
-- ⚠ **Existing brains need one line.** A brain gets `.gitignore` once, at init, so
-  `hub/nightly/` must be added by hand or `loreport-sync` will commit a dated report
-  every night. See hub/HUB.md, "Deploying this to a brain that already exists".
+### ⚠ Deploying this to a brain that already exists
+
+A brain gets its `.gitignore` once, at init — the engine's own does not reach it — so
+three things must be done by hand before or with this release:
+
+1. **Raise `budget_chars` in the brain's `hub/projection-targets.json`.** Measured on
+   the live brain: 565 chars of headroom on the `scope: all` surfaces, and one rendered
+   contested entry is 589. The attention block joins the never-truncated fixed prefix,
+   so the *first* queued entry evicts a real index line from `~/.claude/CLAUDE.md` and
+   its siblings — and because truncation is now a health FAILURE (above), it also turns
+   the banner red. The eviction is reported rather than silent, which is the point of
+   the accounting change, but the headroom still has to be bought.
+2. **Add `hub/nightly/` and `hub/attention.json` to the brain's `.gitignore`.** Both are
+   derived per-run state. (Correcting an earlier note in this file: an untracked one
+   does *not* get committed — every `git add` in `bin/loreport-sync` is path-scoped —
+   it sits at `??` in `git status` forever, which is its own quiet nuisance.)
+   `hub/proposals/` must **not** be added: the ledger is tracked on purpose.
+3. **Update `[[reference-loreport-projection-truncates-silently]]`.** Its index line
+   says "check `dropped=0`"; that string no longer exists in `project.py`'s output. The
+   correct check is `truncated=0`, with `filtered=68` as the healthy steady state. That
+   line is injected into every session, so it will actively mislead until edited.
+
+See hub/HUB.md for the full note.
 
 ## [1.14.0] — 2026-08-10
 
