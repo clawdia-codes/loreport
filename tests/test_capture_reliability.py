@@ -364,6 +364,30 @@ class TheRecoveryLeavesADurableRecord(_Brain):
         # exactly the class this suffix exists to make visible.
         self.assertEqual(sweep_run.classify(outcome), "committed")
 
+    def test_the_sweep_also_separates_empty_block_from_parse_error(self):
+        """MERGE GUARD. Mutation: put the literal `"parse-error"` back in place
+        of `quarantine_reason(err)` in sweep_run.process_candidate.
+
+        That single line is where two branches collided: one side added
+        `quarantine_reason(err)` — empty-block vs parse-error, because a caller
+        that emitted nothing is a different diagnosis and a different fix from a
+        malformed block — and the other added `item_path=None`. Every other
+        empty-block test drives inbox_ingest.main, so a resolution that kept the
+        literal would have reverted the diagnosis on the NIGHTLY BULK path with
+        the entire suite green."""
+        sys.path.insert(0, os.path.join(REPO, "hub"))
+        import sweep_run  # noqa: E402
+
+        block_path = os.path.join(self.brain, "empty.txt")
+        with open(block_path, "w", encoding="utf-8") as fh:
+            fh.write("   \n")
+        outcome = sweep_run.process_candidate(
+            self.brain, {"provider": PROVIDER, "block": "   \n"},
+            block_path, "local")
+        self.assertIn("empty-block", outcome)
+        self.assertNotIn("parse-error", outcome)
+        self.assertIn("- reason: empty-block", self.digest())
+
     def test_the_summary_still_counts_an_inferred_capture_as_a_capture(self):
         """Mutation: `if outcome.startswith("committed")` -> `if outcome ==
         "committed"` in sweep_run.classify."""

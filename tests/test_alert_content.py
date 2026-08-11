@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import unittest
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.dirname(HERE)
@@ -631,6 +632,65 @@ class ExistingReviewPathsStillCarryDetail(HealthHarness, unittest.TestCase):
         banner = self.banner_text()
         self.assertIn("backup-schedule", banner)
         self.assertIn("discard", banner)
+
+
+
+
+class TwoReviewSourcesInOneRun(HealthHarness, unittest.TestCase):
+    """MERGE GUARD. Three feature branches edited scripts/loreport-health, and
+    no single branch could test the state where two of them speak at once.
+
+    Section 6b (a parked capture block) came from one branch and gained an
+    optional third `note_review` argument, the per-item detail block. Section 9
+    (a synthesis proposal awaiting disposition) came from another and still
+    calls `note_review` with two. `${3:-}` is what makes that safe — and nothing
+    exercised it. This is also the shape the whole 1.14.0 naming work exists
+    for: two independent things owe a decision, the pipeline is healthy, and the
+    reader must be able to tell that from the alert alone.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_digest(_quarantine_digest(1))
+        self.write("hub/quarantine/openclaw/2026-08-10-capture-abc123.txt",
+                   CAPTURE_BLOCK)
+        self.write("hub/quarantine/digest.md", DIGEST_LOG)
+        self.write_nightly(ledger=self.pending_ledger(
+            (date.today() - timedelta(days=2)).isoformat()))
+
+    def test_both_review_items_are_reported_and_neither_is_a_failure(self):
+        """Mutation: change `review_details+=("${3:-}")` to
+        `review_details+=("$3")` in scripts/loreport-health — section 9's
+        two-argument note_review call then aborts the script under `set -u`."""
+        result = self.run_health()
+        self.assertEqual(result.returncode, 0,
+                         f"two pending decisions were graded a failure: "
+                         f"{result.stderr}")
+        banner = self.banner_text() or ""
+        self.assertIn("NEEDS REVIEW", banner)
+        # 6b: the parked block, named, with its per-item commands.
+        self.assertIn("backup-schedule", banner)
+        self.assertIn("show: cat ", banner)
+        # 9: the proposal awaiting a disposition, with its own command.
+        self.assertIn("awaiting your disposition", banner)
+        self.assertIn("--dispose", banner)
+        # And the detail block belongs to 6b alone — section 9 passes no third
+        # argument, so its entry must render without one rather than borrowing.
+        self.assertEqual(banner.count("parked blocks under"), 1, banner)
+
+    def test_one_notification_covers_both_and_still_says_the_pipeline_is_fine(self):
+        """Mutation: as above. The phone payload is the one that got misread;
+        two simultaneous review items must not make it read as a failure."""
+        self.run_health()
+        notes = [n for n in self.notifications() if "awaiting your review" in n]
+        self.assertEqual(1, len(notes), self.notifications())
+        msg = notes[0].replace(" --silent", "")
+        self.assertIn("2 item(s)", msg)
+        self.assertIn("merge and publish are running", msg)
+        self.assertIn("what to do: cat ", msg)
+        self.assertLessEqual(len(msg), 400, len(msg))
+        for word in ("FAIL", "failed", "stuck", "dead", "broken"):
+            self.assertNotIn(word, msg)
 
 
 if __name__ == "__main__":

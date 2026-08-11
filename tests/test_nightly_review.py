@@ -750,3 +750,44 @@ class TheLedgerIsActuallyCommittedByTheMerge(unittest.TestCase):
             os.path.join(self.repo, nr.ATTESTATION_DIR, f"{day}.json")))
         self.assertEqual(self._git("ls-files", nr.ATTESTATION_DIR).stdout.strip(), "",
                          "a per-run report got tracked; the tree will be dirty nightly")
+
+
+class TheBrainTemplateIgnoresTheRightThings(unittest.TestCase):
+    """MERGE GUARD on brain-template/.gitignore, which no other test reads.
+
+    A brain gets that file ONCE, at init; the engine's own .gitignore does not
+    reach it. Two feature branches appended to the same block, and a "union" or
+    "complete the set" resolution that swept `hub/proposals/` in would silently
+    undo the ledger-commit fix — the tracked ledger is what makes `first_seen`
+    survive a re-clone, and without it the overdue check fails open — with the
+    entire suite still green, because every merge fixture writes its own
+    .gitignore in setUp.
+    """
+
+    def setUp(self):
+        self.path = os.path.join(ROOT, "brain-template", ".gitignore")
+        with open(self.path, encoding="utf-8") as fh:
+            self.lines = [ln.strip() for ln in fh
+                          if ln.strip() and not ln.startswith("#")]
+
+    def test_the_derived_per_run_artifacts_are_ignored(self):
+        """Mutation: delete `hub/nightly/` (or `hub/attention.json`) from
+        brain-template/.gitignore. Both are rewritten outside a commit, so a
+        tracked one leaves the tree dirty nightly and halts loreport-sync's
+        post-merge guard."""
+        for entry in ("hub/nightly/", "hub/attention.json",
+                      "hub/merge-state.json", "hub/digest-*.md"):
+            self.assertIn(entry, self.lines,
+                          f"{entry} is derived per-run state and must be ignored")
+
+    def test_the_disposition_ledger_is_never_ignored(self):
+        """Mutation: add `hub/proposals/` to brain-template/.gitignore.
+
+        THE point of that file being tracked: it holds human dispositions and
+        the first_seen clock the overdue check measures from, so it must survive
+        a re-clone. Ignoring it resets every clock and returns every rejected
+        proposal to pending, silently."""
+        for line in self.lines:
+            self.assertNotIn(
+                "proposals", line,
+                f"brain-template/.gitignore would untrack the ledger: {line!r}")
