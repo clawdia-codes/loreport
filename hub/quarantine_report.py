@@ -27,6 +27,7 @@ so failures are caught and rendered as one explicit line.
 import argparse
 import os
 import re
+import shlex
 import sys
 
 # Everything under hub/quarantine/ that is NOT a parked block. Must stay equal
@@ -45,6 +46,22 @@ DESCRIPTION_MAX_CHARS = 200
 # message past a notification preview, which hides the part that says the
 # pipeline is healthy.
 NOTIFY_MAX_NAMES = 3
+
+# Longest single item name the phone-sized summary may carry. The names are read
+# out of a block that FAILED the schema gate, so `name:` is unvalidated caller
+# text: one 600-char name would fill the whole notification and, because the
+# caller appends its actionable "what to do:" pointer BEFORE clamping, evict
+# precisely the actionable part. Cap each name, not just how many there are.
+NOTIFY_MAX_NAME_CHARS = 60
+
+# Reasons whose accept MUST NOT be a paste-and-run line, because the gate that
+# refused the block is the one `--trust local` switches off. Re-running an
+# `ownership-denied` capture at local trust does not re-decide the refusal --
+# check_ownership() returns None on its first line — and the commit it produces
+# carries `Trust: local`, which brain_merge.collect_provenance_violations()
+# skips outright. Two independent defences against a cross-provider takeover,
+# waived by one line the alert itself printed. These get words, not a command.
+OWNERSHIP_WAIVED_REASONS = ("ownership-denied",)
 
 MEMORY_TAG_RE = re.compile(r'<MEMORY\b[^>]*\bfile="([^"]+)"', re.IGNORECASE)
 MEMORY_ANY_RE = re.compile(r"<MEMORY\b", re.IGNORECASE)
@@ -172,8 +189,12 @@ def list_pending(brain_dir):
 
 
 def summary_names(items, limit=NOTIFY_MAX_NAMES):
-    """The one-line name list for the phone-sized payload."""
-    labels = [(it["name"] or it["filename"]) for it in items]
+    """The one-line name list for the phone-sized payload.
+
+    Each label is capped as well as the count: see NOTIFY_MAX_NAME_CHARS.
+    """
+    labels = [_truncate(it["name"] or it["filename"], NOTIFY_MAX_NAME_CHARS)
+              for it in items]
     if not labels:
         return ""
     shown = labels[:limit]
@@ -190,25 +211,44 @@ def _commands(item, brain_dir, engine_dir):
     merge update applied by hand bypasses the secret scrub, the visibility
     classification and the provenance revert -- in a brain whose own history
     includes three fail-open visibility leaks in a single day. Only a capture
-    block gets an automatic accept, because re-running inbox_ingest.py re-runs
-    all five gates; anything else is told, in words, why there is no one-liner.
+    block gets an automatic accept, and only when the reason it was parked is
+    one that re-running the gate can actually re-decide; anything else is told,
+    in words, why there is no one-liner.
 
-    `--trust local` is deliberate, not a shortcut. It relaxes only the ownership
-    check, which is the tier a human running this by hand on their own machine
-    actually has; the parse, schema, secret and imperative gates all still run.
-    Under `cloud` the ownership check refuses every visibility:local item, so the
-    command printed in the alert would re-quarantine the very blocks most likely
-    to be parked -- and a command that fails when you paste it teaches the reader
-    to distrust the whole alert.
+    `--trust local` on that accept RELAXES the ownership check and leaves the
+    other four gates (parse, schema, secret, imperative) in force. That is the
+    right tier for a human at their own machine re-filing their own block, and
+    it is why a `visibility: local` item can be accepted at all. It is exactly
+    the WRONG tier for OWNERSHIP_WAIVED_REASONS below, where the ownership
+    check is the thing that made the decision -- see that constant.
+
+    A verb is never labelled with a gate it does not run: `accept (re-runs the
+    capture gate)` means the five gates run with ownership at local trust, and
+    for an ownership refusal there is no accept line at all.
     """
     path = item["path"]
-    out = [("show", f"cat '{path}'")]
-    if item["kind"] == "capture" and item["provider"]:
+    out = [("show", f"cat {shlex.quote(path)}")]
+    if item["kind"] == "capture" and item["reason"] in OWNERSHIP_WAIVED_REASONS:
+        target = item["target"] or "the item it was meant to update"
+        out.append((
+            "accept",
+            "not automatic — this block was refused BY the ownership check "
+            f"(reason: {item['reason']}), and the only way to re-run the "
+            "capture with it satisfied is `--trust local`, which switches that "
+            "check off rather than re-running it. The resulting commit would "
+            "also be stamped `Trust: local`, which makes the merge-side "
+            "provenance backstop skip it too — two gates waived by one pasted "
+            f"line. Compare the block with {target} and, if the takeover really "
+            "is intended, change that item's `visibility:`/`source:` on main "
+            "first and let the provider re-capture it normally.",
+        ))
+    elif item["kind"] == "capture" and item["provider"]:
         ingest = os.path.join(engine_dir, "hub", "inbox_ingest.py")
         out.append((
             "accept (re-runs the capture gate)",
-            f"python3 '{ingest}' {item['provider']} '{path}' "
-            f"--brain-dir '{brain_dir}' --trust local",
+            f"python3 {shlex.quote(ingest)} {shlex.quote(item['provider'])} "
+            f"{shlex.quote(path)} "
+            f"--brain-dir {shlex.quote(brain_dir)} --trust local",
         ))
     else:
         target = item["target"] or "the item it was meant to update"
@@ -218,7 +258,7 @@ def _commands(item, brain_dir, engine_dir):
             "block, and applying it by hand skips the secret scrub. Compare it "
             f"with {target} and re-file it through a provider branch.",
         ))
-    out.append(("discard (deletes the parked copy)", f"rm '{path}'"))
+    out.append(("discard (deletes the parked copy)", f"rm {shlex.quote(path)}"))
     return out
 
 

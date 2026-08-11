@@ -142,7 +142,7 @@ class RenderedDetailNamesTheItem(unittest.TestCase):
         "Open a file and resolve it" is not an outcome. Each block must offer a
         command per decision."""
         text = self.render()
-        self.assertIn("show: cat '", text)
+        self.assertIn("show: cat ", text)
         self.assertIn("accept", text)
         self.assertIn("discard", text)
 
@@ -154,11 +154,16 @@ class RenderedDetailNamesTheItem(unittest.TestCase):
         their own machine, which is what the local tier means; under `cloud` the
         ownership check refuses every visibility:local item, so the command in
         the alert would re-quarantine exactly the blocks most likely to be
-        parked and the reader would conclude the alert was wrong."""
+        parked and the reader would conclude the alert was wrong.
+
+        That reasoning holds only for a block parked by a gate `--trust local`
+        still runs. It does NOT hold when the ownership check itself did the
+        refusing — see OwnershipRefusalGetsNoOneLiner below, the class this
+        test was originally written too broadly to distinguish."""
         text = self.render()
         self.assertIn(os.path.join(self.engine, "hub", "inbox_ingest.py"), text)
         self.assertIn("openclaw", text)
-        self.assertIn(f"--brain-dir '{self.brain}'", text)
+        self.assertIn(f"--brain-dir {self.brain}", text)
         self.assertIn("--trust local", text)
 
     def test_a_rejected_merge_update_is_not_offered_a_paste_and_run_accept(self):
@@ -207,6 +212,26 @@ class RenderedDetailNamesTheItem(unittest.TestCase):
         named = names.split(" (+")[0].split(", ")
         self.assertEqual(quarantine_report.NOTIFY_MAX_NAMES, len(named), names)
 
+    def test_summary_names_cap_each_name_not_only_how_many(self):
+        """Mutation: `NOTIFY_MAX_NAME_CHARS = 10000` in quarantine_report.
+
+        Capping the COUNT is not enough. `name:` comes out of a block that
+        failed the schema gate, so it is unvalidated caller text — one enormous
+        name is exactly the shape that gets parked, and it spends the whole
+        notification budget on its own. Three names of 600 chars each is the
+        same defect as ten names."""
+        self._park("openclaw/2026-08-10-huge.txt",
+                   CAPTURE_BLOCK.replace("backup-schedule", "x" * 600))
+        names = quarantine_report.summary_names(
+            quarantine_report.list_pending(self.brain))
+        for label in names.split(" (+")[0].split(", "):
+            # A LITERAL bound, not NOTIFY_MAX_NAME_CHARS. Asserting against the
+            # constant the production code reads makes the test agree with any
+            # value of it, including 10000 — a test that cannot fail.
+            self.assertLessEqual(
+                len(label), 80,
+                f"an uncapped name reached the phone payload: {label[:80]!r}")
+
     def test_the_non_items_rule_matches_the_merge_writer(self):
         """Mutation: `QUARANTINE_NON_ITEMS = ("digest.md",)` in either module.
 
@@ -216,6 +241,149 @@ class RenderedDetailNamesTheItem(unittest.TestCase):
         contradicts itself."""
         self.assertEqual(brain_merge.QUARANTINE_NON_ITEMS,
                          quarantine_report.QUARANTINE_NON_ITEMS)
+
+
+OWNERSHIP_DIGEST_LOG = """# Quarantine digest
+
+## 2026-08-10T01:02:03 — QUARANTINE (chatgpt)
+- file: hub/quarantine/chatgpt/2026-08-10-capture-own1.txt
+- reason: ownership-denied
+- detail: cloud-trust caller (provider=chatgpt) may not update/delete 'memories/health-notes.md': its main version is visibility: local
+
+"""
+
+OWNERSHIP_BLOCK = """<MEMORY file="memories/health-notes.md" action="update">
+---
+name: health-notes
+type: reference
+visibility: shared
+description: Rewritten by a second provider
+---
+Replacement body from the other provider.
+</MEMORY>
+"""
+
+
+class OwnershipRefusalGetsNoOneLiner(unittest.TestCase):
+    """A block refused BY the ownership check must not be handed a command that
+    switches that check off.
+
+    The alert's accept line is `inbox_ingest.py ... --trust local`, and
+    check_ownership() returns None on its first line under local trust. So for
+    reason `ownership-denied` the label "re-runs the capture gate" is false: the
+    gate is not re-run, it is disabled — and the commit it produces carries
+    `Trust: local`, which collect_provenance_violations() skips, so the
+    merge-side backstop built for exactly this cross-provider takeover never
+    fires either. Two defences waived by one line the alert itself printed.
+
+    No mutation could have caught this: the original
+    test_a_capture_block_accepts_by_re_running_the_gate ASSERTS `--trust local`
+    unconditionally, so the mutation harness pinned the defect in place.
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.brain = tempfile.mkdtemp(prefix="loreport-p4-own-")
+        self.addCleanup(shutil.rmtree, self.brain, ignore_errors=True)
+        self.engine = os.path.join(self.brain, "engine")
+        self._write("hub/quarantine/chatgpt/2026-08-10-capture-own1.txt",
+                    OWNERSHIP_BLOCK)
+        self._write("hub/quarantine/digest.md", OWNERSHIP_DIGEST_LOG)
+
+    def _write(self, rel, text):
+        path = os.path.join(self.brain, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def render(self):
+        return quarantine_report.render(self.brain, self.engine)
+
+    def test_no_paste_and_run_accept_is_printed_for_an_ownership_refusal(self):
+        """Mutation: `OWNERSHIP_WAIVED_REASONS = ()` in quarantine_report.
+
+        (Equivalently: drop the `item["reason"] in OWNERSHIP_WAIVED_REASONS`
+        arm from _commands, which is the pre-fix code.)"""
+        text = self.render()
+        self.assertIn("health-notes", text)
+        self.assertIn("ownership-denied", text)
+        accept_region = text.split("accept", 1)[1].split("discard", 1)[0]
+        # No RUNNABLE line. The prose is allowed to name `--trust local` — it
+        # has to, to explain the refusal — so assert on what makes a line
+        # pasteable instead.
+        self.assertNotIn("inbox_ingest.py", accept_region)
+        self.assertNotIn("python3 ", accept_region)
+
+    def test_the_accept_label_never_claims_a_gate_it_does_not_run(self):
+        """Mutation: `OWNERSHIP_WAIVED_REASONS = ()` in quarantine_report.
+
+        The label, not just the command. "re-runs the capture gate" over a line
+        that disables the gate is the one-word-two-conditions failure this repo
+        keeps paying for."""
+        text = self.render()
+        self.assertNotIn("re-runs the capture gate", text)
+
+    def test_it_says_why_and_what_to_do_instead(self):
+        """Mutation: replace the ownership-denied accept text with the bare
+        string "not automatic".
+
+        Withholding the command is only half the job — a reader left with
+        "not automatic" and no reason pastes the other block's command."""
+        text = self.render()
+        self.assertIn("not automatic", text)
+        self.assertIn("ownership", text)
+        self.assertIn("Trust: local", text)
+        self.assertIn("visibility", text)
+
+    def test_an_ordinary_capture_refusal_still_gets_its_command(self):
+        """Mutation: `OWNERSHIP_WAIVED_REASONS = ("ownership-denied",
+        "schema-invalid")` in quarantine_report.
+
+        The withholding must be scoped to the reason the ownership check
+        produced. Widening it would strip the useful one-liner off every parked
+        capture and undo P4."""
+        self._write("hub/quarantine/openclaw/2026-08-10-capture-abc123.txt",
+                    CAPTURE_BLOCK)
+        self._write("hub/quarantine/digest.md",
+                    OWNERSHIP_DIGEST_LOG + DIGEST_LOG.split("\n", 1)[1])
+        text = self.render()
+        schema_block = text.split("backup-schedule", 1)[1]
+        self.assertIn("inbox_ingest.py", schema_block)
+        self.assertIn("--trust local", schema_block)
+
+
+class PrintedCommandsAreShellSafe(unittest.TestCase):
+    """These lines exist to be pasted into a shell, so a parked filename is
+    command text, not a display string. `'{path}'` breaks out on a quote."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.brain = tempfile.mkdtemp(prefix="loreport-p4-sh-")
+        self.addCleanup(shutil.rmtree, self.brain, ignore_errors=True)
+        self.engine = os.path.join(self.brain, "engine")
+
+    def test_a_quote_in_a_parked_filename_cannot_break_out_of_the_command(self):
+        """Mutation: `f"cat '{path}'"` in place of the shlex.quote call in
+        quarantine_report._commands."""
+        import shlex as _shlex
+        name = "2026-08-11-memories__x'$(touch PWNED)'.md"
+        rel = os.path.join("hub", "quarantine", "openclaw", name)
+        path = os.path.join(self.brain, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(MERGE_UPDATE_BLOCK)
+        for verb, cmd in quarantine_report._commands(
+                quarantine_report.list_pending(self.brain)[0],
+                self.brain, self.engine):
+            if not cmd.startswith(("cat ", "rm ", "python3 ")):
+                continue
+            argv = _shlex.split(cmd)
+            self.assertIn(path, argv,
+                          f"{verb!r} did not survive shell parsing: {cmd!r}")
+            self.assertNotIn("PWNED", " ".join(argv[2:]),
+                             f"{verb!r} leaked a substitution: {cmd!r}")
 
 
 class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
@@ -265,7 +433,7 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         self.assertIn("schema-invalid", region)
         self.assertIn("Nightly restic backup", region)
         # what to do — one command per outcome
-        self.assertIn("show: cat '", region)
+        self.assertIn("show: cat ", region)
         self.assertIn("inbox_ingest.py", region)
         self.assertIn("discard", region)
         # and nothing that reads as a different failure
@@ -293,7 +461,7 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         # Assert on text only the DETAIL block can supply: the item name and the
         # word "discard" both appear in the summary line and the `next:` hint,
         # so asserting those alone would stay green with the detail block gone.
-        self.assertIn("show: cat '", region)
+        self.assertIn("show: cat ", region)
         self.assertIn("schema-invalid", region)
         for word in self.MISLEADING:
             self.assertNotIn(word, region)
@@ -336,6 +504,77 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         self.run_health()
         msg = self.review_note()
         self.assertLessEqual(len(msg), 400, len(msg))
+
+    def test_a_clamped_message_keeps_the_actionable_pointer(self):
+        """Mutation: append the pointer BEFORE the clamp in the
+        `changed:review` arm of scripts/loreport-health — i.e. restore
+        `msg="${msg} · what to do: cat ${BANNER}"` above the `if [ "${#msg}"
+        -gt ... ]` block and clamp the whole thing.
+
+        The clamp cuts from the END, so appending first put the only actionable
+        element of the phone payload last in line to be evicted. Staying under
+        400 chars is not enough — the cap must spend its budget on caller text,
+        never on the fixed suffix.
+
+        The cap is lowered through LOREPORT_NOTIFY_MAX_CHARS rather than by
+        building a naturally-400-char fixture: this must redden on the ORDER,
+        and a fixture tuned to overflow by a few characters would instead be
+        asserting on its own arithmetic. The first assertion proves the clamp
+        actually fired, so the test cannot pass vacuously."""
+        self.write_digest(_quarantine_digest(10))
+        for n in range(9):
+            self.write(
+                f"hub/quarantine/openclaw/2026-08-10-extra{n}.txt",
+                CAPTURE_BLOCK.replace("backup-schedule",
+                                      f"a-parked-memory-with-a-realistically-"
+                                      f"long-hyphenated-name-{n}"))
+        self.run_health(extra_env={"LOREPORT_NOTIFY_MAX_CHARS": "220"})
+        msg = self.review_note()
+        self.assertIn("…", msg, "the clamp did not fire; this test proves "
+                                "nothing unless the message is truncated")
+        self.assertLessEqual(len(msg), 220, len(msg))
+        self.assertIn("what to do: cat ", msg)
+        self.assertIn("merge and publish are running", msg)
+
+    def test_a_missing_report_helper_says_so_instead_of_an_empty_detail(self):
+        """Mutation: `return 0` in place of the printf in the
+        `[ ! -f "$QUARANTINE_REPORT" ]` arm of quarantine_detail in
+        scripts/loreport-health.
+
+        With an older engine checkout on LOREPORT_ENGINE the helper is absent.
+        Returning empty leaves the review line's "each block below carries a
+        show/accept/discard command" standing over nothing, and the
+        notification pointing the reader at that empty banner — a skipped step
+        reporting success."""
+        # A SHADOW engine tree, symlinked entry by entry, minus the one file.
+        # Never rename anything inside the real checkout: a crashed test would
+        # leave the working tree mutilated.
+        import test_health_liveness as thl
+        old = os.path.join(self.tmp, "old-engine")
+        os.makedirs(os.path.join(old, "hub"))
+        for entry in os.listdir(thl.ENGINE):
+            if entry == "hub":
+                continue
+            os.symlink(os.path.join(thl.ENGINE, entry), os.path.join(old, entry))
+        for entry in os.listdir(os.path.join(thl.ENGINE, "hub")):
+            if entry == "quarantine_report.py":
+                continue
+            os.symlink(os.path.join(thl.ENGINE, "hub", entry),
+                       os.path.join(old, "hub", entry))
+        conf = os.path.join(self.tmp, "old-engine.conf")
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write(f'LOREPORT_BRAIN="{self.brain}"\n'
+                     f'LOREPORT_ENGINE="{old}"\n'
+                     f'LOREPORT_BANNER="{self.banner}"\n'
+                     f'LOREPORT_NOTIFY="{self.notifier}"\n')
+        self.config = conf
+        result = self.run_health()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        region = self.review_region()
+        self.assertIn("no per-block detail", region)
+        self.assertIn("quarantine_report.py", region)
+        for word in self.MISLEADING:
+            self.assertNotIn(word, region)
 
     def test_a_quarantine_dir_that_lost_its_files_is_reported_not_hidden(self):
         """Mutation: delete the count-mismatch branch in

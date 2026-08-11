@@ -87,7 +87,11 @@ MERGE_MAX_AGE_HOURS="${LOREPORT_MERGE_MAX_AGE_HOURS:-36}"
 # already capped in hub/quarantine_report.py; this is the outer guard so that no
 # future addition to a message can silently push the reassuring half of it off a
 # phone screen.
-NOTIFY_MAX_CHARS=400
+#
+# Overridable so the clamp itself is testable: a test that has to build a
+# naturally-400-char message ends up asserting on the fixture's arithmetic
+# rather than on the clamp, and passes silently the day a name gets shorter.
+NOTIFY_MAX_CHARS="${LOREPORT_NOTIFY_MAX_CHARS:-400}"
 
 for d in "$BRAIN" "$FRAMEWORK"; do
   [ -d "$d" ] || { echo "loreport-health: not a directory: $d (check $CONFIG)" >&2; exit 2; }
@@ -140,11 +144,28 @@ note_review() {
 # when it exits (checks 3-4 in this file already had to be rewritten for that).
 # The helper exits 0 unconditionally and renders its own errors, so a missing
 # report degrades to one explanatory line rather than a traceback in the banner.
+#
+# A MISSING or crashed helper must SAY SO. Returning empty here would leave the
+# review line's "each block below carries a show/accept/discard command" sitting
+# over nothing, and the notification pointing the reader at that empty banner —
+# a skipped step reporting success, which is the exact shape this file's header
+# refuses. Name the path that could not be run instead.
 QUARANTINE_REPORT="$FRAMEWORK/hub/quarantine_report.py"
 quarantine_detail() {
-  [ -f "$QUARANTINE_REPORT" ] || return 0
-  python3 "$QUARANTINE_REPORT" --brain-dir "$BRAIN" --engine-dir "$FRAMEWORK" \
-    --digest-count "${1:-}" --mode banner 2>/dev/null || true
+  if [ ! -f "$QUARANTINE_REPORT" ]; then
+    printf '    (no per-block detail: %s is missing — this engine checkout is older than the alert that references it; list %s/hub/quarantine/ by hand)\n' \
+      "$QUARANTINE_REPORT" "$BRAIN"
+    return 0
+  fi
+  local out rc=0
+  out=$(python3 "$QUARANTINE_REPORT" --brain-dir "$BRAIN" --engine-dir "$FRAMEWORK" \
+    --digest-count "${1:-}" --mode banner 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    printf '    (no per-block detail: %s exited %s — list %s/hub/quarantine/ by hand)\n' \
+      "$QUARANTINE_REPORT" "$rc" "$BRAIN"
+    return 0
+  fi
+  printf '%s\n' "$out"
 }
 quarantine_names() {
   [ -f "$QUARANTINE_REPORT" ] || return 0
@@ -755,14 +776,26 @@ case "${liveness_changed}:${state}" in
     # the per-item commands are, because a reader who has only this line must
     # still be able to state the right cause and take the next step.
     msg="🧠 Loreport OK — merge and publish are running; ${#reviews[@]} item(s) awaiting your review: ${reviews[0]}"
-    msg="${msg} · what to do: cat ${BANNER}"
     # Hard cap, belt and braces over the per-item cap. A notification preview
     # that truncates mid-sentence can leave "merge" and "review" visible with
     # every reassuring clause cut off — the original misreading, rebuilt by a
     # message that grew.
-    if [ "${#msg}" -gt "$NOTIFY_MAX_CHARS" ]; then
-      msg="${msg:0:$((NOTIFY_MAX_CHARS - 1))}…"
+    #
+    # ORDER MATTERS. The clamp cuts from the END, so the actionable pointer is
+    # appended AFTER it: appending first meant a long item name evicted the one
+    # element of the payload the reader can act on, leaving a truncated name
+    # where "what to do" should have been. Clamp the variable part, then add the
+    # fixed suffix, and size the clamp so the whole thing still fits.
+    suffix=" · what to do: cat ${BANNER}"
+    body_max=$(( NOTIFY_MAX_CHARS - ${#suffix} ))
+    # Floor: a pathologically long BANNER path must not squeeze the body to
+    # nothing. Overrunning the cap by a little beats emitting a message that
+    # says which state we are in and nothing else.
+    [ "$body_max" -lt 120 ] && body_max=120
+    if [ "${#msg}" -gt "$body_max" ]; then
+      msg="${msg:0:$((body_max - 1))}…"
     fi
+    msg="${msg}${suffix}"
     tg_notify "$msg" --silent
     ;;
   recovered:*)

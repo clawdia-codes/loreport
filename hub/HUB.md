@@ -135,12 +135,21 @@ banner names each one — item name, `type`, `visibility`, the block's own
 `hub/quarantine/digest.md` — followed by a copy-pasteable command per outcome:
 
 - **show** — `cat <the parked file>`;
-- **accept** — for a *capture* block, re-run `hub/inbox_ingest.py` on it, which
-  puts it back through all five scan-before-commit gates. A rejected *merge
-  update* deliberately gets no one-liner: applying one by hand would skip the
-  secret scrub, the visibility classification and the provenance revert, so the
-  alert says so in words instead;
+- **accept** — for a *capture* block, re-run `hub/inbox_ingest.py` on it at
+  `--trust local`, which re-runs the parse, schema, secret and imperative gates
+  and relaxes the ownership check to the tier a human at their own machine
+  actually has. Two classes deliberately get **no** one-liner and are told why
+  in words instead: a rejected *merge update* (applying one by hand would skip
+  the secret scrub, the visibility classification and the provenance revert),
+  and a capture parked as `ownership-denied` — there `--trust local` would
+  switch OFF the very check that refused it, and the commit it produced would
+  carry `Trust: local`, which `collect_provenance_violations()` skips as well,
+  so one pasted line would waive both defences against a cross-provider
+  takeover. **A verb in this alert never claims a gate it does not run**;
 - **discard** — `rm <the parked file>`.
+
+Every path in a printed command is `shlex.quote`d. These lines exist to be
+pasted into a shell, so a filename is command text, not a display string.
 
 The push notification carries the same facts in phone-sized form: the item names
 (capped, then `+N more`), the clause that says merge and publish completed, and
