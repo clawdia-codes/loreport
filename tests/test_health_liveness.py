@@ -568,3 +568,82 @@ class MergeStateRecordsWhichSubsystemIsWaiting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupErrorsAreNotHiddenBySuccessExitStatus(HealthHarness, unittest.TestCase):
+    """`units/loreport-health.service` sets `SuccessExitStatus=1` so an unhealthy
+    brain is not logged as a broken unit. That makes exit 1 unavailable for
+    "the check could not run".
+
+    Startup guards used to be `${VAR:?msg}`, which aborts a non-interactive bash
+    with status 1 — so a MISCONFIGURED run was recorded by systemd as a success,
+    on a weekly timer, having examined nothing. The unit's own comment asserted
+    these kept codes "2, and 127"; measured, it was 1.
+    """
+
+    def _run_with_config(self, body):
+        conf = os.path.join(self.tmp, "broken.conf")
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return subprocess.run(
+            ["bash", HEALTH, "--config", conf],
+            capture_output=True, text=True,
+        )
+
+    def test_a_missing_brain_key_exits_2_not_1(self):
+        # Reddened by restoring `BRAIN="${LOREPORT_BRAIN:?...}"`.
+        r = self._run_with_config("LOREPORT_ENGINE=%s\n" % ENGINE)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_missing_engine_key_exits_2_not_1(self):
+        r = self._run_with_config("LOREPORT_BRAIN=%s\n" % self.brain)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_nonexistent_brain_directory_exits_2_not_1(self):
+        # The plausible-but-wrong value is the silent-green case: the config
+        # parses, the path simply is not there.
+        r = self._run_with_config(
+            "LOREPORT_BRAIN=%s/definitely-not-here\nLOREPORT_ENGINE=%s\n"
+            % (self.tmp, ENGINE))
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_exit_2_is_outside_the_units_SuccessExitStatus(self):
+        """The whole point: whatever code startup errors use must NOT be the one
+        the unit forgives. Reddened by widening the unit to SuccessExitStatus=1 2."""
+        unit = os.path.join(ENGINE, "units", "loreport-health.service")
+        with open(unit, encoding="utf-8") as fh:
+            forgiven = [ln.split("=", 1)[1].split() for ln in fh
+                        if ln.startswith("SuccessExitStatus=")]
+        flat = [code for group in forgiven for code in group]
+        self.assertNotIn("2", flat,
+                         "SuccessExitStatus forgives 2, which is the startup-error code")
+
+
+class AnAdvancingClockDoesNotRepage(HealthHarness, unittest.TestCase):
+    """The state-change gate hashes the message set. `merge liveness: last
+    completed merge 88h ago` carries a number that increments hourly, so the one
+    condition that cannot self-clear without a human re-paged on every run —
+    measured at 3 notifications over 3 runs, against 0 for a fixed age."""
+
+    def test_three_runs_at_advancing_ages_alert_once(self):
+        # Reddened by removing the _AGE_RE normalisation from the signature.
+        for hours in (40, 64, 88):
+            self.set_merge_age(hours=hours)
+            self.run_health()
+        alerts = [n for n in self.notifications() if "merge liveness" in n]
+        self.assertEqual(len(alerts), 1,
+                         f"the advancing clock re-paged: {alerts}")
+
+    def test_a_genuinely_new_failure_still_breaks_through(self):
+        """Suppressing the clock must not suppress the signal."""
+        self.set_merge_age(hours=40)
+        self.run_health()
+        before = len(self.notifications())
+        # A DIFFERENT merge-liveness message, not the same one with a bigger
+        # number: "no completed merge on record" vs "last completed merge Nh
+        # ago". If the normalisation were too broad these would collapse
+        # together and the new condition would be swallowed.
+        self.drop_merge_state()
+        self.run_health()
+        self.assertGreater(len(self.notifications()), before,
+                           "a new failure was swallowed by the clock normalisation")

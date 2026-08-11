@@ -49,8 +49,31 @@ fi
 # BRAIN and FRAMEWORK get no defaults for the same reason: a wrong-but-plausible
 # value here IS the silent-green failure. :? aborts on unset or empty, which
 # matters because this script runs without -e and would otherwise sail past.
-BRAIN="${LOREPORT_BRAIN:?loreport-health: LOREPORT_BRAIN not set in $CONFIG}"
-FRAMEWORK="${LOREPORT_ENGINE:?loreport-health: LOREPORT_ENGINE not set in $CONFIG}"
+# ⚠ EXIT 2, NOT 1, AND THAT IS THE WHOLE POINT. These used to be `${VAR:?msg}`,
+# which aborts a non-interactive bash with status **1** — the same code this
+# script uses for "brain unhealthy, already reported". units/loreport-health.service
+# sets SuccessExitStatus=1 so an unhealthy brain is not logged as a broken unit,
+# so a MISCONFIGURED run was being recorded by systemd as a SUCCESS: the weekly
+# timer stayed green while the check had not examined anything at all. The unit's
+# own comment asserted these "keep their own codes (2, and 127 …)"; measured, it
+# was 1. Exit 2 matches the unreadable-config branch a few lines above and
+# scripts/loreport-audit's convention, and is outside SuccessExitStatus=.
+if [ -z "${LOREPORT_BRAIN:-}" ]; then
+  echo "loreport-health: LOREPORT_BRAIN not set in $CONFIG" >&2
+  exit 2
+fi
+if [ -z "${LOREPORT_ENGINE:-}" ]; then
+  echo "loreport-health: LOREPORT_ENGINE not set in $CONFIG" >&2
+  exit 2
+fi
+BRAIN="$LOREPORT_BRAIN"
+FRAMEWORK="$LOREPORT_ENGINE"
+for _d in "$BRAIN" "$FRAMEWORK"; do
+  if [ ! -d "$_d" ]; then
+    echo "loreport-health: not a directory: $_d (check $CONFIG)" >&2
+    exit 2
+  fi
+done
 # These two do have honest defaults — a banner in the standard location, and no
 # notifier at all. Neither can fake a healthy brain.
 BANNER="${LOREPORT_BANNER:-${HOME}/.config/loreport/health-report}"
@@ -622,11 +645,27 @@ fi
 # arriving while an old one is unresolved still speaks up.
 liveness_changed=$(python3 - "$HEALTH_STATE" "$state" "$NOW" \
   ${failures[@]+"${failures[@]}"} ${reviews[@]+"${reviews[@]}"} <<'PY'
-import hashlib, json, os, sys
+import hashlib, json, os, re, sys
 
 state_path, state, now = sys.argv[1], sys.argv[2], int(sys.argv[3])
 messages = sys.argv[4:]
-signature = "sha256:" + hashlib.sha256("\n".join(messages).encode("utf-8")).hexdigest()
+
+# ⚠ NORMALISE THE CLOCK OUT OF THE SIGNATURE, AND ONLY THE CLOCK.
+# The signature exists so a NEW problem speaks up while an old one is still
+# unresolved. But "merge liveness: last completed merge 88h ago" carries an age
+# that increments every hour, so its signature changed on every run — and the
+# one condition that CANNOT self-clear without a human was therefore the one
+# that re-paged hardest. Measured: three runs at 40h/64h/88h produced three
+# notifications; three runs at a fixed 88h produced none. That is the alert
+# fatigue the whole state-change gate exists to prevent, reintroduced by a
+# number inside the text.
+#
+# Deliberately NOT a blanket digit strip. A count moving 1 -> 5 items is a real
+# change and must still alert; only a monotonically advancing clock is noise.
+# So exactly the "<N>h ago" shape is collapsed, and nothing else.
+_AGE_RE = re.compile(r"\b\d+h ago\b")
+sig_source = [_AGE_RE.sub("<age>h ago", m) for m in messages]
+signature = "sha256:" + hashlib.sha256("\n".join(sig_source).encode("utf-8")).hexdigest()
 try:
     with open(state_path, encoding="utf-8") as fh:
         data = json.load(fh)
