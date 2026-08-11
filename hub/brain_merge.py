@@ -71,6 +71,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import synth_detect  # noqa: E402
 
+# Second sibling import, same rationale as synth_detect above. Every other file in
+# hub/ asserts a single-file/stdlib-only doctrine; this one is the exception because
+# the nightly review must run in the SAME nightly job as the detector it consumes.
+# A separate timer would be a second thing that can silently not run — the exact
+# failure the report-only detector spent weeks demonstrating — and it would want its
+# own copy of the repo lock. One job, one lock, one dated artifact.
+import nightly_review  # noqa: E402
+
 # Where the merge parks the detector's report for the weekly health check to read.
 # Gitignored alongside the other hub state files: it is a report artifact, and a
 # tracked file rewritten nightly would leave the tree dirty for sync.sh's guard.
@@ -823,9 +831,33 @@ def run_synthesis_report(brain_dir, dry_run):
     return result
 
 
+def run_nightly_review(brain_dir, synthesis, dry_run):
+    """Give the detector's proposals a disposition queue, and reconcile drift.
+
+    Still files nothing into `memories/` or `knowledge/`: a proposal becomes a
+    DECISION on `hub/proposals/ledger.json`, never an edit. What changes versus
+    the report-only era is that the decision is now tracked, dated, and — once it
+    goes stale — graded a failure by the health check, so proposals stop
+    evaporating into a digest line nobody acts on.
+
+    Never raises, for the same reason run_synthesis_report doesn't: a review step
+    must not take the nightly merge down with it. A review that dies writes no
+    dated artifact, and `loreport-health` section 9 turns that silence into a
+    failure — which is the only reason swallowing the exception here is safe.
+    """
+    try:
+        return nightly_review.run(brain_dir, synthesis, dry_run=dry_run)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "ledger_changed": False}
+
+
 def format_synthesis_lines(synthesis):
     """Digest lines for the synthesis section. Says REPORT-ONLY on every run so a
-    reader never mistakes a proposal for something that was filed."""
+    reader never mistakes a proposal for something that was filed.
+
+    Still accurate under the disposition ledger: the DETECTOR files nothing. The
+    proposals it emits are entered on the ledger as decisions awaiting an answer
+    (see format_nightly_lines), which is not the same as a memory being written."""
     if not synthesis:
         return ["- Synthesis proposals (REPORT-ONLY, none filed): detector did not run"]
     if synthesis.get("error"):
@@ -884,6 +916,7 @@ def write_digest(brain_dir, today, report):
         f"{human_violations if human_violations else 'none'}"
     )
     lines.extend(format_synthesis_lines(report.get("synthesis")))
+    lines.extend(nightly_review.format_lines(report.get("nightly_review")))
     lines.append(f"- Quarantine items pending review: {count_quarantine_items(brain_dir)}")
     m, k, s = report["index_counts"]
     lines.append(f"- INDEX rebuilt: {m + k + s} items ({m} memories, {k} knowledge, {s} skills)")
@@ -1423,6 +1456,12 @@ def do_merge(brain_dir, dry_run):
             # be able to fail a merge, so a detector bug degrades to a digest note.
             report["synthesis"] = run_synthesis_report(brain_dir, dry_run)
 
+            # The detector's consumer. Enters each proposal on the disposition
+            # ledger and writes hub/nightly/<date>.json — the dated proof that
+            # the review ran, which section 9 of loreport-health requires.
+            report["nightly_review"] = run_nightly_review(
+                brain_dir, report["synthesis"], dry_run)
+
             # Deterministic INDEX rebuild.
             index_bytes, m, k, s = build_index_bytes(brain_dir)
             archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
@@ -1432,6 +1471,18 @@ def do_merge(brain_dir, dry_run):
                 with open(os.path.join(brain_dir, "INDEX.md"), "wb") as fh:
                     fh.write(index_bytes)
                 git(brain_dir, "add", "INDEX.md", check=False)
+
+                # The disposition ledger rides the INDEX commit. It is TRACKED —
+                # it holds human decisions and the first_seen clock the overdue
+                # check measures from, and a clock that lives only in a gitignored
+                # file resets on every re-clone, which would make the one assertion
+                # that forces a decision quietly fail open. It is written only when
+                # a genuinely new proposal appears, so unlike merge-state.json it
+                # does not dirty the tree nightly. (New proposals require new items,
+                # so this is never reached on a no-op night; if one ever did land
+                # there, loreport-sync's `git add -A` commits it instead.)
+                if (report.get("nightly_review") or {}).get("ledger_changed"):
+                    git(brain_dir, "add", nightly_review.LEDGER_FILE, check=False)
 
                 # The cold shelf only exists once something is actually on it.
                 # A brain that has never expired an item gets no empty

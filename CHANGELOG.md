@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased]
+
+### Added — the synthesis detector finally has a consumer
+
+- **`hub/nightly_review.py`.** `synth_detect` ran nightly for weeks as a pure report
+  emitter: proposals went into a digest line that said "none filed", nobody filed
+  them, and nobody was ever asked to. Every proposal now enters a **disposition
+  ledger** (`hub/proposals/ledger.json`) as `pending` and must reach `accept` /
+  `reject` / `defer`, each with a recorded reason — `--dispose <id> --status …
+  --reason …`. Nothing is auto-merged: a proposal becomes a decision, never an edit
+  to `memories/` or `knowledge/`.
+- **Rejection is sticky across membership churn.** A proposal's identity is its
+  member set, so without this a rejected cluster returns as brand-new pending the
+  next time the brain grows, and the owner re-decides it forever.
+- **Refusals with teeth.** A disposition with no reason is refused (a cleared queue
+  is not a decision); a `defer` with no future `--until` is refused (it is a reject
+  wearing a disguise).
+- **Nightly reconciliation** — a name-set diff between each configured native memory
+  store (`hub/reconcile-sources.json`) and `INDEX.md`. Reports drift, never repairs.
+  An absent or empty config reports `unconfigured`, and an empty index or native
+  store reports `blind`; a diff over an empty collection is vacuously clean, and this
+  repo has shipped that bug twice.
+- **`hub/nightly/<YYYY-MM-DD>.json`** — a dated, machine-checkable artifact per night,
+  and `scripts/loreport-health` §9 **fails when yesterday's is missing**. Strictly
+  yesterday's: a "today's or yesterday's" rule cannot be falsified by deleting the
+  thing it watches. Distinctly named conditions (never ran / did not run last night /
+  unreadable / overdue), because one FAIL wording covering several states is how
+  "merge digest needs review" got read as "the merge failed" by two readers.
+- Proposals merely waiting, reconciliation drift, and an unconfigured reconciliation
+  are **review**, not failure; a proposal undecided past 14 days is a failure.
+- The ledger is tracked (it carries the `first_seen` clock the overdue check measures
+  from, which must survive a re-clone) but written only when it changes, so it never
+  dirties the brain tree the way a nightly-rewritten tracked file would.
+- 48 new tests (37 module + 11 driving the real health script). Each names the single-line production mutation it reddens, and all 20
+  mutations were run: deleting §9 wholesale reddens 11, and the only mutation that
+  stays green is a deliberate cosmetic control.
+
 ## [1.14.0] — 2026-08-10
 
 ### Fixed — the leak-audit consumer could go silent

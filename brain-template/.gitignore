@@ -18,3 +18,10 @@ hub/synthesis-report.json
 # .gitignore does not reach here — a brain gets this file once, at init.
 hub/merge-state.json
 hub/digest-*.md
+
+# Nightly review artifacts (hub/nightly_review.py). Same class as digest-*.md: a
+# dated per-run report, not brain content. hub/proposals/ledger.json is NOT here
+# on purpose — it records human dispositions and the first_seen clock the overdue
+# check measures from, so it must survive a re-clone, and it is written only when
+# a proposal is added or decided rather than on every run.
+hub/nightly/

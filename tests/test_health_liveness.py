@@ -23,10 +23,14 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.dirname(HERE)
 HEALTH = os.path.join(ENGINE, "scripts", "loreport-health")
+
+sys.path.insert(0, os.path.join(ENGINE, "hub"))
+import nightly_review  # noqa: E402
 
 CLEAN_DIGEST = """# Hub digest — 2026-08-10
 
@@ -82,6 +86,10 @@ class HealthHarness:
                    json.dumps({"targets": [], "projected_at": "2026-08-10"}))
         self.write_digest(CLEAN_DIGEST)
         self.set_merge_age(hours=2)
+        # A healthy brain has last night's nightly-review artifact (section 9).
+        # Built through the real module rather than by hand, so the fixture
+        # cannot drift away from the schema the check greps.
+        self.write_nightly()
 
         # Stubs, prepended to PATH rather than replacing it: the script still
         # needs the real git, python3 and date.
@@ -128,6 +136,49 @@ class HealthHarness:
 
     def drop_merge_state(self):
         os.remove(os.path.join(self.brain, "hub", "merge-state.json"))
+
+    # --- nightly review (section 9) --------------------------------------
+
+    def yesterday(self):
+        return (date.today() - timedelta(days=1)).isoformat()
+
+    def write_nightly(self, ledger=None, reconciliation=None, day=None):
+        """Write a dated nightly-review artifact via hub/nightly_review.py.
+
+        Defaults to the healthy shape: an empty ledger (nothing pending, nothing
+        overdue) and a reconciliation that found no drift across one source.
+        """
+        day = day or self.yesterday()
+        ledger = ledger if ledger is not None else {"schema": 1, "proposals": {}}
+        if reconciliation is None:
+            reconciliation = {
+                "status": "in-sync", "source_count": 1, "indexed_count": 1,
+                "sources": [{"provider": "claude", "status": "in-sync",
+                             "native_count": 1, "only_native_count": 0,
+                             "only_native": [], "only_loreport_count": 0,
+                             "both_count": 1}],
+            }
+        attestation = nightly_review.build_attestation(
+            ledger,
+            {"clusters": [], "warnings": [], "item_count": 1},
+            {"added": [], "suppressed": [], "changed": False},
+            reconciliation,
+            day,
+        )
+        self.write(f"hub/nightly/{day}.json", json.dumps(attestation, indent=2))
+
+    def drop_nightly(self, day=None):
+        os.remove(os.path.join(self.brain, "hub", "nightly",
+                               f"{day or self.yesterday()}.json"))
+
+    def pending_ledger(self, pending_since):
+        """A ledger with exactly one pending proposal, first seen on the given
+        date — the hook the overdue budget is testable through."""
+        return {"schema": 1, "proposals": {"abc123def456": {
+            "id": "abc123def456", "topic": "coach-engine", "signal": "mutual-link",
+            "members": ["a", "b", "c"], "first_seen": pending_since,
+            "status": "pending", "reason": None, "decided": None,
+            "decided_by": None, "defer_until": None}}}
 
     def run_health(self, extra_env=None):
         env = dict(os.environ)
@@ -748,3 +799,127 @@ class TheLeakAuditIsActuallyConsumed(HealthHarness, unittest.TestCase):
         r = self._run_with_audit('#!/bin/sh\nexit 0\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("leak audit", self.banner_text() or "")
+
+
+# --- section 9: the nightly review has a consumer, and it is falsifiable -----
+
+
+class NightlyReviewLivenessIsRequired(HealthHarness, unittest.TestCase):
+    """The synthesis detector ran nightly for weeks emitting into a void because
+    nothing asserted that anything consumed it. These are the assertions.
+
+    Each test names the production line it reddens; each was run and observed.
+    """
+
+    def test_baseline_with_yesterdays_artifact_is_green(self):
+        # Guards the inverse: if section 9 fired on a healthy brain, every other
+        # test below would "pass" for the wrong reason.
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0, self.banner_text() or r.stderr)
+
+    def test_deleting_yesterdays_artifact_fails_the_check(self):
+        """THE proof required of this feature. Reddens: the
+        `elif [ ! -f "$nightly_yesterday" ]; then note_failure` branch."""
+        self.drop_nightly()
+        # A NEWER artifact exists and must not rescue it — a "today or yesterday"
+        # rule cannot be falsified by deleting the thing it watches.
+        self.write_nightly(day=date.today().isoformat())
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1,
+                         "yesterday's nightly artifact was deleted and health said OK")
+        self.assertIn("nightly review did not run last night", self.banner_text() or "")
+
+    def test_an_empty_nightly_dir_says_never_ran_not_did_not_run(self):
+        """Two conditions, two names. Reddens: the first `if [ ! -d ... ] ||
+        [ -z "$(ls -A ...)" ]` branch (delete it so both fall to one message)."""
+        self.drop_nightly()
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1)
+        banner = self.banner_text() or ""
+        self.assertIn("nightly review has never run", banner)
+        self.assertNotIn("did not run last night", banner)
+
+    def test_an_unreadable_artifact_is_a_failure_not_silence(self):
+        """Reddens: the `except (OSError, json.JSONDecodeError...)` arm in the
+        inline python (make it `raise SystemExit(0)` with no print). An artifact
+        that exists but cannot be parsed asserted nothing."""
+        self.write(f"hub/nightly/{self.yesterday()}.json", "{not json")
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nightly review artifact unreadable", self.banner_text() or "")
+
+    def test_an_artifact_without_a_reconciliation_section_is_a_failure(self):
+        """Reddens: the `if rec is None:` branch. A schema that drifted out from
+        under this check must not read as 'reconciliation found nothing'."""
+        self.write(f"hub/nightly/{self.yesterday()}.json",
+                   json.dumps({"schema": 1, "date": self.yesterday(),
+                               "synthesis": {"dispositions": {}, "pending": [],
+                                             "overdue": []}}))
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no reconciliation section", self.banner_text() or "")
+
+
+class ProposalsMustReachADisposition(HealthHarness, unittest.TestCase):
+
+    def test_a_freshly_pending_proposal_is_review_not_failure(self):
+        """Reddens: swapping section 9's `review` arm for `fail` in the
+        `case "$kind"` dispatch. A queue with a human in it is healthy."""
+        self.write_nightly(ledger=self.pending_ledger(
+            (date.today() - timedelta(days=2)).isoformat()))
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0,
+                         "a proposal waiting 2 days was graded a failure")
+        banner = self.banner_text() or ""
+        self.assertIn("awaiting your disposition", banner)
+        self.assertIn("abc123def456", banner)
+
+    def test_an_overdue_proposal_fails_the_check(self):
+        """Reddens: `if overdue:` -> `if False:` in the inline python, and
+        equivalently `> max_days` -> `> 10**6` in nightly_review.overdue. This is
+        the only line that makes an undecided proposal cost anything."""
+        self.write_nightly(ledger=self.pending_ledger(
+            (date.today() - timedelta(days=40)).isoformat()))
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1,
+                         "a proposal undecided for 40 days did not fail the check")
+        self.assertIn("overdue", self.banner_text() or "")
+
+    def test_the_fix_line_carries_a_runnable_dispose_command(self):
+        # Multiple decisions need short ids to answer by reference; a banner that
+        # names a problem with no command is a banner people close.
+        self.write_nightly(ledger=self.pending_ledger(
+            (date.today() - timedelta(days=2)).isoformat()))
+        self.run_health()
+        self.assertIn("--dispose", self.banner_text() or "")
+
+
+class ReconciliationBlindSpotsAreNamed(HealthHarness, unittest.TestCase):
+
+    def test_unconfigured_reconciliation_is_review_and_says_it_asserts_nothing(self):
+        """Reddens: the `elif status == "unconfigured":` branch. Absence of a
+        result must not read as 'checked and clean'."""
+        self.write_nightly(reconciliation={
+            "status": "unconfigured", "source_count": 0, "sources": [],
+            "detail": "no hub/reconcile-sources.json"})
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("NOT CONFIGURED", self.banner_text() or "")
+
+    def test_drift_is_review_and_counts_the_items(self):
+        self.write_nightly(reconciliation={
+            "status": "drift", "source_count": 1, "sources": [
+                {"provider": "claude", "status": "drift", "only_native_count": 3,
+                 "only_native": ["a", "b", "c"]}]})
+        r = self.run_health()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("3 item(s) live in native memory", self.banner_text() or "")
+
+    def test_a_vacuous_reconciliation_is_a_failure(self):
+        """Reddens: the `elif status == "blind":` branch. A diff over an empty
+        set is vacuously clean — this repo shipped that bug twice."""
+        self.write_nightly(reconciliation={
+            "status": "blind", "source_count": 1, "sources": []})
+        r = self.run_health()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("vacuously clean", self.banner_text() or "")
