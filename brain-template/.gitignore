@@ -1,5 +1,25 @@
 surface.md
-.obsidian/workspace*
+
+# Obsidian rewrites app.json and graph.json whenever the user changes a setting, not
+# just workspace*. The narrower rule this replaces left those two TRACKED in a new
+# brain, so the first settings change made the tree dirty and halted loreport-sync's
+# post-merge guard. init-brain.sh copies the template with `cp -r` and then runs
+# `git add -A`, so ignoring the whole directory still delivers the shipped defaults —
+# they land on disk, simply never tracked. That is exactly the live brain's state.
+.obsidian/
+
+# Raw provider exports. NEVER let one land inside the brain repo: an export is
+# unclassified by definition, and hub/published would happily carry it to a cloud
+# provider. Ignored so a misplaced file cannot be committed by `git add -A`.
+exports/
+
+# Runtime scratch the hub writes outside any commit. hub/quarantine/ holds parked
+# captures, hub/logs/ the merge log, and .loreport.lock is a live flock — a file
+# that exists only while a run is in flight. All three appear as untracked entries
+# and halt loreport-sync's post-merge clean-tree guard.
+hub/quarantine/
+hub/logs/
+hub/.loreport.lock
 
 # Projection outputs (hub/project.py) and health state. Deliberately NOT tracked:
 # design-08 check 3 asserts the manifest's projected sha == main HEAD, so committing
@@ -34,3 +54,9 @@ hub/attention.json.tmp
 # so it must survive a re-clone; ignoring it would silently undo that and make
 # the one assertion that forces a decision fail open. Do not "complete the set".
 hub/nightly/
+
+# Dated packet snapshots. The packet is derived and git already holds every past
+# state of hub/published/packet.md, so a dated copy per day is a second, redundant
+# history that grows without bound. Load-bearing rather than cosmetic: the sync runs
+# `git add -A hub/published`, which would otherwise sweep them straight back in.
+hub/published/packet-*.md

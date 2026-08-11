@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.17.1] — 2026-08-12
+
+### Fixed — a new brain no longer inherits a permanently dirty tree
+
+A brain gets its ignore rules exactly once, by `cp -r`, at `init-brain.sh` time; the
+engine's own `.gitignore` never reaches it. Six runtime paths the hub writes had been
+added to the live brain by hand and never carried back to `brain-template/.gitignore`,
+so every brain created from it would have gone dirty on first use — breaking the
+"status must be empty before a capture" rule and halting `loreport-sync`'s post-merge
+clean-tree guard, which is how five commits once went unpushed for two days.
+
+- Added `hub/quarantine/`, `hub/logs/`, `hub/.loreport.lock`, `exports/` and
+  `hub/published/packet-*.md`.
+- Widened `.obsidian/workspace*` to `.obsidian/`. Obsidian rewrites `app.json` and
+  `graph.json` on any settings change, and the narrow rule left those two *tracked*.
+  Because `init-brain.sh` copies with `cp -r` and then runs `git add -A`, ignoring the
+  directory still delivers the shipped defaults — they land on disk, simply untracked.
+
+### Added
+- `tests/test_brain_template_gitignore.py`. It builds a throwaway repo from the
+  template's `.gitignore`, runs the same `git add -A` that `init-brain.sh` runs, and
+  asserts what actually got staged — so a rule that is present but does not match
+  fails where a grep would pass. Asserted in both directions: a too-broad rule is the
+  more dangerous mistake, because it silently stops tracking real memories. Verified
+  by mutation — deleting `hub/quarantine/` and broadening `hub/nightly/` to `hub/`
+  each redden the intended test and leave the other green.
+
 ## [1.17.0] — 2026-08-11
 
 ### Changed — alerts are actionable from a phone, not only from the machine
