@@ -137,6 +137,18 @@ def _run_git(brain_dir, *args, timeout=30):
         )
     except subprocess.TimeoutExpired:
         raise CannotAudit(f"git {' '.join(args)} timed out in {brain_dir}")
+    except UnicodeDecodeError as exc:
+        # F4: the DISK read path in audit() already catches this and explains
+        # why ("a non-UTF-8 surface sailed past this guard and killed the audit
+        # before format_report ran"). The GIT path had no such guard, so one
+        # non-UTF-8 byte in any committed item raised out of the audit as a
+        # traceback — exit 1, no findings, which loreport-health then could not
+        # read. CannotAudit is exit 2, which health treats as a failure, so a
+        # brain this checker cannot read is loud instead of silently green.
+        raise CannotAudit(
+            f"git {' '.join(args)} returned bytes that are not valid UTF-8 in "
+            f"{brain_dir}: {exc}"
+        )
 
 
 def get_main_sha(brain_dir):
@@ -228,6 +240,8 @@ def _has_explicit_visibility(text):
     """True when the frontmatter carries a `visibility:` key at all, parseable or
     not. Byte-identical in intent to hub/brain_merge.py's copy; check-docs §2c
     pins them together."""
+    if text is None:  # F3: mirror snapshot_publish's guard exactly
+        return False
     ok, fields, _ = parse_frontmatter(text)
     return bool(ok) and "visibility" in fields
 

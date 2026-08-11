@@ -647,3 +647,104 @@ class AnAdvancingClockDoesNotRepage(HealthHarness, unittest.TestCase):
         self.run_health()
         self.assertGreater(len(self.notifications()), before,
                            "a new failure was swallowed by the clock normalisation")
+
+
+class TheLeakAuditIsActuallyConsumed(HealthHarness, unittest.TestCase):
+    """Section 8 shipped with FIFTY-SIX lines of production logic and ZERO tests.
+
+    An independent review proved the gap by deleting the whole feature and
+    watching 244 tests stay green — and then found a real fail-open hole inside
+    it (see `test_exit_1_with_no_parseable_finding_is_a_failure`). These tests
+    exist so the severity mapping is asserted rather than asserted-about.
+
+    Each stubs `$LOREPORT_ENGINE/scripts/loreport-audit`, since the mapping is a
+    property of how health READS the audit, not of the audit itself.
+    """
+
+    def _engine_with_audit_stub(self, body):
+        """A real engine tree (health needs $FRAMEWORK/hub) with a stub audit."""
+        fake = os.path.join(self.tmp, "engine")
+        os.makedirs(os.path.join(fake, "scripts"), exist_ok=True)
+        if not os.path.exists(os.path.join(fake, "hub")):
+            os.symlink(os.path.join(ENGINE, "hub"), os.path.join(fake, "hub"))
+        stub = os.path.join(fake, "scripts", "loreport-audit")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.chmod(stub, 0o755)
+        return fake
+
+    def _run_with_audit(self, body):
+        fake = self._engine_with_audit_stub(body)
+        conf = os.path.join(self.tmp, "audit.conf")
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write(
+                "LOREPORT_BRAIN=%s\nLOREPORT_ENGINE=%s\nLOREPORT_BANNER=%s\n"
+                "LOREPORT_NOTIFY=%s\n" % (self.brain, fake, self.banner, self.notifier)
+            )
+        return subprocess.run(["bash", HEALTH, "--config", conf],
+                              capture_output=True, text=True)
+
+    def test_a_leak_is_a_failure(self):
+        # Reddened by routing the LEAK/BLIND branch to note_review.
+        r = self._run_with_audit(
+            '#!/bin/sh\necho "✗ [LEAK] LEAK: local item [[x]] appears in packet"\nexit 1\n')
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("FAILING", self.banner_text() or "")
+
+    def test_a_metadata_gap_is_review_not_failure(self):
+        # The other direction: a missing `domain:` must NOT turn the brain red.
+        # Reddened by routing the RISK/META branch to note_failure.
+        r = self._run_with_audit(
+            '#!/bin/sh\necho "✗ [META] memories/x.md: no explicit domain:"\nexit 1\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("NEEDS REVIEW", self.banner_text() or "")
+
+    def test_an_audit_that_cannot_run_is_a_failure(self):
+        # Exit 2 = "could not audit". Reddened by changing `-ge 2` to `-ge 3`.
+        r = self._run_with_audit('#!/bin/sh\necho "bad config" >&2\nexit 2\n')
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("COULD NOT RUN", self.banner_text() or "")
+
+    def test_exit_1_with_no_parseable_finding_is_a_failure(self):
+        """THE BLOCKER the review found.
+
+        exit 1 means "findings", but a Python traceback also exits 1 and carries
+        neither a [LEAK]/[BLIND] nor a [RISK]/[META] token. Both counts read 0,
+        both branches are skipped, and health reported `brain OK` having
+        asserted nothing. Reproduced naturally by one non-UTF-8 byte in a
+        committed memory.
+
+        Reddened by deleting the `hard == 0 && soft == 0` else-guard.
+        """
+        r = self._run_with_audit(
+            '#!/bin/sh\n'
+            'echo "Traceback (most recent call last):"\n'
+            'echo "  File \\"hub/brain_audit.py\\", line 1, in <module>"\n'
+            'echo "ValueError: simulated"\n'
+            'exit 1\n')
+        self.assertEqual(
+            r.returncode, 1,
+            "the audit crashed and health called the brain healthy:\n%s"
+            % (self.banner_text() or "<no banner>"))
+        self.assertIn("no parseable finding", self.banner_text() or "")
+
+    def test_a_missing_audit_binary_is_a_failure(self):
+        # Reddened by replacing that note_failure with a no-op.
+        fake = os.path.join(self.tmp, "engine-noaudit")
+        os.makedirs(fake, exist_ok=True)
+        if not os.path.exists(os.path.join(fake, "hub")):
+            os.symlink(os.path.join(ENGINE, "hub"), os.path.join(fake, "hub"))
+        conf = os.path.join(self.tmp, "noaudit.conf")
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write("LOREPORT_BRAIN=%s\nLOREPORT_ENGINE=%s\nLOREPORT_BANNER=%s\n"
+                     % (self.brain, fake, self.banner))
+        r = subprocess.run(["bash", HEALTH, "--config", conf],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("not running", self.banner_text() or "")
+
+    def test_a_clean_audit_says_nothing(self):
+        # The feature must not add noise on a healthy brain.
+        r = self._run_with_audit('#!/bin/sh\nexit 0\n')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("leak audit", self.banner_text() or "")

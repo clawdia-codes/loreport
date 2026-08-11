@@ -594,6 +594,19 @@ else
         "leak audit: $soft item(s) need a metadata decision — $firsts" \
         "run: $audit_bin --config $CONFIG"
     fi
+    # ⚠ EXIT 1 WITH NOTHING PARSEABLE IS A FAILURE, NOT SILENCE.
+    # An independent review found this hole and demonstrated it twice: exit 1
+    # means "findings", but a Python traceback ALSO exits 1 and contains neither
+    # a [LEAK]/[BLIND] nor a [RISK]/[META] token. Both counts then read 0, both
+    # branches above are skipped, and health reported "brain OK" having asserted
+    # nothing — the exact vacuous-truth bug the exit-2 branch was written to
+    # prevent, arriving through the other door. Reproduced naturally by one
+    # non-UTF-8 byte in a committed memory (see brain_audit._run_git).
+    if [ "${hard:-0}" -eq 0 ] && [ "${soft:-0}" -eq 0 ]; then
+      note_failure \
+        "leak audit: exit 1 but no parseable finding — the audit failed in a way this check cannot read, so NOTHING asserted that unclassified items stay unpublished" \
+        "run: $audit_bin --config $CONFIG   # first line was: $(printf '%s\n' "$audit_out" | head -1)"
+    fi
   fi
 fi
 
