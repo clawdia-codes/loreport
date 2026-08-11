@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.16.1] — 2026-08-11
+
+### Fixed
+- `hub/.loreport.lock` untracked. It is the runtime flock taken by `inbox_ingest.py`
+  and `brain_merge.py`; tracking it means every concurrent run dirties the tree, which
+  is the precondition that has already destroyed uncommitted work twice here. Swept in
+  by a `git add -A`.
+
 ## [1.16.0] — 2026-08-11
 
 ### Changed — failure alerts are written for a reader who is not prepared
