@@ -2,6 +2,18 @@
 
 ## [1.14.0] — 2026-08-10
 
+### Fixed — the alerting path could not be trusted to alert
+
+- **A misconfigured health run was recorded by systemd as a success.** The unit sets
+  `SuccessExitStatus=1` so an unhealthy brain is not a broken unit; the startup guards
+  used `${VAR:?}`, which exits **1**. A weekly timer therefore stayed green while the
+  check had examined nothing. Guards now `exit 2`. The unit comment claiming these kept
+  codes "2, and 127" was measured wrong and corrected.
+- **The one alert that cannot self-clear re-paged on every run.** The state-change gate
+  hashes the message set, and `last completed merge 88h ago` increments hourly.
+  Measured 3 notifications over 3 runs vs 0 at a fixed age. Only the `<N>h ago` shape is
+  normalised, and only inside the signature — a count moving 1 → 5 still alerts.
+
 ### Added — the leak audit runs on the timer, instead of only when asked
 
 - **`scripts/loreport-audit` had no caller.** No unit, no timer, not from
