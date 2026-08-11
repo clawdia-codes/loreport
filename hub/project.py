@@ -308,13 +308,21 @@ def _line_type(line):
 
 
 def _truncate_index_lines(index_text, budget_for_index):
-    """Drop whole INDEX lines, lowest truncation priority first."""
+    """Drop whole INDEX lines, lowest truncation priority first.
+
+    `current` measures the WHOLE index text, not just the item lines. Only item
+    lines can be dropped, but the section headings and blank lines between them
+    (`# Index`, `## Memories`, `## Knowledge`, `## Skills`) are emitted too, so
+    budgeting against the item lines alone let the finished surface land over
+    budget with truncation reporting itself complete — measured 937 chars
+    against a 900-char budget after cutting 7 lines. Structure is charged to the
+    budget; only items are cut to pay for it."""
     lines = index_text.splitlines(keepends=True)
     item_idxs = [i for i, ln in enumerate(lines) if INDEX_ITEM_RE.search(ln)]
     if not item_idxs:
         return index_text, 0
 
-    current = sum(len(lines[i]) for i in item_idxs)
+    current = sum(len(ln) for ln in lines)
     if current <= budget_for_index:
         return index_text, 0
 
@@ -548,6 +556,12 @@ def project_one(brain_dir, target, main_sha, short_sha, dry_run):
         "mode": mode,
         "sha": main_sha,
         "chars": len(written if mode == "full" else extract_block_region(written)),
+        # `dropped` is the rollup, RETAINED DELIBERATELY and only as a
+        # manifest-history convenience — the two causes below are the ones any
+        # check must read. Nothing consumes it since the sync line stopped
+        # printing it (P7/G8); if a future consumer appears, that consumer is
+        # the bug, because summing a healthy filter with real data loss is the
+        # exact conflation this file was fixed to remove.
         "dropped": vis_dropped + budget_dropped,
         "dropped_visibility": vis_dropped,
         "dropped_budget": budget_dropped,
@@ -593,10 +607,19 @@ def main():
         try:
             entry = project_one(brain_dir, target, main_sha, short_sha, args.dry_run)
             results.append(entry)
+            # Two unrelated causes used to print as one word: `dropped=68` was
+            # 68 local items correctly withheld from a cloud surface, and it
+            # was also N index lines silently cut for budget — the second of
+            # which means a saved memory reaches no session at all. Same word,
+            # opposite meanings, so a reader could not tell a healthy run from
+            # a lossy one. `filtered` is the visibility rule doing its job;
+            # `truncated` is data loss, and is graded as a failure by
+            # scripts/loreport-health off dropped_budget in the manifest.
             print(
                 f"{entry['provider']:12} {entry['path']:40} "
                 f"mode={entry['mode']} chars={entry['chars']} "
-                f"dropped={entry['dropped']} sha={short_sha}"
+                f"filtered={entry['dropped_visibility']} "
+                f"truncated={entry['dropped_budget']} sha={short_sha}"
             )
         except Exception as exc:
             failures += 1

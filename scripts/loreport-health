@@ -312,9 +312,15 @@ for entry in manifest.get("targets", []):
     current = region_hash(text, mode)
     if entry.get("region_hash") and current != entry["region_hash"]:
         print(f"edit\thand-edit inside generated region: {label} — edits will be lost tonight\trevert hand-edits in {rel} or accept overwrite tonight")
-    dropped = entry.get("dropped_budget") or 0
-    if dropped:
-        print(f"trunc\tindex truncation: {label} silently dropped {dropped} line(s)\traise budget_chars for {label} in hub/projection-targets.json or prune index")
+    # dropped_budget ONLY. The manifest also carries dropped_visibility (local
+    # items correctly withheld from a cloud surface) and their sum as `dropped`;
+    # reading either of those here would grade the visibility filter working
+    # correctly as a failure — on this brain that is 68 items every night.
+    # Budget truncation is the one that loses data: the line reaches no session.
+    # Word it TRUNCATED/cut, never "dropped", so it cannot be read as the filter.
+    truncated = entry.get("dropped_budget") or 0
+    if truncated:
+        print(f"trunc\tindex TRUNCATED: {label} — {truncated} index line(s) cut to fit budget_chars, so those memories reach no session\traise budget_chars for {label} in hub/projection-targets.json or prune the index")
 PY
 )
   while IFS=$'\t' read -r kind target fix; do

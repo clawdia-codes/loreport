@@ -964,3 +964,89 @@ class ReconciliationBlindSpotsAreNamed(HealthHarness, unittest.TestCase):
         r = self.run_health()
         self.assertEqual(r.returncode, 1)
         self.assertIn("vacuously clean", self.banner_text() or "")
+
+class TruncationIsAFailureAndFilteringIsNot(HealthHarness, unittest.TestCase):
+    """G8. A nightly sync printed `dropped=68` on the cloud surfaces. Sixty-eight
+    of those were local items the visibility filter correctly withheld — the
+    system working. The same counter also covered index lines cut to fit
+    `budget_chars`, which is not the system working: the line reaches no
+    session, so a memory saved that day is invisible to every assistant while
+    the log looks identical to a healthy night.
+
+    Health therefore has to read `dropped_budget` and only `dropped_budget`.
+    These two tests are one pair: either alone can be satisfied by a check that
+    is simply always-on or always-off.
+    """
+
+    TARGET_REL = "hub/surface-projection-target.md"
+
+    def write_projection_manifest(self, *, dropped_visibility, dropped_budget):
+        """One target that is green on every other projection check — the file
+        exists, its mtime and region_hash match what was recorded, and its sha
+        is the brain's real main — so a red result is attributable to the
+        counters and nothing else."""
+        sys.path.insert(0, os.path.join(ENGINE, "hub"))
+        from project import region_hash
+
+        text = "# projected surface\n\n- [[seed]] — seed\n"
+        self.write(self.TARGET_REL, text)
+        abspath = os.path.join(self.brain, self.TARGET_REL)
+        main_sha = subprocess.run(
+            ["git", "-C", self.brain, "rev-parse", "main"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.write("hub/projection-manifest.json", json.dumps({
+            "projected_at": "2026-08-10",
+            "main_sha": main_sha,
+            "targets": [{
+                "provider": "testprov",
+                "path": self.TARGET_REL,
+                "mode": "full",
+                "sha": main_sha,
+                "chars": len(text),
+                "dropped": dropped_visibility + dropped_budget,
+                "dropped_visibility": dropped_visibility,
+                "dropped_budget": dropped_budget,
+                "budget_chars": 12000,
+                "over_budget": False,
+                "mtime": os.path.getmtime(abspath),
+                "region_hash": region_hash(text, "full"),
+            }],
+        }))
+
+    def test_the_visibility_filter_doing_its_job_is_not_a_failure(self):
+        """The live shape: 68 local items withheld, nothing truncated. Reddened
+        by a one-line change in scripts/loreport-health — reading
+        `entry.get("dropped")` (or `dropped_visibility`) instead of
+        `entry.get("dropped_budget")`, which is exactly the conflation G8
+        describes."""
+        self.write_projection_manifest(dropped_visibility=68, dropped_budget=0)
+        result = self.run_health()
+        self.assertEqual(result.returncode, 0,
+                         f"withholding 68 local items was graded as a failure: {result.stderr}")
+        self.assertIsNone(self.banner_text(),
+                          f"a correctly filtered projection wrote a banner: {self.banner_text()}")
+        self.assertEqual([n for n in self.notifications() if "FAIL" in n], [])
+
+    def test_budget_truncation_is_a_failure_that_reaches_the_owner(self):
+        """Reddened by deleting the `if truncated:` print in
+        scripts/loreport-health's projection block — the whole feature."""
+        self.write_projection_manifest(dropped_visibility=68, dropped_budget=3)
+        result = self.run_health()
+        self.assertEqual(result.returncode, 1,
+                         "index lines were cut for budget and health exited 0")
+        banner = self.banner_text() or ""
+        self.assertIn("FAILING", banner)
+        self.assertIn("3 index line(s)", banner)
+        self.assertTrue([n for n in self.notifications() if "FAIL" in n],
+                        f"truncation never reached the notifier: {self.notifications()}")
+
+    def test_the_truncation_message_does_not_reuse_the_word_dropped(self):
+        """One word must not mean two conditions. `dropped` is the sync's word
+        for withheld-by-visibility; if the failure text says "dropped" too, the
+        reader is back where G8 started."""
+        self.write_projection_manifest(dropped_visibility=68, dropped_budget=3)
+        self.run_health()
+        banner = self.banner_text() or ""
+        line = [ln for ln in banner.splitlines() if "TRUNCATED" in ln]
+        self.assertTrue(line, f"no truncation line in banner: {banner}")
+        self.assertNotIn("dropped", line[0].lower())
