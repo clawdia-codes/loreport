@@ -130,7 +130,24 @@ def empty_queue():
 
 def load(brain_dir):
     """Read the queue. A MISSING file is an empty queue (the normal state); a
-    present-but-unparseable one raises."""
+    present-but-unparseable one raises.
+
+    VALIDATES THE ENTRIES, not only the container. This file is untracked,
+    gitignored and hand-editable, and its only reader runs inside the projection
+    of five surfaces — including the primary injected one. Checking that
+    `entries` is a list while trusting its ELEMENTS meant four shapes raised
+    straight through build_attention's documented promise never to:
+    `entries` of strings (AttributeError in open_entries), `[null]` (same), an
+    entry with no `id` (KeyError in render_entry), `state: null`
+    (AttributeError in render_marker). project.py catches per target, so ALL
+    FIVE failed, and it then rewrote hub/projection-manifest.json with
+    `targets: []` — at which point loreport-health's projection section
+    (freshness, hand-edit, dropped_budget) iterates an empty list and asserts
+    NOTHING, while every surface sits frozen at yesterday's content. That is
+    this repo's own named signature defect, newly reachable from a local JSON
+    file. Refuse the file HERE, so the caller's one honest "could not be read"
+    line is what the user actually sees.
+    """
     path = _path(brain_dir)
     if not os.path.isfile(path):
         return empty_queue()
@@ -141,7 +158,30 @@ def load(brain_dir):
         raise QueueUnreadable(f"{ATTENTION_FILE}: {exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
         raise QueueUnreadable(f"{ATTENTION_FILE}: not an attention queue")
-    data.setdefault("version", SCHEMA_VERSION)
+    version = data.get("version", SCHEMA_VERSION)
+    if version != SCHEMA_VERSION:
+        # The old code setdefault()ed a version nobody ever compared. A file
+        # written by a future schema is not "an empty queue".
+        raise QueueUnreadable(
+            f"{ATTENTION_FILE}: schema version {version!r}, this engine reads "
+            f"{SCHEMA_VERSION!r}")
+    for i, entry in enumerate(data["entries"]):
+        if not isinstance(entry, dict):
+            raise QueueUnreadable(
+                f"{ATTENTION_FILE}: entry {i} is a {type(entry).__name__}, "
+                f"not an object")
+        for field in ("id", "state"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise QueueUnreadable(
+                    f"{ATTENTION_FILE}: entry {i} has no usable {field!r}")
+        if entry["state"] not in STATES:
+            raise QueueUnreadable(
+                f"{ATTENTION_FILE}: entry {i} has unknown state "
+                f"{entry['state']!r} (expected one of {', '.join(STATES)})")
+        if entry.get("names") is not None and not isinstance(entry["names"], list):
+            raise QueueUnreadable(
+                f"{ATTENTION_FILE}: entry {i} has a non-list 'names'")
+    data["version"] = version
     data.setdefault("acked_signature", None)
     return data
 

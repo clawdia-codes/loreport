@@ -194,6 +194,22 @@ python3 hub/attention.py dismiss <id>                   # false candidate — no
 ```
 
 `hub/attention.json` is local state and gitignored, like `hub/merge-state.json`.
+Because it is untracked and hand-editable, `attention.load()` **validates every
+entry**, not just the container — id, state, schema version, `names` — and
+refuses the file outright otherwise. `project.build_attention()` then wraps its
+*whole* body, not only the load. Both matter for the same reason: `project.py`
+catches per target, so one malformed local JSON file failed all five targets and
+left `hub/projection-manifest.json` with `targets: []` — and every projection
+check in `loreport-health` then iterates an empty list and asserts nothing while
+the surfaces sit frozen. An unreadable queue must cost one visible line, never
+the whole memory.
+
+**Every producer must pass `item_path`.** `hub/sweep_run.py` — not
+`inbox_ingest.main` — is the nightly bulk producer of parked captures, so it is
+where these entries come from in practice. Without `item_path` the entry stores
+`path: None`, `annotated_names()` returns `[]`, and no marker is ever placed on
+the item's index line: the primary delivery hook, because injection beats
+retrieval. Only a parse error legitimately passes `None` — it named no file.
 
 If a check ever needs re-verifying by hand: `brain_merge.py --test-determinism`
 re-checks INDEX determinism; feeding a valid, a secret-bearing, and an

@@ -366,9 +366,29 @@ def build_attention(brain_dir, index_text, include_local):
     the user their whole memory. But it is not swallowed either — an unreadable
     queue renders as a visible line in the block, because a silently-empty
     collection is a vacuously-true check, and this repo has shipped that twice.
+
+    THE GUARD COVERS THE WHOLE BODY, not just the load. It used to wrap
+    `attention.load()` alone, so anything raising in open_entries / filter /
+    render / annotate went straight past the promise above — and because
+    project.py catches per target, one malformed local JSON file failed all five
+    targets and left the manifest with `targets: []`, which makes every
+    projection check in loreport-health vacuously true. attention.load() now
+    refuses those shapes up front; this stays as the backstop, because "never
+    raises" has to be true of the function, not of one line in it.
     """
     try:
         queue = attention.load(brain_dir)
+        entries = attention.open_entries(queue)
+        if not entries:
+            return "", index_text
+        entries, marks = filter_attention_entries(brain_dir, entries, include_local)
+        if not entries:
+            return "", index_text
+        block = attention.render_block(
+            entries, attention.needs_ask(queue), include_paths=include_local,
+        )
+        return block, attention.annotate_index_text(
+            index_text, entries, resolvable=marks)
     except attention.QueueUnreadable as exc:
         return (
             "## Loreport — needs your input (unknown)\n"
@@ -379,19 +399,10 @@ def build_attention(brain_dir, index_text, include_local):
     except Exception as exc:  # noqa: BLE001 - see docstring
         return (
             "## Loreport — needs your input (unknown)\n"
-            f"- ⚠ the attention queue could not be read ({exc!r}).\n"
+            f"- ⚠ the attention queue could not be rendered ({exc!r}); parked "
+            "and contested items are NOT listed below.\n"
+            f"  fix: `{attention.RESOLVE_CMD} list`\n"
         ), index_text
-
-    entries = attention.open_entries(queue)
-    if not entries:
-        return "", index_text
-    entries, marks = filter_attention_entries(brain_dir, entries, include_local)
-    if not entries:
-        return "", index_text
-    block = attention.render_block(
-        entries, attention.needs_ask(queue), include_paths=include_local,
-    )
-    return block, attention.annotate_index_text(index_text, entries, resolvable=marks)
 
 
 def build_surface_body(brain_dir, target, short_sha):

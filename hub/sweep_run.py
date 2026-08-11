@@ -79,38 +79,60 @@ def save_state(path, state):
 
 def process_candidate(brain_dir, candidate, block_path, trust):
     """Run one candidate through inbox_ingest's gate chain. Returns an outcome
-    string; quarantine side effects are inbox_ingest's own."""
+    string; quarantine side effects are inbox_ingest's own.
+
+    EVERY quarantine() call here passes `item_path`. THIS module — not
+    inbox_ingest.main — is the nightly BULK producer of parked captures
+    (units/loreport-sweep.service runs it with --window-days 1), so in
+    production it is the dominant source of attention entries. Left at the
+    default None, record_parked() stores path=None, annotated_names() returns
+    [], and no marker is ever inserted on the item's index line — the feature's
+    ruled-primary delivery hook, because injection beats retrieval. On a cloud
+    surface the entry degrades further to "a capture never landed: (withheld
+    from this surface)", naming nothing at all. tests/test_attention.py drives
+    only inbox_ingest.main, so the whole suite stayed green with this producer
+    unwired; TheSweepAlsoRaisesTheEntry now drives process_candidate directly.
+
+    `block` is None only on a parse error, which by definition named no file.
+    """
     provider = candidate["provider"]
     block, err = ingest.parse_block(candidate["block"])
     if err:
-        ingest.quarantine(brain_dir, provider, block_path, "parse-error", err)
+        ingest.quarantine(brain_dir, provider, block_path, "parse-error", err,
+                          item_path=None)
         return f"quarantined: parse-error ({err})"
+
+    item_path = block.get("file")
 
     schema_err = ingest.validate_schema(block)
     if schema_err:
-        ingest.quarantine(brain_dir, provider, block_path, "schema-invalid", schema_err)
+        ingest.quarantine(brain_dir, provider, block_path, "schema-invalid",
+                          schema_err, item_path=item_path)
         return f"quarantined: schema-invalid ({schema_err})"
 
     secret_hit = ingest.scan_secrets(block["raw"])
     if secret_hit:
         # Never echo the match itself into a log the sweep writes unattended.
         ingest.quarantine(brain_dir, provider, block_path, "secret-scan",
-                          "matched a secret pattern")
+                          "matched a secret pattern", item_path=item_path)
         return "quarantined: secret-scan"
 
     imp_hit = ingest.scan_imperative(block["raw"])
     if imp_hit:
         ingest.quarantine(brain_dir, provider, block_path, "imperative-scan",
-                          f"unattributed standing instruction: \"{imp_hit}\"")
+                          f"unattributed standing instruction: \"{imp_hit}\"",
+                          item_path=item_path)
         return "quarantined: imperative-scan"
 
     try:
         result = ingest.commit_block(brain_dir, provider, block, trust)
     except ingest.OwnershipError as e:
-        ingest.quarantine(brain_dir, provider, block_path, "ownership-denied", str(e))
+        ingest.quarantine(brain_dir, provider, block_path, "ownership-denied",
+                          str(e), item_path=item_path)
         return "quarantined: ownership-denied"
     except Exception as e:  # git failure — commit_block restored its own path only
-        ingest.quarantine(brain_dir, provider, block_path, "git-error", str(e))
+        ingest.quarantine(brain_dir, provider, block_path, "git-error", str(e),
+                          item_path=item_path)
         return f"quarantined: git-error ({e})"
 
     return "skipped: no change" if result == "skipped: no change" else "committed"
