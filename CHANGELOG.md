@@ -2,6 +2,16 @@
 
 ## [1.14.0] — 2026-08-10
 
+### Fixed — the leak-audit consumer could go silent
+
+- **The audit could crash and health would report the brain healthy.** Exit 1 means
+  "findings", but a traceback also exits 1 and carries no severity token, so both
+  branches were skipped and nothing was recorded — the vacuous-truth bug the section's
+  own comment claimed to prevent. Reproduced naturally by one non-UTF-8 byte in a
+  committed memory. Now an unparseable exit 1 is a failure, `brain_audit._run_git`
+  raises `CannotAudit` on `UnicodeDecodeError` (the disk path already did), and seven
+  tests cover the severity mapping, which previously had none.
+
 ### Fixed — the alerting path could not be trusted to alert
 
 - **A misconfigured health run was recorded by systemd as a success.** The unit sets
