@@ -263,12 +263,31 @@ away — eleven quarantine events between 2026-08-04 and 2026-08-07, six of them
   bounded by `</MEMORY>`, so its absence signals nothing about truncation. Still emit it:
   it is how a human reads back what a block will do before running it.
 
-None of this widens what may be *written*. The inference can only re-read what the block
-states, so it refuses — quarantining exactly as before — when `name:` is absent or is not
-a kebab slug, when `type:` is not a known item type, and when the leading lines are not
-plainly frontmatter. `action` never resolves to `delete`. And a block that got the tag
-right keeps the strict frontmatter rule: the repair applies only where the tag itself was
-already malformed.
+The inference can only re-read what the block states, so it refuses — quarantining exactly
+as before — when `name:` is absent or is not a kebab slug, when `type:` is not a known item
+type, and when the leading lines are not plainly frontmatter. An **absent** `action` never
+resolves to `delete`; it defaults to `new`.
+
+Two honest caveats, because an overstated guarantee is worse than none:
+
+- A block that **states** `action="delete"` and omits `file=` will have its path inferred
+  from its own frontmatter and the delete executed, at cloud trust as well as local. That
+  is a *write*, so "none of this widens what may be written" would be false. It is a
+  deliberate, narrow allowance: the emitter did say delete and did name the item, the
+  synthesized path is confined to `<folder>/<kebab>.md`, the ownership gate still applies,
+  and a target that does not exist still quarantines. It is stated here because it is the
+  one destructive path the recovery can reach.
+- The "a block that got the tag right keeps the strict frontmatter rule" carve-out is keyed
+  on `MEMORY_RE` matching, and that regex fixes the attribute ORDER. So `file=` before
+  `action=` takes the strict path, while the same block with those two attributes swapped
+  takes the recovery path and has its headless frontmatter repaired. Well-formedness is not
+  what decides; matching that one regex is.
+
+Every commit produced by the recovery path carries an `Inferred:` trailer naming what was
+synthesized or repaired, and `hub/sweep_run.py` reports the same in its outcome string —
+so a repaired capture is never byte-indistinguishable in `git log` from one the emitter
+authored correctly, and `git log --grep='^Inferred:'` answers how often the grammar is
+actually being lost.
 
 An **empty** capture is quarantined under its own reason, `empty-block`, rather than as a
 `parse-error`. It is not a malformed block; it is a caller that emitted nothing — a

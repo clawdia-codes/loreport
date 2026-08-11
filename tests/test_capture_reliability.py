@@ -280,6 +280,104 @@ class MissingIndexLine(_Brain):
         self.assertEqual(self.digest(), "", "nothing should have been quarantined")
 
 
+class TheRecoveryLeavesADurableRecord(_Brain):
+    """A repaired capture must not be byte-indistinguishable from a correct one.
+
+    The recovery path does two things the emitter did not: it SYNTHESIZES
+    `file`/`action` from frontmatter, and it REWRITES the committed body by
+    inserting `---` delimiters. Before this, the only record of either was a
+    stdout line in inbox_ingest.main() — the commit trailers were
+    Provider/Trust/Action/File/Ingested-At and nothing more. Worse, the SWEEP
+    (hub/sweep_run.py, the nightly bulk path the four real bare-tag emits
+    actually came from) prints nothing and returned the bare string "committed",
+    which is what lands in its report and in its state ledger. So in production
+    the FREQUENT case had no record anywhere.
+    """
+
+    BARE = ('<MEMORY>\n---\nname: recovered\ndescription: d\ntype: project\n'
+            'visibility: shared\n---\nbody\n</MEMORY>\n')
+
+    def head_message(self):
+        return self.git("log", "-1", "--format=%B", BRANCH).stdout
+
+    def test_an_inferred_capture_is_marked_in_the_commit_itself(self):
+        """Mutation: delete the `if block.get("inferred"): msg += ...` lines
+        from commit_block in hub/inbox_ingest.py.
+
+        `git log` is the durable record; stdout is not one."""
+        rc, out = self.ingest_text(self.BARE)
+        self.assertEqual(rc, 0, out)
+        body = self.head_message()
+        self.assertIn("Inferred:", body)
+        self.assertIn("file", body)
+        self.assertIn("action", body)
+
+    def test_a_repaired_body_says_which_repair_happened(self):
+        """Mutation: as above.
+
+        Headless frontmatter is repaired by inserting `---` lines the emitter
+        never sent — the committed BYTES differ from what was submitted, which
+        is the change most worth being able to find later."""
+        rc, out = self.ingest_text(
+            '<MEMORY action="new" file="memories/headless.md">\n'
+            'name: headless\ndescription: d\ntype: project\nvisibility: shared\n'
+            '\nbody\n</MEMORY>\n')
+        self.assertEqual(rc, 0, out)
+        self.assertIn("frontmatter delimiters", self.head_message())
+
+    def test_a_correctly_authored_capture_carries_no_such_trailer(self):
+        """Mutation: emit the trailer unconditionally.
+
+        A marker on every commit is a marker on none — `git log
+        --grep='^Inferred:'` has to answer "how often is the emitter actually
+        losing the grammar?", which is the question that decides whether this
+        recovery path can ever be retired."""
+        rc, out = self.ingest_text(
+            '<MEMORY file="memories/clean.md" action="new">\n---\nname: clean\n'
+            'description: d\ntype: project\nvisibility: shared\n---\nbody\n'
+            '</MEMORY>\n')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Inferred:", self.head_message())
+
+    def test_the_sweep_reports_the_recovery_too(self):
+        """Mutation: `return "committed"` unconditionally at the end of
+        sweep_run.process_candidate.
+
+        The sweep is the nightly bulk producer and prints no INFERRED line, so
+        its outcome string is the only thing its report and its state ledger
+        ever see. Also pins the counter: `summary["committed"]` keys on the
+        outcome, so a richer string must not stop counting as a capture."""
+        sys.path.insert(0, os.path.join(REPO, "hub"))
+        import sweep_run  # noqa: E402
+
+        block_path = os.path.join(self.brain, "cand.txt")
+        with open(block_path, "w", encoding="utf-8") as fh:
+            fh.write(self.BARE)
+        outcome = sweep_run.process_candidate(
+            self.brain, {"provider": PROVIDER, "block": self.BARE},
+            block_path, "local")
+        self.assertTrue(outcome.startswith("committed"), outcome)
+        self.assertIn("inferred", outcome)
+        self.assertIn("file", outcome)
+        # And it still COUNTS as a capture. The nightly summary keys on the
+        # outcome string, so an `==` compare would have silently under-reported
+        # exactly the class this suffix exists to make visible.
+        self.assertEqual(sweep_run.classify(outcome), "committed")
+
+    def test_the_summary_still_counts_an_inferred_capture_as_a_capture(self):
+        """Mutation: `if outcome.startswith("committed")` -> `if outcome ==
+        "committed"` in sweep_run.classify."""
+        sys.path.insert(0, os.path.join(REPO, "hub"))
+        import sweep_run  # noqa: E402
+        self.assertEqual(
+            sweep_run.classify("committed (inferred: file, action)"), "committed")
+        self.assertEqual(sweep_run.classify("committed"), "committed")
+        self.assertEqual(sweep_run.classify("skipped: no change"), "no_change")
+        self.assertEqual(
+            sweep_run.classify("quarantined: secret-scan"), "quarantined")
+        self.assertIsNone(sweep_run.classify("dry-run: would offer"))
+
+
 class McpMissingBlockArgument(unittest.TestCase):
     """The 0-byte artifacts' upstream cause: the MCP tool declares `block`
     required, and then defaulted it to "" when absent, manufacturing an empty

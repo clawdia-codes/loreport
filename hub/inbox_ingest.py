@@ -736,6 +736,20 @@ def commit_block(brain_dir, provider, block, trust):
                 f"File: {rel_path}\n"
                 f"Ingested-At: {ts}\n"
             )
+            # THE DURABLE RECORD OF THE RECOVERY. The recovery path does two
+            # things the emitter did not: it SYNTHESIZES file/action from
+            # frontmatter, and it REWRITES the committed body by inserting `---`
+            # delimiters. Without this trailer the only record of either is a
+            # stdout line in main() — so a repaired capture is byte-identical in
+            # `git log` to one the emitter authored correctly, and the SWEEP
+            # (which is where the four real bare-tag emits came from, and which
+            # prints nothing) leaves no record anywhere at all. A trailer is the
+            # right home: it travels with the commit, survives a re-clone, and
+            # `git log --grep='^Inferred:'` answers "how often is the emitter
+            # actually losing the grammar?" — the question that decides whether
+            # this recovery path can ever be retired.
+            if block.get("inferred"):
+                msg += f"Inferred: {', '.join(block['inferred'])}\n"
             git(brain_dir, "commit", "-m", msg)
             return "committed"
         except Exception as exc:

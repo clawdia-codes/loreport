@@ -77,6 +77,25 @@ def save_state(path, state):
     os.replace(tmp, path)
 
 
+def classify(outcome):
+    """Map an outcome string to its summary bucket, or None for "don't count".
+
+    Extracted so the MAPPING is testable rather than only the outcome string.
+    The counter used to compare `outcome == "committed"`, so the moment the
+    outcome grew a suffix — `committed (inferred: file, action)` — it silently
+    stopped counting captures, and the nightly report would have under-reported
+    exactly the class this suffix exists to make visible. A prefix match inline
+    in run() would have fixed the bug and stayed just as unreachable from a test.
+    """
+    if outcome.startswith("committed"):
+        return "committed"
+    if outcome == "skipped: no change":
+        return "no_change"
+    if outcome.startswith("quarantined"):
+        return "quarantined"
+    return None
+
+
 def process_candidate(brain_dir, candidate, block_path, trust):
     """Run one candidate through inbox_ingest's gate chain. Returns an outcome
     string; quarantine side effects are inbox_ingest's own."""
@@ -114,7 +133,16 @@ def process_candidate(brain_dir, candidate, block_path, trust):
         ingest.quarantine(brain_dir, provider, block_path, "git-error", str(e))
         return f"quarantined: git-error ({e})"
 
-    return "skipped: no change" if result == "skipped: no change" else "committed"
+    if result == "skipped: no change":
+        return "skipped: no change"
+    # Say WHICH captures needed the recovery path. The outcome string is what
+    # lands in the printed report AND in the sweep's state ledger, and the sweep
+    # is the path the four real bare-tag emits came from — so a bare "committed"
+    # here meant the frequent case had no record anywhere. Commit-side, the same
+    # fact rides an `Inferred:` trailer.
+    if block.get("inferred"):
+        return f"committed (inferred: {', '.join(block['inferred'])})"
+    return "committed"
 
 
 def run(brain_dir, window_days, state_file, dry_run, trust):
@@ -163,12 +191,9 @@ def run(brain_dir, window_days, state_file, dry_run, trust):
                     "at": now,
                 }
 
-            if outcome == "committed":
-                summary["committed"] += 1
-            elif outcome == "skipped: no change":
-                summary["no_change"] += 1
-            elif outcome.startswith("quarantined"):
-                summary["quarantined"] += 1
+            bucket = classify(outcome)
+            if bucket:
+                summary[bucket] += 1
             summary["outcomes"].append(
                 {"slug": candidate["slug"], "provider": provider, "outcome": outcome}
             )
