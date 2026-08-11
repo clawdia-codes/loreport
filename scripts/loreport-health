@@ -83,6 +83,11 @@ TG_NOTIFY="${LOREPORT_NOTIFY:-}"
 # shift, and a check that cries wolf gets muted. 36h still catches "it did not
 # run last night" by the following evening.
 MERGE_MAX_AGE_HOURS="${LOREPORT_MERGE_MAX_AGE_HOURS:-36}"
+# Longest push notification this script will send. The per-item name list is
+# already capped in hub/quarantine_report.py; this is the outer guard so that no
+# future addition to a message can silently push the reassuring half of it off a
+# phone screen.
+NOTIFY_MAX_CHARS=400
 
 for d in "$BRAIN" "$FRAMEWORK"; do
   [ -d "$d" ] || { echo "loreport-health: not a directory: $d (check $CONFIG)" >&2; exit 2; }
@@ -104,6 +109,7 @@ failures=()
 fixes=()
 reviews=()
 review_fixes=()
+review_details=()
 
 # BROKEN or STALE: something is not working. Sets the banner, the FAIL notice
 # and exit 1.
@@ -115,9 +121,34 @@ note_failure() {
 # NEEDS REVIEW: the pipeline is healthy and nothing is blocked; a human owes it
 # a decision. Never sets the exit code, and its wording must say so — a reader
 # who sees this must not be able to mistake it for a merge that failed.
+#
+# $3 is an OPTIONAL multi-line detail block, printed in the banner only. "Open a
+# file and resolve it" is not something a reader can act on; the detail block
+# names each pending item — name, type, visibility, its own description — and
+# carries a copy-pasteable command per outcome. It is deliberately NOT part of
+# the state-change signature: a reworded description must not re-page, while the
+# item set changing (which lands in $1) must.
 note_review() {
   reviews+=("$1")
   review_fixes+=("$2")
+  review_details+=("${3:-}")
+}
+
+# Enumerate hub/quarantine/ for the alert. Captured into a variable and used as
+# an argument — NEVER piped into a `while read` that calls note_review, because
+# a pipe runs the loop in a subshell and every collected message is discarded
+# when it exits (checks 3-4 in this file already had to be rewritten for that).
+# The helper exits 0 unconditionally and renders its own errors, so a missing
+# report degrades to one explanatory line rather than a traceback in the banner.
+QUARANTINE_REPORT="$FRAMEWORK/hub/quarantine_report.py"
+quarantine_detail() {
+  [ -f "$QUARANTINE_REPORT" ] || return 0
+  python3 "$QUARANTINE_REPORT" --brain-dir "$BRAIN" --engine-dir "$FRAMEWORK" \
+    --digest-count "${1:-}" --mode banner 2>/dev/null || true
+}
+quarantine_names() {
+  [ -f "$QUARANTINE_REPORT" ] || return 0
+  python3 "$QUARANTINE_REPORT" --brain-dir "$BRAIN" --mode names 2>/dev/null || true
 }
 
 tg_notify() {
@@ -405,8 +436,17 @@ if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
   q_line=$(grep -iE 'quarantine items pending review: [0-9]+' "$latest_digest" | tail -1 || true)
   q_count=$(printf '%s' "${q_line:-}" | grep -oE '[0-9]+$' || true)
   if [ -n "${q_count:-}" ] && [ "$q_count" -gt 0 ]; then
-    note_review "merge quarantine: ${q_count} block(s) awaiting your decision — the merge and publish completed normally" \
-      "review hub/quarantine/ (listed in $latest_digest); delete or re-file each block"
+    # The names go in the MESSAGE, not only the detail block: the message is
+    # what reaches the phone, and "N block(s)" without a name is precisely the
+    # line that sent two readers off to investigate. Capped at NOTIFY_MAX_NAMES
+    # inside the helper so six parked blocks cannot push the part that says the
+    # pipeline is healthy out of a notification preview.
+    q_names=$(quarantine_names)
+    q_msg="merge quarantine: ${q_count} block(s) awaiting your decision — the merge and publish completed normally"
+    [ -n "${q_names:-}" ] && q_msg="${q_msg}: ${q_names}"
+    note_review "$q_msg" \
+      "each block below carries a show/accept/discard command; nothing is blocked until you run one" \
+      "$(quarantine_detail "$q_count")"
     digest_reported_kinds="${digest_reported_kinds} human_region_violations"
   fi
 
@@ -475,7 +515,8 @@ while IFS= read -r kind; do
         "see 'Provenance violations' in the newest $BRAIN/hub/digest-*.md; confirm the revert was right and check that provider's capture path" ;;
     human_region_violations)
       note_review "human-region: a provider edited a human-owned region and the edit was quarantined — the merge and publish completed normally" \
-        "review $BRAIN/hub/quarantine/; delete or re-file each block" ;;
+        "each block below carries a show/accept/discard command; nothing is blocked until you run one" \
+        "$(quarantine_detail)" ;;
     unspecified)
       note_review "merge needs review: the last completed merge parked something for you, and it was stamped by an engine older than this one, so it could not name the subsystem — the merge and publish completed normally" \
         "read the newest $BRAIN/hub/digest-*.md; the next merge under this engine version will name it" ;;
@@ -642,6 +683,7 @@ if [ "$state" != "ok" ]; then
       for i in "${!reviews[@]}"; do
         echo "⧗ ${reviews[$i]}"
         echo "  next: ${review_fixes[$i]}"
+        [ -n "${review_details[$i]:-}" ] && printf '%s\n' "${review_details[$i]}"
         echo
       done
     fi
@@ -708,8 +750,19 @@ case "${liveness_changed}:${state}" in
     ;;
   changed:review)
     # Deliberately not "FAIL", and it says what still works. This is the line
-    # that got misread; it now has to be read correctly.
+    # that got misread on a phone; it now has to be read correctly there. It
+    # names the pending items (capped in quarantine_report.py) and says where
+    # the per-item commands are, because a reader who has only this line must
+    # still be able to state the right cause and take the next step.
     msg="🧠 Loreport OK — merge and publish are running; ${#reviews[@]} item(s) awaiting your review: ${reviews[0]}"
+    msg="${msg} · what to do: cat ${BANNER}"
+    # Hard cap, belt and braces over the per-item cap. A notification preview
+    # that truncates mid-sentence can leave "merge" and "review" visible with
+    # every reassuring clause cut off — the original misreading, rebuilt by a
+    # message that grew.
+    if [ "${#msg}" -gt "$NOTIFY_MAX_CHARS" ]; then
+      msg="${msg:0:$((NOTIFY_MAX_CHARS - 1))}…"
+    fi
     tg_notify "$msg" --silent
     ;;
   recovered:*)

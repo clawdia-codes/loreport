@@ -125,6 +125,29 @@ and notification. Three of the five (renamed, scrub warnings, provenance
 reverts) write no quarantine file and appear in no line the digest greps read,
 so that field is their only route to a human.
 
+**What the NEEDS REVIEW entry says.** Naming the state was not enough on its own:
+`merge digest needs review` told the owner a decision was owed but not *which*
+item, *why*, or *what to do*, and the investigation that followed reported a
+healthy pipeline as three days dead. So for anything parked under
+`hub/quarantine/`, `hub/quarantine_report.py` enumerates the blocks and the
+banner names each one — item name, `type`, `visibility`, the block's own
+`description` (truncated), and the reason recorded in
+`hub/quarantine/digest.md` — followed by a copy-pasteable command per outcome:
+
+- **show** — `cat <the parked file>`;
+- **accept** — for a *capture* block, re-run `hub/inbox_ingest.py` on it, which
+  puts it back through all five scan-before-commit gates. A rejected *merge
+  update* deliberately gets no one-liner: applying one by hand would skip the
+  secret scrub, the visibility classification and the provenance revert, so the
+  alert says so in words instead;
+- **discard** — `rm <the parked file>`.
+
+The push notification carries the same facts in phone-sized form: the item names
+(capped, then `+N more`), the clause that says merge and publish completed, and
+where to read the commands. `hub/quarantine/` is gitignored, so when the count in
+the digest and the files on disk disagree the alert states both numbers rather
+than rendering a confident empty list.
+
 A completed merge — a quiet no-op night included — stamps
 `hub/merge-state.json` with `last_success_epoch`. The abort paths deliberately
 do not, and that asymmetry is what makes the file a real liveness signal: the
