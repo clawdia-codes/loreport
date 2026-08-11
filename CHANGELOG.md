@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.16.0] — 2026-08-11
+
+### Changed — failure alerts are written for a reader who is not prepared
+
+- **Three lines, always: what happened · what it means for you · what to do.** The
+  failing notification was a bare `Loreport health FAIL: <internal string>` — the most
+  urgent message in the system and the least usable, while the *less* urgent review
+  notification already explained itself. Impact lines are true rather than soothing: a
+  stalled pipeline says nothing is lost, a secret-scrub abort says publishing stopped on
+  purpose and nothing was exposed.
+- **Eight headlines moved from internal jargon to plain English**, each keeping its old
+  tag in parentheses so tests, greps and downstream agents still match a stable string.
+- **The alert now leads with the highest-severity failure, not the first checked.** Found
+  by demoing the change: a secret-found alert reached the phone as "(+2 more)" behind
+  "the nightly tidy-up has never completed". A privacy condition can no longer hide
+  behind an upkeep one.
+
 ## [1.15.0] — 2026-08-11
 
 ### Fixed — an alert asserted a subsystem it had not determined
