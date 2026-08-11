@@ -242,6 +242,40 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
   the copy button grabs only half of it.
 <!-- /spec-slice -->
 
+#### What the gate tolerates, and what it still refuses
+
+The grammar above is what a model is taught to emit. `hub/inbox_ingest.py` also accepts
+three deviations from it, because each one accounted for real captures that were thrown
+away — eleven quarantine events between 2026-08-04 and 2026-08-07, six of them on one day.
+`tests/test_capture_reliability.py` replays a reproduction of every one of those artifacts.
+
+- **`<MEMORY>` with no `file=` / `action=`** (or only one of them). The path is inferred
+  from the block's own frontmatter: `memories/<name>.md`, or `knowledge/<name>.md` when
+  `type: knowledge`, per the folder rule in §1. An absent `action` becomes `new`.
+- **Frontmatter missing its opening `---`.** Restored, but only when the leading lines are
+  unambiguously frontmatter — every line up to the terminator is `<known-key>: <value>`,
+  including `name:` and `type:`. Only delimiters are added; nothing is edited or supplied.
+  This travels with the previous case: in all four archived instances the attributes and
+  the delimiter went missing in the same emit, and inferring the path while committing an
+  unreadable body would only trade a loud failure for a silent one.
+- **A missing trailing `INDEX:` line.** Nothing consumes it — `INDEX.md` is rebuilt from
+  item frontmatter by `brain_merge.build_index_bytes`, and the item's content is already
+  bounded by `</MEMORY>`, so its absence signals nothing about truncation. Still emit it:
+  it is how a human reads back what a block will do before running it.
+
+None of this widens what may be *written*. The inference can only re-read what the block
+states, so it refuses — quarantining exactly as before — when `name:` is absent or is not
+a kebab slug, when `type:` is not a known item type, and when the leading lines are not
+plainly frontmatter. `action` never resolves to `delete`. And a block that got the tag
+right keeps the strict frontmatter rule: the repair applies only where the tag itself was
+already malformed.
+
+An **empty** capture is quarantined under its own reason, `empty-block`, rather than as a
+`parse-error`. It is not a malformed block; it is a caller that emitted nothing — a
+different diagnosis and a different fix (see `hub/mcp_server.py`'s `loreport_save_memory`
+dispatch, which refuses an absent `block` argument instead of manufacturing an empty one).
+The quarantine artifact is 0 bytes because `quarantine()` copies its input verbatim.
+
 ### profile-template v1
 
 <!-- spec-slice: profile-template v1 — verbatim copy; canonical text: docs/format-spec.md Appendix A -->

@@ -185,6 +185,13 @@ class InferenceRefusals(_Brain):
               'visibility: shared\n---\nbody\n</MEMORY>\n')
 
     def test_a_name_it_cannot_read_is_never_invented(self):
+        """A block whose frontmatter states everything EXCEPT `name:` is the one
+        shape where an invented name would actually reach a commit — the schema
+        gate would pass it. So the refusal has to happen here, by name, and not
+        fall back to the block file (`mpb-capture-<random>.txt`, which would
+        land as `memories/mpb-capture-<random>.md`); that fallback is
+        structurally impossible only for as long as parse_block is never handed
+        the path, which is why the message is asserted and not just the rc."""
         rc, out = self.ingest_text(
             '<MEMORY>\n---\ndescription: d\ntype: project\nvisibility: shared\n'
             '---\nbody\n</MEMORY>\n')
@@ -192,14 +199,7 @@ class InferenceRefusals(_Brain):
         self.assertIn("no `name:`", out)
         self.assertEqual(self.branch_files(), {"memories/.keep"},
                          "a block with no readable name committed something anyway")
-
-    def test_the_block_filename_is_never_used_as_the_item_name(self):
-        """The temp file is called mpb-capture-<random>.txt. That must never
-        become memories/mpb-capture-<random>.md."""
-        rc, out = self.ingest_text("<MEMORY>\nnot frontmatter at all\n</MEMORY>\n")
-        self.assertEqual(rc, 1)
-        self.assertEqual(self.branch_files(), {"memories/.keep"})
-        self.assertNotIn("mpb-capture", "".join(sorted(self.branch_files())))
+        self.assertNotIn("mpb-capture", " ".join(sorted(self.branch_files())))
 
     def test_a_name_that_is_not_a_slug_is_refused(self):
         """`name:` is interpolated straight into a path. A traversal name must
