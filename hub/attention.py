@@ -64,6 +64,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -81,6 +82,30 @@ STATES = (PARKED, CONTESTED)
 MAX_RENDERED = 5
 
 RESOLVE_CMD = "python3 hub/attention.py"
+
+# A parked entry's path comes from the FAILED block's `file="..."` attribute, and
+# on the schema-invalid path it has failed validation by definition — the relpath
+# allowlist did not pass, and the secret and imperative scans have not run at all
+# (both are downstream of the schema check). MEMORY_RE's `[^"]+` matches newlines,
+# so that attribute can carry whole lines of unscanned caller text, and this module
+# writes into the fixed prefix of the agent's own context file.
+#
+# Two failures, one filter: unscanned prose reaching an agent's context, and an
+# oversized value blowing `budget_for_index` to 0 — MAX_RENDERED bounds how many
+# entries render, not how long one is, so a 20 KB attribute would push every real
+# INDEX line off the surface.
+#
+# Anything not shaped like a plain relpath is dropped to None. The entry then
+# points at the raw quarantine artifact instead, which is where a block that
+# malformed belongs anyway.
+SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
+
+
+def safe_path(value):
+    """The value if it is shaped like a plain relpath, else None. See SAFE_PATH_RE."""
+    if not isinstance(value, str):
+        return None
+    return value if SAFE_PATH_RE.match(value) else None
 
 
 # --- state file ---------------------------------------------------------------
@@ -199,10 +224,17 @@ def record_parked(brain_dir, path, reason, detail="", artifact=None):
     the raw block was set aside. The id keys on `path or artifact` so two
     different failed captures stay two entries rather than collapsing into one.
     """
+    raw = (str(path), str(artifact))
+    path, artifact = safe_path(path), safe_path(artifact)
+    # Distinct failures must stay distinct entries even when both values were
+    # rejected, so the id falls back to a digest of the raw pair — which keys the
+    # entry without storing the unsafe text anywhere this module can render it.
+    ident = path or artifact or hashlib.sha1(
+        "\x1f".join(raw).encode("utf-8", "replace")).hexdigest()
     queue = load(brain_dir)
     now = _now()
     entry = {
-        "id": make_id(PARKED, path=path or artifact),
+        "id": make_id(PARKED, path=ident),
         "state": PARKED,
         "path": path,
         "artifact": artifact,
@@ -375,6 +407,10 @@ def render_entry(entry, include_paths=True):
         # resolve to nothing. Every surface auditor treats `[[x]]` as an item
         # reference, and an unresolvable one is reported as a finding on every
         # run — a permanent false alarm about the thing we are trying to report.
+        # `reason` only, never `detail`: the imperative-scan detail quotes the
+        # verbatim injection string it caught and the git-error detail carries raw
+        # git output. Neither belongs in an agent's context. Do not "helpfully"
+        # add it here.
         where = entry.get("path") or entry.get("artifact") or "(unknown path)"
         target = where if include_paths else "(withheld from this surface)"
         lines = [
