@@ -26,3 +26,6 @@ surface.md
 # Python bytecode from importing hub modules in tests
 __pycache__/
 *.pyc
+
+# Runtime lock taken by inbox_ingest.py / brain_merge.py. Never tracked.
+hub/.loreport.lock
