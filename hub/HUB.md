@@ -165,6 +165,52 @@ cycle. For the raw quarantine detail — secrets and imperative-injection attemp
 alike, from `inbox_ingest.py` — see `hub/quarantine/digest.md`. Also watch for any
 cycle that took unusually long (>10s) as a possible anomaly worth a look.
 
+### The attention queue — what the brain has to ASK about
+
+`hub/quarantine/digest.md` is a report you have to go and read; nothing made a
+failed capture reach the session that needed it. `hub/attention.py` is the other
+half — it carries two states, and they never share a name:
+
+- **`parked`** — a capture that never landed. Its content is **not** in the
+  brain; only the raw block under `hub/quarantine/` has it. Recorded
+  automatically by `inbox_ingest.py`'s quarantine handler.
+- **`contested`** — two or more items that both landed and disagree. Recorded
+  with `python3 hub/attention.py contest <name> <name> --guess <name>`.
+
+Both are **annotations, never blocks**: `hub/project.py` marks the item's own
+line in every projected surface (`⚠ CONTESTED#<id>`) and adds a short section
+naming both claims and the recommended answer, so a session states its best
+guess and asks — it never silently picks, and it never withholds the memory.
+The question is announced as new only while the open set differs from what you
+last answered; after that it stands quietly. Local items are withheld from the
+cloud surfaces here exactly as they are from the index.
+
+Clearing one is a single command:
+
+```
+python3 hub/attention.py list
+python3 hub/attention.py resolve <id> --winner <name>   # records the answer, clears the marker
+python3 hub/attention.py dismiss <id>                   # false candidate — no reason required
+```
+
+`hub/attention.json` is local state and gitignored, like `hub/merge-state.json`.
+Because it is untracked and hand-editable, `attention.load()` **validates every
+entry**, not just the container — id, state, schema version, `names` — and
+refuses the file outright otherwise. `project.build_attention()` then wraps its
+*whole* body, not only the load. Both matter for the same reason: `project.py`
+catches per target, so one malformed local JSON file failed all five targets and
+left `hub/projection-manifest.json` with `targets: []` — and every projection
+check in `loreport-health` then iterates an empty list and asserts nothing while
+the surfaces sit frozen. An unreadable queue must cost one visible line, never
+the whole memory.
+
+**Every producer must pass `item_path`.** `hub/sweep_run.py` — not
+`inbox_ingest.main` — is the nightly bulk producer of parked captures, so it is
+where these entries come from in practice. Without `item_path` the entry stores
+`path: None`, `annotated_names()` returns `[]`, and no marker is ever placed on
+the item's index line: the primary delivery hook, because injection beats
+retrieval. Only a parse error legitimately passes `None` — it named no file.
+
 If a check ever needs re-verifying by hand: `brain_merge.py --test-determinism`
 re-checks INDEX determinism; feeding a valid, a secret-bearing, and an
 imperative-bearing block to `inbox_ingest.py` re-checks the ingest gate; and

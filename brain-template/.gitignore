@@ -18,3 +18,10 @@ hub/synthesis-report.json
 # .gitignore does not reach here — a brain gets this file once, at init.
 hub/merge-state.json
 hub/digest-*.md
+
+# The attention queue (hub/attention.py): parked captures and contested items.
+# Local operational state, rewritten outside any commit by a capture failure or a
+# resolve/dismiss — tracking it would leave the tree dirty every night and halt
+# loreport-sync's post-merge guard, exactly like merge-state.json above.
+hub/attention.json
+hub/attention.json.tmp

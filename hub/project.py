@@ -24,6 +24,20 @@ from datetime import date
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Sibling import, same pattern and same reason as brain_merge.py's `synth_detect`
+# import: this module is imported by tooling that does not put hub/ on the path,
+# so make the directory importable rather than relying on being run as a script.
+#
+# The single-file/stdlib-only doctrine is relaxed here deliberately and narrowly:
+# hub/attention.py owns the queue schema AND its rendering because "two states,
+# ONE rendering path" is a ruling — duplicating the renderer into the projector is
+# exactly how one word ends up meaning two conditions. It holds no security
+# primitive (no SECRET_PATTERNS, no visibility parser), so it copies none of the
+# duplicated-and-checked ones; the visibility decisions below stay here.
+sys.path.insert(0, HERE)
+
+import attention  # noqa: E402
+
 BEGIN_MARKER = "<!-- loreport:begin -->"
 END_MARKER = "<!-- loreport:end -->"
 
@@ -196,6 +210,55 @@ def _has_explicit_visibility_file(path):
     return False
 
 
+def _name_projectable(brain_dir, name, include_local):
+    """True when this item's NAME may appear on this target's surface.
+
+    Same three questions `filter_index_make_surface` asks — one file resolution,
+    the skills carve-out, then explicit `visibility: shared` — with one
+    deliberate difference: an unresolvable name is withheld here, not kept.
+    The filter above keeps an unidentifiable INDEX line because a producer must
+    not silently drop what it cannot identify; the attention block is the
+    opposite job. It MINTS text about items, so an unidentifiable name is one
+    whose visibility nothing has established, and this repo's fail-closed rule
+    reads that as `local`.
+    """
+    if include_local:
+        return True
+    relpath, item_path = _item_file_on_disk(brain_dir, name)
+    if item_path is None:
+        return False
+    if relpath.startswith("skills/") and not _has_explicit_visibility_file(item_path):
+        return True
+    return _is_shared_visibility_file(item_path)
+
+
+def filter_attention_entries(brain_dir, entries, include_local):
+    """Withhold entries this target may not carry, and return the names it may
+    mark.
+
+    A contested entry is withheld WHOLE when any member fails: the entry's
+    content is the PAIRING, so naming the shared half of a shared/local pair
+    still discloses that a local item exists and what it is about. Fail closed
+    on the set, not per member.
+
+    Without this the cloud surfaces (hub/surface-chatgpt.md,
+    hub/surface-claude-ai.md) would carry `[[local-item]]`, which
+    hub/brain_audit.py reports as a LEAK — the highest severity there is, and
+    correctly so.
+    """
+    kept = []
+    marks = set()
+    for entry in entries:
+        names = list(entry.get("names") or [])
+        if any(not _name_projectable(brain_dir, n, include_local) for n in names):
+            continue
+        kept.append(entry)
+        for name in attention.annotated_names(entry):
+            if _name_projectable(brain_dir, name, include_local):
+                marks.add(name)
+    return kept, marks
+
+
 def filter_index_make_surface(brain_dir, index_text, include_local):
     """Keep only INDEX lines whose item is explicitly `visibility: shared`,
     unless include_local.
@@ -295,6 +358,53 @@ def build_header(short_sha):
     )
 
 
+def build_attention(brain_dir, index_text, include_local):
+    """Return (block_text, annotated_index_text).
+
+    Never raises. This runs inside the projection of five surfaces including the
+    primary injected one; an attention queue that cannot be read must not cost
+    the user their whole memory. But it is not swallowed either — an unreadable
+    queue renders as a visible line in the block, because a silently-empty
+    collection is a vacuously-true check, and this repo has shipped that twice.
+
+    THE GUARD COVERS THE WHOLE BODY, not just the load. It used to wrap
+    `attention.load()` alone, so anything raising in open_entries / filter /
+    render / annotate went straight past the promise above — and because
+    project.py catches per target, one malformed local JSON file failed all five
+    targets and left the manifest with `targets: []`, which makes every
+    projection check in loreport-health vacuously true. attention.load() now
+    refuses those shapes up front; this stays as the backstop, because "never
+    raises" has to be true of the function, not of one line in it.
+    """
+    try:
+        queue = attention.load(brain_dir)
+        entries = attention.open_entries(queue)
+        if not entries:
+            return "", index_text
+        entries, marks = filter_attention_entries(brain_dir, entries, include_local)
+        if not entries:
+            return "", index_text
+        block = attention.render_block(
+            entries, attention.needs_ask(queue), include_paths=include_local,
+        )
+        return block, attention.annotate_index_text(
+            index_text, entries, resolvable=marks)
+    except attention.QueueUnreadable as exc:
+        return (
+            "## Loreport — needs your input (unknown)\n"
+            f"- ⚠ the attention queue could not be read ({exc}); parked and "
+            "contested items are NOT listed below.\n"
+            f"  fix: `{attention.RESOLVE_CMD} list`\n"
+        ), index_text
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        return (
+            "## Loreport — needs your input (unknown)\n"
+            f"- ⚠ the attention queue could not be rendered ({exc!r}); parked "
+            "and contested items are NOT listed below.\n"
+            f"  fix: `{attention.RESOLVE_CMD} list`\n"
+        ), index_text
+
+
 def build_surface_body(brain_dir, target, short_sha):
     include_local = target.get("scope", "shared") == "all"
     profile = HUMAN_MARKER_LINE_RE.sub("", read_brain_text(brain_dir, "PROFILE.md"))
@@ -304,6 +414,10 @@ def build_surface_body(brain_dir, target, short_sha):
     index_raw = read_brain_text(brain_dir, "INDEX.md")
     index_filtered, vis_dropped = filter_index_make_surface(
         brain_dir, index_raw, include_local,
+    )
+
+    attention_block, index_filtered = build_attention(
+        brain_dir, index_filtered, include_local,
     )
 
     header = build_header(short_sha)
@@ -319,7 +433,14 @@ def build_surface_body(brain_dir, target, short_sha):
     else:
         intro = DESKTOP_CAPTURE_POINTER + "\n\n"
 
-    fixed = header + SUBAGENT_GUARD + "\n\n" + intro + profile + "\n"
+    # The attention block joins the FIXED prefix — a question that gets truncated
+    # is a question that never gets asked. It is bounded (attention.MAX_RENDERED)
+    # and its bytes are counted against the budget below, so it can push real
+    # INDEX lines into `dropped_budget`, which scripts/loreport-health already
+    # reports, instead of silently overflowing the surface.
+    fixed = header + SUBAGENT_GUARD + "\n\n" + intro + profile + "\n" + attention_block
+    if attention_block:
+        fixed += "\n"
     budget = int(target["budget_chars"])
     budget_for_index = max(0, budget - len(fixed))
     index_out, budget_dropped = _truncate_index_lines(index_filtered, budget_for_index)
