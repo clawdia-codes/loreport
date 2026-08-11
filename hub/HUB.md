@@ -132,6 +132,141 @@ daily digest is written on the abort paths too, so "a recent digest exists" says
 nothing about whether the pipeline ran. `scripts/loreport-health` fails when
 that stamp is older than `LOREPORT_MERGE_MAX_AGE_HOURS` (default 36).
 
+## Nightly review — proposals get a disposition, drift gets reported
+
+`hub/synth_detect.py` proposes clusters of related items. For its first weeks it
+was report-only in the strict sense: it emitted proposals into a digest line that
+said "none filed", nobody filed them, and nobody was ever asked to. A producer
+nothing consumes decays silently and forever, so `hub/nightly_review.py` is its
+consumer. It runs inside `brain_merge.py`, in the same nightly job as the detector
+— one job, one lock, one artifact.
+
+**It never edits a memory.** A proposal becomes a *decision*, recorded next to it.
+`accept` does not create a `knowledge/` page, does not merge two memories and does
+not touch `memories/`; auto-merging memories from a link heuristic is exactly what
+this design refuses. What changes is that a proposal now has to be answered.
+
+### The disposition ledger — `hub/proposals/ledger.json`
+
+Every detected cluster is entered as `pending` and must reach one of:
+
+| disposition | meaning | requires |
+|---|---|---|
+| `accept` | worth writing up; you will author the page | a reason |
+| `reject` | not a real topic | a reason (and it **stays** rejected — see below) |
+| `defer`  | not now | a reason **and** `--until <future date>` |
+
+```
+python3 hub/nightly_review.py --brain-dir "$BRAIN" --list
+python3 hub/nightly_review.py --brain-dir "$BRAIN" --dispose <id> \
+        --status reject --reason "link sprawl, not a topic"
+```
+
+Both refusals in that table are load-bearing. A disposition with no reason is a
+cleared queue, not a decision — six months later nothing distinguishes "considered
+and dismissed" from "clicked away". A deferral with no return date is a reject
+wearing a disguise: the entry stops being pending and nothing brings it back.
+
+Rejection is **sticky across membership churn**. A proposal's identity is its
+member set, so a rejected cluster that gains one member would otherwise return as a
+brand-new pending proposal every time the brain grows, and you would re-decide the
+same thing forever. A newly detected cluster is suppressed when it is a subset of a
+rejected one, or that rejected one plus at most one newcomer. Two newcomers is a
+materially different cluster and comes back for a fresh decision.
+
+A proposal left pending longer than `PENDING_MAX_DAYS` (14) is graded a **failure**
+by `scripts/loreport-health`. That is the only part of this that makes an undecided
+proposal cost anything; everything else merely records.
+
+The ledger is **tracked** — it holds human decisions and the `first_seen` clock the
+overdue check measures from, so it must survive a re-clone. It is written only when
+a proposal is added or decided, never on a quiet night. (An expiring deferral is
+therefore *computed* from `defer_until` at read time, not written back.)
+
+**The merge commits it on every night it changed, no-op nights included.** That is
+not incidental: a no-op is *most* days, and the first night after this feature
+deploys is one — the brain already holds the clusters, so proposals are detected
+against a repository nothing has pushed to in weeks. Riding the INDEX commit alone
+left live proposals in an untracked file that no re-clone would recover.
+
+Two consequences the code depends on, both easy to get wrong:
+
+- Staging is **unconditional**, not keyed on "a proposal was added". `--dispose`
+  writes the ledger out of band, so between the owner deciding in the afternoon and
+  the merge running at night the file is tracked and *modified*.
+- A no-op night must **commit**, never merely stage, and must **not** `reset --hard`.
+  `loreport-sync`'s post-merge guard reads `git status --porcelain
+  --untracked-files=no`, which sees staged changes — leaving the ledger staged would
+  HALT the sync every night — and a `reset --hard` on a quiet night would revert the
+  tracked, modified ledger, throwing away the decision the owner just recorded.
+
+### Reconciliation — `hub/reconcile-sources.json`
+
+A name-set diff between each **native** memory store (the assistant's own memory,
+which Loreport does not own) and Loreport's `INDEX.md`. This is the mechanical half
+of the `memory-reconcile` skill, run nightly and reported. It never repairs anything.
+
+It is **not** the projection check: `loreport-health` §3–4 assert the *outbound*
+surface still matches what `project.py` wrote. This asserts something different —
+that the native store holds no item Loreport has never seen.
+
+```json
+{
+  "sources": [
+    {"provider": "claude", "path": "~/.claude/projects/<project>/memory", "kind": "dir"},
+    {"provider": "openclaw", "path": "~/.openclaw/wiki/main/INDEX.md", "kind": "file"}
+  ]
+}
+```
+
+`kind: "dir"` takes each `*.md` stem as a name; `kind: "file"` takes every
+`[[wikilink]]`. Relative paths resolve against the brain root; `~` expands.
+
+**A missing or empty config reports `unconfigured`, never `in-sync`,** and health
+renders that as "NOT CONFIGURED — asserting nothing". A diff over zero sources is
+vacuously clean, and this repo has shipped that bug twice; absence of a result must
+never read as "checked and clean". The same guard covers an empty `INDEX.md` and an
+empty native store, both of which report `blind` and grade as failures.
+
+### The dated artifact — `hub/nightly/<YYYY-MM-DD>.json`
+
+Written on every nightly run: the machine-checkable proof that the review happened,
+carrying the disposition counts, the pending and overdue ids, and the reconciliation
+result. Gitignored, same class as `hub/digest-*.md`.
+
+**`scripts/loreport-health` §9 FAILS when yesterday's is missing** — strictly
+yesterday's, not "today's or yesterday's", because the weaker rule cannot be
+falsified by deleting the thing it watches. Distinctly named conditions, so no
+single word covers two states:
+
+| condition | grade |
+|---|---|
+| `hub/nightly/` holds no artifact at all — *nightly review has never run* | FAIL |
+| yesterday's specifically absent — *did not run last night* | FAIL |
+| present but unparseable, or missing its reconciliation section | FAIL |
+| proposals overdue past 14 days | FAIL |
+| proposals merely pending, reconciliation drift, or unconfigured | REVIEW |
+
+The review runs inside the merge, so an aborted merge also leaves no artifact and
+this co-fires with the merge-liveness check. The message says "the nightly did not
+complete", which is true under both causes.
+
+### ⚠ Deploying this to a brain that already exists
+
+A brain gets `.gitignore` **once, at init**, from `brain-template/`. An existing
+brain therefore does not pick up the new `hub/nightly/` line, and `loreport-sync`'s
+`git add -A` would start committing a dated report file every night. Add it by hand,
+once, and confirm the ledger is *not* caught by any broader rule:
+
+```
+echo 'hub/nightly/' >> "$BRAIN/.gitignore"
+git -C "$BRAIN" check-ignore -v hub/proposals/ledger.json   # must print NOTHING
+```
+
+If that second command prints a match, the ledger will never be committed, the
+`first_seen` clock lives only on disk, and the overdue check — the one assertion
+that forces a decision — fails open. Add a `!hub/proposals/` negation.
+
 ## Monthly full consolidation
 
 Once a month, run `prompts/consolidate.md` over the full brain — this is the one

@@ -71,6 +71,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import synth_detect  # noqa: E402
 
+# Second sibling import, same rationale as synth_detect above. Every other file in
+# hub/ asserts a single-file/stdlib-only doctrine; this one is the exception because
+# the nightly review must run in the SAME nightly job as the detector it consumes.
+# A separate timer would be a second thing that can silently not run — the exact
+# failure the report-only detector spent weeks demonstrating — and it would want its
+# own copy of the repo lock. One job, one lock, one dated artifact.
+import nightly_review  # noqa: E402
+
 # Where the merge parks the detector's report for the weekly health check to read.
 # Gitignored alongside the other hub state files: it is a report artifact, and a
 # tracked file rewritten nightly would leave the tree dirty for sync.sh's guard.
@@ -823,9 +831,102 @@ def run_synthesis_report(brain_dir, dry_run):
     return result
 
 
+def run_nightly_review(brain_dir, synthesis, dry_run):
+    """Give the detector's proposals a disposition queue, and reconcile drift.
+
+    Still files nothing into `memories/` or `knowledge/`: a proposal becomes a
+    DECISION on `hub/proposals/ledger.json`, never an edit. What changes versus
+    the report-only era is that the decision is now tracked, dated, and — once it
+    goes stale — graded a failure by the health check, so proposals stop
+    evaporating into a digest line nobody acts on.
+
+    Never raises, for the same reason run_synthesis_report doesn't: a review step
+    must not take the nightly merge down with it. A review that dies writes no
+    dated artifact, and `loreport-health` section 9 turns that silence into a
+    failure — which is the only reason swallowing the exception here is safe.
+    """
+    try:
+        return nightly_review.run(brain_dir, synthesis, dry_run=dry_run)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "ledger_changed": False}
+
+
+def stage_ledger(brain_dir):
+    """Stage hub/proposals/ledger.json, if it exists.
+
+    UNCONDITIONAL, not keyed on `ledger_changed`. That flag means "the nightly
+    refresh added a proposal" — but `nightly_review.py --dispose` writes the
+    ledger OUT OF BAND, so between the owner recording a decision in the
+    afternoon and the merge running at night the file is a tracked, MODIFIED
+    file with ledger_changed False. Staging only on ledger_changed left that
+    decision uncommitted indefinitely, and (once the file is tracked) left the
+    tree permanently dirty for loreport-sync's post-merge guard. `git add` on an
+    unchanged file is a no-op, so there is no cost to always staging.
+    """
+    if os.path.isfile(os.path.join(brain_dir, nightly_review.LEDGER_FILE)):
+        git(brain_dir, "add", nightly_review.LEDGER_FILE, check=False)
+
+
+def commit_ledger_on_noop(brain_dir, report):
+    """Commit hub/proposals/ledger.json on a night with nothing else to commit.
+
+    WHY THIS EXISTS. The ledger is TRACKED because `first_seen` and the human
+    dispositions must survive a re-clone — a clock that does not survive makes
+    the overdue check, the only assertion in this system that forces a decision
+    rather than hoping for one, quietly fail open. But the staging line rides
+    the INDEX commit, which is inside `if not dry_run and not noop:`, and a
+    no-op is "most days". Measured on a synthetic brain: run 1 reported
+    noop=True, ledger_changed=True, 1 proposal detected — and
+    `git ls-files hub/proposals/ledger.json` came back EMPTY. Run 2 reported
+    ledger_changed=False, so it was never staged again. The proposals and every
+    disposition recorded against them lived only as an untracked local file,
+    never pushed to the private remote and gone on re-clone, at which point
+    every rejected proposal returns as pending and every clock resets to zero.
+
+    Both escape hatches written into the old comment were false: new proposals
+    do NOT require new items (the first night after deploy detects clusters in a
+    brain that has not changed in weeks), and `bin/loreport-sync` has no
+    repo-root `git add -A` to sweep it up — both of its `git add` calls are
+    path-scoped (`prompts skills ENGINE-VERSION .gitignore loreport.conf
+    .obsidian`, and `hub/published`).
+
+    IT NEEDS ITS OWN COMMIT, not just its own `git add`. Staging without
+    committing is worse than the bug: `bin/loreport-sync`'s post-merge guard
+    reads `git status --porcelain --untracked-files=no`, which DOES see staged
+    changes, so the sync would HALT every single night.
+
+    Returns True if a commit was made. On a failed commit it unstages, so the
+    failure is a missing commit rather than a permanently halted nightly sync.
+    """
+    stage_ledger(brain_dir)
+    staged = git(brain_dir, "diff", "--cached", "--name-only",
+                 check=False).stdout.strip()
+    if not staged:
+        # The common quiet night: nothing new, nothing decided. No commit, and
+        # nothing left in the index for the sync guard to trip over.
+        return False
+    res = git(brain_dir, "commit", "-m",
+              "brain(review): record proposal dispositions", check=False)
+    if res.returncode != 0:
+        # Leave nothing staged. A staged-but-uncommitted tree is the state that
+        # halts the sync nightly, and a lost ledger update is recoverable on the
+        # next run while a halted sync is not self-clearing.
+        git(brain_dir, "reset", "-q", "--", nightly_review.LEDGER_FILE,
+            check=False)
+        report.setdefault("conflict_notes", []).append(
+            "could not commit hub/proposals/ledger.json: "
+            + (res.stderr or "").strip())
+        return False
+    return True
+
+
 def format_synthesis_lines(synthesis):
     """Digest lines for the synthesis section. Says REPORT-ONLY on every run so a
-    reader never mistakes a proposal for something that was filed."""
+    reader never mistakes a proposal for something that was filed.
+
+    Still accurate under the disposition ledger: the DETECTOR files nothing. The
+    proposals it emits are entered on the ledger as decisions awaiting an answer
+    (see format_nightly_lines), which is not the same as a memory being written."""
     if not synthesis:
         return ["- Synthesis proposals (REPORT-ONLY, none filed): detector did not run"]
     if synthesis.get("error"):
@@ -884,6 +985,7 @@ def write_digest(brain_dir, today, report):
         f"{human_violations if human_violations else 'none'}"
     )
     lines.extend(format_synthesis_lines(report.get("synthesis")))
+    lines.extend(nightly_review.format_lines(report.get("nightly_review")))
     lines.append(f"- Quarantine items pending review: {count_quarantine_items(brain_dir)}")
     m, k, s = report["index_counts"]
     lines.append(f"- INDEX rebuilt: {m + k + s} items ({m} memories, {k} knowledge, {s} skills)")
@@ -1423,6 +1525,12 @@ def do_merge(brain_dir, dry_run):
             # be able to fail a merge, so a detector bug degrades to a digest note.
             report["synthesis"] = run_synthesis_report(brain_dir, dry_run)
 
+            # The detector's consumer. Enters each proposal on the disposition
+            # ledger and writes hub/nightly/<date>.json — the dated proof that
+            # the review ran, which section 9 of loreport-health requires.
+            report["nightly_review"] = run_nightly_review(
+                brain_dir, report["synthesis"], dry_run)
+
             # Deterministic INDEX rebuild.
             index_bytes, m, k, s = build_index_bytes(brain_dir)
             archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
@@ -1432,6 +1540,18 @@ def do_merge(brain_dir, dry_run):
                 with open(os.path.join(brain_dir, "INDEX.md"), "wb") as fh:
                     fh.write(index_bytes)
                 git(brain_dir, "add", "INDEX.md", check=False)
+
+                # The disposition ledger rides the INDEX commit. It is TRACKED —
+                # it holds human decisions and the first_seen clock the overdue
+                # check measures from, and a clock that lives only in a gitignored
+                # file resets on every re-clone, which would make the one assertion
+                # that forces a decision quietly fail open. It is written only when
+                # a proposal is added or decided, so unlike merge-state.json it
+                # does not dirty the tree nightly. When the night was NOT a no-op
+                # it rides this commit; when it WAS, commit_ledger_on_noop() below
+                # gives it its own — see those two functions for why both paths
+                # exist and why staging is unconditional.
+                stage_ledger(brain_dir)
 
                 # The cold shelf only exists once something is actually on it.
                 # A brain that has never expired an item gets no empty
@@ -1462,10 +1582,23 @@ def do_merge(brain_dir, dry_run):
                         report["ff_skipped"].append(
                             f"{branch} advanced during merge; left for next run"
                         )
-            else:
+            elif dry_run:
                 # --dry-run commits nothing: undo every merge commit made while
                 # planning the report, restoring main to exactly where it started.
                 git(brain_dir, "reset", "--hard", orig_head, check=False)
+            else:
+                # A QUIET NIGHT — "most days", by this function's own comment.
+                # Nothing was merged and no tag was taken, so there is nothing
+                # to roll back; the reset above is for --dry-run only.
+                #
+                # It must NOT run here. `reset --hard` reverts tracked files,
+                # and hub/proposals/ledger.json is tracked on purpose: it is
+                # where `--dispose` writes a human decision and where the
+                # first_seen clock the overdue check measures from lives. A
+                # reset on a quiet night would throw away the disposition the
+                # owner recorded that afternoon.
+                report["ledger_committed"] = commit_ledger_on_noop(
+                    brain_dir, report)
         except Exception:
             # ANY exception anywhere in the merge/scrub/index-rebuild/
             # fast-forward section (including a git timeout, or the scrub

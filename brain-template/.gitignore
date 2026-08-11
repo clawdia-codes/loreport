@@ -25,3 +25,12 @@ hub/digest-*.md
 # loreport-sync's post-merge guard, exactly like merge-state.json above.
 hub/attention.json
 hub/attention.json.tmp
+
+# Nightly review artifacts (hub/nightly_review.py). Same class as digest-*.md: a
+# dated per-run report, not brain content.
+#
+# ⚠ hub/proposals/ IS DELIBERATELY ABSENT FROM THIS FILE. ledger.json records
+# human dispositions and the first_seen clock the overdue check measures from,
+# so it must survive a re-clone; ignoring it would silently undo that and make
+# the one assertion that forces a decision fail open. Do not "complete the set".
+hub/nightly/

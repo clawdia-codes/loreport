@@ -610,6 +610,133 @@ else
   fi
 fi
 
+# --- 9. Nightly review ran, and its proposals are reaching decisions ----------
+# The synthesis detector was a producer with no consumer for weeks: it emitted
+# proposals into a digest line that said "none filed", nobody filed them, and
+# nobody was asked to. hub/nightly_review.py is the consumer, and THIS is what
+# makes the consumer real — without an assertion here, "the review runs nightly"
+# is unfalsifiable and decays exactly the way the detector did.
+#
+# Four DISTINCTLY NAMED conditions, because one word covering two states is how
+# "merge digest needs review" got read as "the merge failed" by two readers:
+#   never ran        — hub/nightly/ holds no artifact at all (install/regression)
+#   did not run      — yesterday's specifically is absent (last night was missed)
+#   unreadable       — the artifact exists but cannot be parsed
+#   overdue          — it ran, but proposals are rotting undecided
+# The first three are FAILURES: the review is the thing that forces dispositions,
+# so a review that did not run means nothing is forcing anything. Proposals merely
+# waiting are REVIEW — a queue with a human in it is a healthy queue, right up
+# until PENDING_MAX_DAYS, past which it is a graveyard and grades as a failure.
+#
+# Yesterday's, not "today's or yesterday's". The weaker rule cannot be falsified
+# by deleting an artifact while a newer one exists, and a liveness check nobody
+# can break by breaking the thing it watches is decoration. The nightly runs at
+# 02:00 and this check runs Mon 09:05, so there is no window where yesterday's
+# legitimately does not exist.
+#
+# NOTE the wording: "the nightly did not complete". The review runs inside
+# brain_merge, so an aborted merge also leaves no artifact and this co-fires with
+# check 6. The message has to be true under both causes, not just the one.
+NIGHTLY_DIR="$BRAIN/hub/nightly"
+# GNU form first, BSD second. If BOTH fail the variable would be empty and the
+# path would be ".../.json", which never exists — reporting "did not run last
+# night" forever with a nonsense fix line. Exit 2 instead: this is the check
+# failing, not the brain, and 2 is the code the unit does not forgive.
+YESTERDAY=$(date -d 'yesterday' '+%Y-%m-%d' 2>/dev/null || date -v-1d '+%Y-%m-%d' 2>/dev/null || true)
+if [ -z "$YESTERDAY" ]; then
+  echo "loreport-health: could not compute yesterday's date (neither GNU nor BSD date)" >&2
+  exit 2
+fi
+nightly_yesterday="$NIGHTLY_DIR/$YESTERDAY.json"
+if [ ! -d "$NIGHTLY_DIR" ] || [ -z "$(ls -A "$NIGHTLY_DIR" 2>/dev/null)" ]; then
+  note_failure \
+    "nightly review has never run — no dated artifact exists, so nothing is forcing synthesis proposals to a decision" \
+    "run: python3 $FRAMEWORK/hub/nightly_review.py --brain-dir $BRAIN --run   (it normally runs inside the nightly hub/brain_merge.py)"
+elif [ ! -f "$nightly_yesterday" ]; then
+  note_failure \
+    "nightly review did not run last night — yesterday's dated artifact is missing, so the nightly did not complete" \
+    "expected $nightly_yesterday; check the nightly merge: journalctl/hub/logs/merge.log, then re-run hub/brain_merge.py"
+else
+  nightly_out=$(python3 - "$nightly_yesterday" <<'PY' 2>/dev/null || true
+import json, sys
+# Catch EVERYTHING, not only the read/parse errors. The invocation swallows
+# stderr and forces success, so any OTHER exception — an AttributeError because
+# the artifact parsed as valid JSON of the wrong SHAPE, e.g. `{"synthesis": {},
+# "reconciliation": "in-sync"}` — killed this checker, produced no output, and
+# switched every one of section 9's assertions off at once while the run still
+# exited 0. Measured: five parseable-but-wrong-shape payloads each gave EXIT=0
+# with zero nightly-review lines in the banner, including the payload that is
+# supposed to FAIL for having no reconciliation section. "The checker crashed"
+# must never route to "healthy" — that is the fail-open shape this repo has
+# already paid for twice.
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"artifact is a {type(data).__name__}, not an object")
+except Exception as e:
+    print(f"fail\tnightly review artifact unreadable ({type(e).__name__}): {e}\tinspect or delete {sys.argv[1]} and re-run hub/nightly_review.py --run")
+    raise SystemExit(0)
+
+
+def _obj(value, label):
+    """A section that is PRESENT but not an object is schema drift, which is a
+    different condition from the section being absent — and absence already has
+    its own message below. One word must not mean two conditions."""
+    if value is None or isinstance(value, dict):
+        return value
+    raise ValueError(f"{label} is a {type(value).__name__}, not an object")
+
+
+def check(data):
+    syn = _obj(data.get("synthesis"), "synthesis") or {}
+    overdue = syn.get("overdue") or []
+    pending = syn.get("pending") or []
+    maxd = syn.get("pending_max_days", 14)
+
+    if overdue:
+        ids = ", ".join(str(i) for i in overdue[:5])
+        print(f"fail\tsynthesis proposals overdue ({len(overdue)}): undecided for more than {maxd} days — {ids}\tdecide each: hub/nightly_review.py --brain-dir BRAIN --dispose <id> --status accept|reject|defer --reason '...'")
+    waiting = [p for p in pending if p.get("id") not in set(overdue)]
+    if waiting:
+        ids = ", ".join(str(p.get("id")) for p in waiting[:5])
+        print(f"review\t{len(waiting)} synthesis proposal(s) awaiting your disposition: {ids}\thub/nightly_review.py --brain-dir BRAIN --list, then --dispose <id> --status accept|reject|defer --reason '...'")
+
+    rec = _obj(data.get("reconciliation"), "reconciliation")
+    if rec is None:
+        print("fail\tnightly review artifact has no reconciliation section — it asserted nothing about native-memory drift\tregenerate with hub/nightly_review.py --run; if it persists the artifact schema and this check have drifted")
+        return
+    status = rec.get("status")
+    if status == "unconfigured":
+        print(f"review\treconciliation is NOT CONFIGURED — nothing is comparing your native memory against Loreport, so no result here means 'unchecked', not 'clean'\tcreate BRAIN/hub/reconcile-sources.json listing each native memory store; see hub/HUB.md")
+    elif status == "error":
+        print(f"fail\treconciliation could not run: {rec.get('detail') or 'the artifact recorded no detail'}\tfix BRAIN/hub/reconcile-sources.json")
+    elif status == "blind":
+        print("fail\treconciliation compared against an empty set — a diff over nothing is vacuously clean\tcheck BRAIN/INDEX.md and the configured native stores in hub/reconcile-sources.json")
+    elif status == "drift":
+        n = sum(s.get("only_native_count", 0) for s in rec.get("sources", []))
+        print(f"review\treconciliation drift: {n} item(s) live in native memory that Loreport has never seen\trun the memory-reconcile skill, or capture them via the Loreport MCP")
+
+
+# The OUTER guard, and the reason the body is a function. Section 9 has three
+# independent assertions; a crash anywhere in any one of them used to silence
+# all three. Anything unexpected below now becomes a named FAIL instead of an
+# empty stdout that the caller reads as "nothing to report".
+try:
+    check(data)
+except Exception as e:
+    print(f"fail\tnightly review check crashed on the artifact ({type(e).__name__}): {e}\tinspect {sys.argv[1]}; the artifact and this check disagree about its shape")
+PY
+)
+  while IFS=$'\t' read -r kind msg fix; do
+    [ -n "${kind:-}" ] || continue
+    case "$kind" in
+      fail) note_failure "$msg" "$fix" ;;
+      review) note_review "$msg" "$fix" ;;
+    esac
+  done <<< "$nightly_out"
+fi
+
 # --- outcome -----------------------------------------------------------------
 # One of exactly three states. `review` is a healthy state: it exits 0, it keeps
 # the weekly heartbeat alive, and its notice never contains the word FAIL.
