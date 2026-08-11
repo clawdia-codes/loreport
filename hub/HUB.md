@@ -180,9 +180,25 @@ proposal cost anything; everything else merely records.
 
 The ledger is **tracked** — it holds human decisions and the `first_seen` clock the
 overdue check measures from, so it must survive a re-clone. It is written only when
-a proposal is added or decided, never on a quiet night, so unlike `merge-state.json`
-it does not leave the tree dirty for `loreport-sync`'s post-merge guard. (An expiring
-deferral is therefore *computed* from `defer_until` at read time, not written back.)
+a proposal is added or decided, never on a quiet night. (An expiring deferral is
+therefore *computed* from `defer_until` at read time, not written back.)
+
+**The merge commits it on every night it changed, no-op nights included.** That is
+not incidental: a no-op is *most* days, and the first night after this feature
+deploys is one — the brain already holds the clusters, so proposals are detected
+against a repository nothing has pushed to in weeks. Riding the INDEX commit alone
+left live proposals in an untracked file that no re-clone would recover.
+
+Two consequences the code depends on, both easy to get wrong:
+
+- Staging is **unconditional**, not keyed on "a proposal was added". `--dispose`
+  writes the ledger out of band, so between the owner deciding in the afternoon and
+  the merge running at night the file is tracked and *modified*.
+- A no-op night must **commit**, never merely stage, and must **not** `reset --hard`.
+  `loreport-sync`'s post-merge guard reads `git status --porcelain
+  --untracked-files=no`, which sees staged changes — leaving the ledger staged would
+  HALT the sync every night — and a `reset --hard` on a quiet night would revert the
+  tracked, modified ledger, throwing away the decision the owner just recorded.
 
 ### Reconciliation — `hub/reconcile-sources.json`
 

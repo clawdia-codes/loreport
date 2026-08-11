@@ -859,6 +859,47 @@ class NightlyReviewLivenessIsRequired(HealthHarness, unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("no reconciliation section", self.banner_text() or "")
 
+    def test_a_parseable_but_wrong_shape_artifact_is_named_not_silenced(self):
+        """Mutation: narrow the artifact guard in section 9's inline python back
+        to `except (OSError, json.JSONDecodeError, UnicodeDecodeError)` and drop
+        the outer `try: check(data)` — the pre-fix code.
+
+        The heredoc is invoked as `python3 - ... 2>/dev/null || true`, so any
+        exception the narrow `except` did not name killed the checker, produced
+        empty stdout, and the `while read` loop then iterated nothing. That
+        switched ALL THREE of section 9's assertions off at once — the overdue
+        FAIL, the pending REVIEW, and the 'no reconciliation section' FAIL —
+        while the run still exited 0. Genuine truncation WAS caught; parseable
+        JSON of the wrong SHAPE was not, and `{"synthesis": {}, "reconciliation":
+        "in-sync"}` bypassed the very check the reconciliation guard exists for.
+        Measured before the fix: every payload below gave EXIT=0 with zero
+        nightly-review lines in the banner."""
+        payloads = {
+            "top level is a list": "[]",
+            "top level is null": "null",
+            "top level is a string": '"corrupt"',
+            "synthesis is a list": '{"synthesis": [], "reconciliation": {}}',
+            "reconciliation is a string":
+                '{"synthesis": {}, "reconciliation": "in-sync"}',
+            "pending is not a list of objects":
+                '{"synthesis": {"pending": ["abc"], "overdue": []},'
+                ' "reconciliation": {"status": "in-sync"}}',
+        }
+        for label, text in payloads.items():
+            with self.subTest(shape=label):
+                if os.path.isfile(self.banner):
+                    os.remove(self.banner)
+                self.write(f"hub/nightly/{self.yesterday()}.json", text)
+                r = self.run_health()
+                banner = self.banner_text() or ""
+                self.assertEqual(r.returncode, 1,
+                                 f"{label!r} silently disabled section 9 and "
+                                 f"health still reported healthy")
+                self.assertTrue(
+                    "nightly review artifact" in banner
+                    or "nightly review check crashed" in banner,
+                    f"{label!r} produced no nightly-review line: {banner!r}")
+
 
 class ProposalsMustReachADisposition(HealthHarness, unittest.TestCase):
 

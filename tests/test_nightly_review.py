@@ -15,6 +15,7 @@ import sys
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from datetime import date, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -212,6 +213,42 @@ class OverdueForcesTheDecision(BrainTmp, unittest.TestCase):
         self.assertEqual(nr.effective_status(ledger["proposals"]["pid0"], TODAY), "pending")
         self.assertEqual(nr.overdue(ledger, TODAY), [])
 
+    def test_a_broken_clock_is_graded_overdue_rather_than_ignored(self):
+        """Mutation: `return entry.get("first_seen") or today` in _clock_start,
+        or `return 0` in the ValueError arm of _days_between — the pre-fix code,
+        either of which recomputes the age as 0 every night.
+
+        The overdue check is described in-file as the only thing that actually
+        forces a decision. A `first_seen` that is absent, null or unparseable
+        made the proposal permanently un-overdue — silently, forever, in exactly
+        the assertion that must not fail open. The ledger is a human-editable
+        tracked JSON file the design invites the owner to operate on, so a
+        malformed date is a real input; and an entry nobody can date is exactly
+        an entry nobody has looked at, so the safe grade is overdue."""
+        for label, value in (("unparseable", "garbage"),
+                             ("null", None),
+                             ("empty", "")):
+            with self.subTest(first_seen=label):
+                ledger = self._ledger_pending_since(value)
+                self.assertEqual(len(nr.pending(ledger, TODAY)), 1)
+                self.assertEqual(
+                    [e["id"] for e in nr.overdue(ledger, TODAY)], ["pid0"],
+                    f"a {label} first_seen stays pending forever without ever "
+                    f"being graded overdue")
+        missing = self._ledger_pending_since("2026-08-01")
+        del missing["proposals"]["pid0"]["first_seen"]
+        with self.subTest(first_seen="absent"):
+            self.assertEqual([e["id"] for e in nr.overdue(missing, TODAY)],
+                             ["pid0"])
+
+    def test_a_good_clock_inside_the_budget_is_still_not_overdue(self):
+        """Mutation: `return True` unconditionally in _is_overdue.
+
+        Failing closed must not become "everything is overdue" — that is the
+        alert fatigue the state-change gate exists to prevent."""
+        self.assertEqual(nr.overdue(self._ledger_pending_since("2026-08-01"),
+                                    TODAY), [])
+
     def test_the_attestation_carries_the_overdue_ids(self):
         ledger = self._ledger_pending_since("2026-07-01")
         att = nr.build_attestation(
@@ -359,6 +396,98 @@ class ReconciliationNamesItsBlindSpots(BrainTmp, unittest.TestCase):
         with open(os.path.join(self.native, "gamma.md"), encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "original")
         self.assertEqual(sorted(os.listdir(self.native)), ["gamma.md"])
+
+
+class ReconciliationResolvesPathsAsDocumented(BrainTmp, unittest.TestCase):
+    """The config in hub/HUB.md is copy-paste, and every example path in it
+    starts with `~`.
+
+    _native_names joined the raw path onto the brain root BEFORE expanding, and
+    `~/x` is not os.path.isabs — so `~/.claude/...` became
+    `<brain>/~/.claude/...`, which expanduser cannot recover because it only
+    expands a LEADING `~`. Every source configured exactly as documented came
+    back `unreadable`, making the whole reconciliation `error`. Reconciliation
+    is one of P6's three deliverables and it was unusable as documented."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("INDEX.md", "# Index\n\n- [[alpha]] — a\n")
+        self.home = tempfile.mkdtemp(prefix="nightly-home-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def _sources(self, *sources):
+        self.write(nr.RECONCILE_SOURCES_FILE, json.dumps({"sources": list(sources)}))
+
+    def test_a_tilde_path_expands_before_it_is_joined_to_the_brain_root(self):
+        """Mutation: restore `path = raw if os.path.isabs(raw) else
+        os.path.join(source_dir_root, raw); path = os.path.expanduser(path)` in
+        _native_names."""
+        store = os.path.join(self.home, "native-store")
+        os.makedirs(store)
+        for name in ("alpha", "gamma"):
+            with open(os.path.join(store, f"{name}.md"), "w") as fh:
+                fh.write("x")
+        with unittest.mock.patch.dict(os.environ, {"HOME": self.home}):
+            self._sources({"provider": "claude", "path": "~/native-store",
+                           "kind": "dir"})
+            out = nr.reconcile(self.brain)
+        self.assertEqual(out["status"], "drift",
+                         f"a documented `~` path did not resolve: {out}")
+        self.assertEqual(out["sources"][0]["only_native"], ["gamma"])
+
+    def test_a_relative_path_still_resolves_against_the_brain_root(self):
+        """Mutation: drop the `os.path.join(source_dir_root, path)` fallback in
+        _native_names — the other half of the documented contract."""
+        self.write("native/alpha.md", "x")
+        self.write("native/delta.md", "x")
+        self._sources({"provider": "claude", "path": "native", "kind": "dir"})
+        out = nr.reconcile(self.brain)
+        self.assertEqual(out["sources"][0]["only_native"], ["delta"])
+
+
+class ReconciliationAlwaysCarriesATopLevelDetail(BrainTmp, unittest.TestCase):
+    """scripts/loreport-health §9 renders `rec.get('detail')`.
+
+    The multi-source return had no top-level `detail`, so an `error` printed the
+    literal string "None": a weekly FAIL naming neither the source, nor the
+    path, nor the reason, for a config the owner wrote from the documentation.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write("INDEX.md", "# Index\n\n- [[alpha]] — a\n")
+
+    def _sources(self, *sources):
+        self.write(nr.RECONCILE_SOURCES_FILE, json.dumps({"sources": list(sources)}))
+
+    def test_every_status_carries_a_detail_a_reader_can_act_on(self):
+        """Mutation: delete the `out["detail"] = ...` block at the end of
+        reconcile (returning the bare dict, i.e. the pre-fix code)."""
+        cases = []
+        self._sources({"provider": "claude", "path": "nope", "kind": "dir"})
+        cases.append(("error", nr.reconcile(self.brain)))
+        self.write("native/alpha.md", "x")
+        self.write("native/gamma.md", "x")
+        self._sources({"provider": "claude", "path": "native", "kind": "dir"})
+        cases.append(("drift", nr.reconcile(self.brain)))
+        os.remove(os.path.join(self.brain, "native", "gamma.md"))
+        cases.append(("in-sync", nr.reconcile(self.brain)))
+        for label, out in cases:
+            self.assertEqual(out["status"], label, out)
+            self.assertTrue(out.get("detail"),
+                            f"{label} carries no top-level detail: health "
+                            f"renders this as the literal string 'None'")
+            self.assertNotIn("None", str(out["detail"]))
+
+    def test_the_error_detail_names_the_source_and_the_path(self):
+        """Mutation: `out["detail"] = "reconciliation failed"` in reconcile.
+
+        "could not run: reconciliation failed" is the uninformative alert P4
+        exists to abolish; the owner must not have to go investigate."""
+        self._sources({"provider": "claude", "path": "nope", "kind": "dir"})
+        detail = nr.reconcile(self.brain)["detail"]
+        self.assertIn("claude", detail)
+        self.assertIn("nope", detail)
 
 
 class DigestLinesNameTheQueue(BrainTmp, unittest.TestCase):
@@ -535,6 +664,83 @@ class TheLedgerIsActuallyCommittedByTheMerge(unittest.TestCase):
         self.assertFalse(report["nightly_review"]["ledger_changed"])
         self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), head)
         self.assertEqual(self._porcelain(nr.LEDGER_FILE), "")
+
+    def test_the_first_quiet_night_after_deploy_still_commits_the_ledger(self):
+        """Mutation: delete the `commit_ledger_on_noop(...)` call from the
+        no-op `else:` arm of brain_merge.do_merge — i.e. the pre-fix code.
+
+        THE DEFAULT PATH. do_merge's own comment calls a no-op night "most
+        days", and the very first night after this feature deploys is one: the
+        brain already holds the clusters, so proposals are detected against a
+        repository nothing has pushed to in weeks. Before the fix, run 1 gave
+        noop=True, ledger_changed=True, and `git ls-files` on the ledger came
+        back EMPTY; run 2 gave ledger_changed=False, so it was never staged
+        again. Live proposals and every disposition recorded against them lived
+        only as an untracked local file — never pushed, gone on re-clone, at
+        which point every rejection returns as pending and every clock resets.
+
+        Deliberately NO _force_a_merge(): both pre-existing merge tests call it
+        first, which is exactly why the default path went untested."""
+        report = self.bm.do_merge(self.repo, dry_run=False)
+        self.assertTrue(report["noop"],
+                        "fixture is wrong: this run was not a no-op")
+        self.assertTrue(report["nightly_review"]["ledger_changed"],
+                        "fixture is wrong: no proposal was detected")
+        tracked = self._git("ls-files", nr.LEDGER_FILE).stdout.strip()
+        self.assertEqual(tracked, nr.LEDGER_FILE,
+                         "a quiet night wrote live proposals to an untracked file")
+        self.assertEqual(self._porcelain(nr.LEDGER_FILE), "",
+                         "the ledger was left dirty for loreport-sync")
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        again = self.bm.do_merge(self.repo, dry_run=False)
+        self.assertFalse(again["nightly_review"]["ledger_changed"])
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), head,
+                         "an unchanged ledger produced a commit anyway")
+
+    def test_a_quiet_night_never_leaves_the_ledger_staged_but_uncommitted(self):
+        """Mutation: in brain_merge.commit_ledger_on_noop, delete the
+        `git commit` and keep the `git add` — the naive fix for the bug above.
+
+        Staging without committing is WORSE than the bug it fixes:
+        bin/loreport-sync's post-merge guard runs `git status --porcelain
+        --untracked-files=no`, which DOES see staged changes, so the sync would
+        print `Loreport sync HALTED: repo state unsafe after merge` every single
+        night. Assert the index, not only the worktree."""
+        self.bm.do_merge(self.repo, dry_run=False)
+        staged = self._git("diff", "--cached", "--name-only").stdout.strip()
+        self.assertEqual(staged, "",
+                         "a staged-but-uncommitted tree halts the nightly sync")
+        guard = self._git("status", "--porcelain",
+                          "--untracked-files=no").stdout.strip()
+        self.assertEqual(guard, "", "loreport-sync's post-merge guard would HALT")
+
+    def test_a_quiet_night_does_not_revert_a_disposition_written_by_hand(self):
+        """Mutation: merge the `elif dry_run:` arm of do_merge back into the
+        single `else:` it came from, restoring the unconditional
+        `git reset --hard orig_head` on a no-op night.
+
+        `--dispose` writes the ledger out of band, so between the owner's
+        decision in the afternoon and the merge at night the ledger is a
+        tracked, MODIFIED file — and `reset --hard` reverts tracked files. The
+        decision would be thrown away silently and the proposal would be back as
+        pending in the morning."""
+        self.bm.do_merge(self.repo, dry_run=False)  # ledger becomes tracked
+        ledger = nr.load_ledger(self.repo)
+        pid = sorted(ledger["proposals"])[0]
+        nr.dispose(ledger, pid, "reject", "too broad to be one page",
+                   nr.today_iso())
+        nr.save_ledger(self.repo, ledger)
+        self.bm.do_merge(self.repo, dry_run=False)
+        after = nr.load_ledger(self.repo)
+        self.assertEqual(after["proposals"][pid]["status"], "reject",
+                         "a quiet night reverted the owner's decision")
+        self.assertEqual(after["proposals"][pid]["reason"],
+                         "too broad to be one page")
+        self.assertEqual(self._porcelain(nr.LEDGER_FILE), "",
+                         "the decision survived on disk but was never committed")
+        committed = self._git("show", f"HEAD:{nr.LEDGER_FILE}").stdout
+        self.assertIn("too broad to be one page", committed,
+                      "the decision is not in git; it dies on the next re-clone")
 
     def test_the_dated_artifact_is_not_tracked(self):
         self._force_a_merge()

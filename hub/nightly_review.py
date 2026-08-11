@@ -106,10 +106,19 @@ def _parse_iso(text):
 
 
 def _days_between(start_iso, end_iso):
+    """Days between two ISO dates, or None when either is unusable.
+
+    NOT 0. This feeds the overdue check — described in this file as the only
+    thing that actually forces a decision rather than hoping for one — and 0
+    means "detected today", so a malformed clock made a proposal permanently
+    un-overdue, silently and forever. The ledger is a human-editable tracked
+    JSON file the design invites the owner to operate on, so a malformed date
+    is a real input, not a theoretical one. `None` propagates to overdue() as a
+    named failure instead."""
     try:
         return (_parse_iso(end_iso) - _parse_iso(start_iso)).days
     except ValueError:
-        return 0
+        return None
 
 
 def yesterday_iso(today=None):
@@ -213,10 +222,16 @@ def effective_status(entry, today):
 
 def _clock_start(entry, today):
     """When the current pending spell began: the deferral's expiry if it came
-    back from a deferral, otherwise first detection."""
+    back from a deferral, otherwise first detection.
+
+    Returns None when there is no usable clock. It used to fall back to `today`,
+    which recomputed the age as 0 every night and made the proposal permanently
+    un-overdue — fail-open in the one assertion that forces a decision. A
+    missing clock is now graded as overdue by overdue() below: an entry nobody
+    can date is exactly an entry nobody has looked at."""
     if entry.get("status") == "defer" and entry.get("defer_until"):
         return entry["defer_until"]
-    return entry.get("first_seen") or today
+    return entry.get("first_seen")
 
 
 def pending(ledger, today):
@@ -226,10 +241,24 @@ def pending(ledger, today):
     ]
 
 
+def _is_overdue(entry, today, max_days):
+    """FAIL CLOSED on a broken clock.
+
+    An entry whose `first_seen` is absent, null or unparseable cannot be aged.
+    Grading it "not overdue" is the fail-open that made three separate malformed
+    shapes stay pending forever with nothing ever failing; grading it overdue
+    puts it in front of the owner, who is the only one who can repair it. The
+    cost of being wrong is one extra line in a health banner."""
+    days = _days_between(_clock_start(entry, today), today)
+    if days is None:
+        return True
+    return days > max_days
+
+
 def overdue(ledger, today, max_days=PENDING_MAX_DAYS):
     return [
         entry for entry in pending(ledger, today)
-        if _days_between(_clock_start(entry, today), today) > max_days
+        if _is_overdue(entry, today, max_days)
     ]
 
 
@@ -341,10 +370,21 @@ def _native_names(source_dir_root, source):
     `dir`  — one markdown file per memory; the stem is the name (the layout every
              provider on this machine happens to use).
     `file` — a single index file; every `[[wikilink]]` in it is a name.
+
+    PATH RESOLUTION ORDER IS LOAD-BEARING. Expand `~` FIRST, then decide whether
+    what is left is absolute. Every example in HUB.md — and every native store
+    that actually exists on this machine — is written `~/.claude/...`, and `~/x`
+    is not `os.path.isabs`, so joining first produced `<brain>/~/.claude/...`,
+    which `expanduser` cannot recover because it only expands a LEADING `~`.
+    Measured: a source configured exactly as documented came back
+    `unreadable: not a directory: <brain>/~/p6-probe-native`, which made the
+    whole reconciliation `error`. A doc that describes behaviour the code does
+    not have is worse than no doc.
     """
     raw = source.get("path") or ""
-    path = raw if os.path.isabs(raw) else os.path.join(source_dir_root, raw)
-    path = os.path.expanduser(path)
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        path = os.path.join(source_dir_root, path)
     kind = source.get("kind", "dir")
     if kind == "dir":
         if not os.path.isdir(path):
@@ -439,12 +479,37 @@ def reconcile(brain_dir):
         # an empty index, and an empty index compared to an empty store looks clean.
         worst = "blind"
 
-    return {
+    out = {
         "status": worst,
         "source_count": len(sources),
         "indexed_count": len(indexed),
         "sources": results,
     }
+    # A TOP-LEVEL `detail`, always. Every early return above carries one, and
+    # loreport-health §9 renders `rec.get('detail')` — so the multi-source paths
+    # returning without one printed the literal string "None", handing the owner
+    # a weekly FAIL that named neither the source, nor the path, nor the reason,
+    # for a config they wrote from the documentation. Name the offenders.
+    bad = [r for r in results if r["status"] in ("unreadable", "blind")]
+    if bad:
+        out["detail"] = "; ".join(
+            f"{r['provider']}: {r['status']} — {r.get('detail', 'no detail')}"
+            for r in bad)
+    elif worst == "drift":
+        drifted = [r for r in results if r["status"] == "drift"]
+        out["detail"] = "; ".join(
+            f"{r['provider']}: {r['only_native_count']} item(s) the native store "
+            f"has and Loreport does not ({', '.join(r['only_native'][:3])})"
+            for r in drifted)
+    elif worst == "blind":
+        # Reached via the empty-INDEX guard below the loop, where no individual
+        # source is at fault.
+        out["detail"] = ("INDEX.md holds no names — every native item looks like "
+                         "drift and an empty store looks clean; nothing was asserted")
+    else:
+        out["detail"] = (f"{len(results)} source(s) compared against "
+                         f"{len(indexed)} indexed name(s)")
+    return out
 
 
 # --- the nightly artifact ----------------------------------------------------
