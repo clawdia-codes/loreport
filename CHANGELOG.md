@@ -33,9 +33,13 @@
 - The ledger is tracked (it carries the `first_seen` clock the overdue check measures
   from, which must survive a re-clone) but written only when it changes, so it never
   dirties the brain tree the way a nightly-rewritten tracked file would.
-- 48 new tests (37 module + 11 driving the real health script). Each names the single-line production mutation it reddens, and all 20
+- 51 new tests (40 module — three driving the real merge — plus 11 driving the real
+  health script). Each names the single-line production mutation it reddens, and all 20
   mutations were run: deleting §9 wholesale reddens 11, and the only mutation that
   stays green is a deliberate cosmetic control.
+- ⚠ **Existing brains need one line.** A brain gets `.gitignore` once, at init, so
+  `hub/nightly/` must be added by hand or `loreport-sync` will commit a dated report
+  every night. See hub/HUB.md, "Deploying this to a brain that already exists".
 
 ## [1.14.0] — 2026-08-10
 

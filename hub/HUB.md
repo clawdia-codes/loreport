@@ -235,6 +235,22 @@ The review runs inside the merge, so an aborted merge also leaves no artifact an
 this co-fires with the merge-liveness check. The message says "the nightly did not
 complete", which is true under both causes.
 
+### ⚠ Deploying this to a brain that already exists
+
+A brain gets `.gitignore` **once, at init**, from `brain-template/`. An existing
+brain therefore does not pick up the new `hub/nightly/` line, and `loreport-sync`'s
+`git add -A` would start committing a dated report file every night. Add it by hand,
+once, and confirm the ledger is *not* caught by any broader rule:
+
+```
+echo 'hub/nightly/' >> "$BRAIN/.gitignore"
+git -C "$BRAIN" check-ignore -v hub/proposals/ledger.json   # must print NOTHING
+```
+
+If that second command prints a match, the ledger will never be committed, the
+`first_seen` clock lives only on disk, and the overdue check — the one assertion
+that forces a decision — fails open. Add a `!hub/proposals/` negation.
+
 ## Monthly full consolidation
 
 Once a month, run `prompts/consolidate.md` over the full brain — this is the one

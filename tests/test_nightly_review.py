@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sys
+import subprocess
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -435,3 +436,111 @@ class CliRefusesAndRecords(BrainTmp, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- the staging path, executed rather than reasoned about -------------------
+
+ITEM = """---
+name: {name}
+description: {name} hook
+type: project
+visibility: shared
+---
+
+Body linking {links}.
+"""
+
+
+class TheLedgerIsActuallyCommittedByTheMerge(unittest.TestCase):
+    """Drives the REAL merge, because the one line that stages the ledger was
+    otherwise only argued for in a comment.
+
+    The ledger is tracked, and a tracked file the nightly leaves modified would
+    halt loreport-sync's post-merge guard — the documented reason merge-state.json
+    and the digests are gitignored. Two claims, both asserted against
+    `git status --porcelain` rather than against return codes:
+
+      * a merge that detects a NEW proposal commits the ledger, leaving no residue
+      * a merge that detects nothing new leaves the ledger entirely alone
+
+    The 1.14.0 scoped-cleanup work found two placement assumptions of exactly this
+    shape wrong by reasoning and right only by asserting the postcondition.
+    """
+
+    def setUp(self):
+        import brain_merge  # noqa: E402
+        self.bm = brain_merge
+        self.repo = tempfile.mkdtemp(prefix="nightly-merge-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self._git("init", "-q", "-b", "main", ".")
+        self._git("config", "user.email", "t@example.invalid")
+        self._git("config", "user.name", "test")
+        # Mirrors brain-template/.gitignore: hub/nightly/ is a derived per-run
+        # report, hub/proposals/ is NOT and must stay trackable.
+        self._write(".gitignore", "hub/nightly/\nhub/digest-*.md\nhub/synthesis-report.json\n")
+        self._write("PROFILE.md", "# profile\n")
+        self._write("prompts/bootstrap.md", "# bootstrap\n")
+        # A mutual-link triangle: the shape synth_detect emits a cluster for.
+        for name, links in (("alpha", "[[beta]] [[gamma]]"),
+                            ("beta", "[[alpha]] [[gamma]]"),
+                            ("gamma", "[[alpha]] [[beta]]")):
+            self._write(f"memories/{name}.md", ITEM.format(name=name, links=links))
+        self._rebuild_index()
+        self._git("add", "-A")
+        self._git("commit", "-qm", "seed")
+
+    def _git(self, *args, check=True):
+        return subprocess.run(["git", "-C", self.repo, *args],
+                              capture_output=True, text=True, check=check)
+
+    def _write(self, rel, text):
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _rebuild_index(self):
+        index, _, _, _ = self.bm.build_index_bytes(self.repo)
+        with open(os.path.join(self.repo, "INDEX.md"), "wb") as fh:
+            fh.write(index)
+
+    def _porcelain(self, *paths):
+        return self._git("status", "--porcelain", "--", *paths).stdout.strip()
+
+    def _force_a_merge(self):
+        """A real capture on a provider branch, so the run is not a no-op."""
+        self._git("checkout", "-qb", "provider/claude")
+        self._write("memories/delta.md", ITEM.format(name="delta", links="[[alpha]]"))
+        self._git("add", "-A")
+        self._git("commit", "-qm", "capture\n\nTrust: local")
+        self._git("checkout", "-q", "main")
+
+    def test_a_merge_that_finds_a_proposal_commits_the_ledger_and_leaves_no_residue(self):
+        self._force_a_merge()
+        report = self.bm.do_merge(self.repo, dry_run=False)
+        self.assertTrue(report["nightly_review"]["ledger_changed"],
+                        "the mutual-link triangle produced no proposal — fixture is wrong")
+        tracked = self._git("ls-files", nr.LEDGER_FILE).stdout.strip()
+        self.assertEqual(tracked, nr.LEDGER_FILE,
+                         "the ledger was written but never committed: first_seen would "
+                         "not survive a re-clone and the overdue check fails open")
+        self.assertEqual(self._porcelain(nr.LEDGER_FILE), "",
+                         "the merge left the tracked ledger dirty for loreport-sync")
+
+    def test_a_quiet_night_leaves_the_ledger_and_the_tree_untouched(self):
+        self._force_a_merge()
+        self.bm.do_merge(self.repo, dry_run=False)
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        report = self.bm.do_merge(self.repo, dry_run=False)
+        self.assertFalse(report["nightly_review"]["ledger_changed"])
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), head)
+        self.assertEqual(self._porcelain(nr.LEDGER_FILE), "")
+
+    def test_the_dated_artifact_is_not_tracked(self):
+        self._force_a_merge()
+        self.bm.do_merge(self.repo, dry_run=False)
+        day = date.today().isoformat()
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.repo, nr.ATTESTATION_DIR, f"{day}.json")))
+        self.assertEqual(self._git("ls-files", nr.ATTESTATION_DIR).stdout.strip(), "",
+                         "a per-run report got tracked; the tree will be dirty nightly")

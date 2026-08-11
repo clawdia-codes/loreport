@@ -638,7 +638,15 @@ fi
 # brain_merge, so an aborted merge also leaves no artifact and this co-fires with
 # check 6. The message has to be true under both causes, not just the one.
 NIGHTLY_DIR="$BRAIN/hub/nightly"
-YESTERDAY=$(date -d 'yesterday' '+%Y-%m-%d' 2>/dev/null || date -v-1d '+%Y-%m-%d')
+# GNU form first, BSD second. If BOTH fail the variable would be empty and the
+# path would be ".../.json", which never exists — reporting "did not run last
+# night" forever with a nonsense fix line. Exit 2 instead: this is the check
+# failing, not the brain, and 2 is the code the unit does not forgive.
+YESTERDAY=$(date -d 'yesterday' '+%Y-%m-%d' 2>/dev/null || date -v-1d '+%Y-%m-%d' 2>/dev/null || true)
+if [ -z "$YESTERDAY" ]; then
+  echo "loreport-health: could not compute yesterday's date (neither GNU nor BSD date)" >&2
+  exit 2
+fi
 nightly_yesterday="$NIGHTLY_DIR/$YESTERDAY.json"
 if [ ! -d "$NIGHTLY_DIR" ] || [ -z "$(ls -A "$NIGHTLY_DIR" 2>/dev/null)" ]; then
   note_failure \
