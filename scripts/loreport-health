@@ -942,7 +942,14 @@ case "${liveness_changed}:${state}" in
     # Clamp the VARIABLE part only, and clamp it first: the impact and action
     # lines are fixed-size and must survive, since they are the two the reader
     # acts on. A long failure string must never evict them.
-    action="cat ${BANNER}"
+    # ⚠ THE ACTION MUST WORK FROM A PHONE. This used to be `cat <banner path>`,
+    # which is only actionable sitting at the machine — and the machine is the
+    # one place the reader usually is NOT when a push notification arrives.
+    # Clawdia is on Telegram AND on this box, so she is the actionable surface;
+    # `loreport triage` is the verb her loreport-ops skill answers to. The
+    # banner path stays as a fallback for the case where the reader IS at a
+    # terminal, but it is second, because it is the rarer case.
+    action="reply to Clawdia: loreport triage   (or at a terminal: cat ${BANNER})"
     fixed_len=$(( ${#impacts[$lead]} + ${#action} + 40 ))
     head_max=$(( NOTIFY_MAX_CHARS - fixed_len ))
     [ "$head_max" -lt 80 ] && head_max=80
@@ -971,7 +978,7 @@ What to do: ${action}"
     # element of the payload the reader can act on, leaving a truncated name
     # where "what to do" should have been. Clamp the variable part, then add the
     # fixed suffix, and size the clamp so the whole thing still fits.
-    suffix=" · what to do: cat ${BANNER}"
+    suffix=" · what to do — reply to Clawdia: loreport triage"
     body_max=$(( NOTIFY_MAX_CHARS - ${#suffix} ))
     # Floor: a pathologically long BANNER path must not squeeze the body to
     # nothing. Overrunning the cap by a little beats emitting a message that

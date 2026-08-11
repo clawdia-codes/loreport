@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.17.0] — 2026-08-11
+
+### Changed — alerts are actionable from a phone, not only from the machine
+
+- **Every alert used to end in `cat <banner path>`** — an instruction that only works sitting
+  at the machine, which is the one place the reader usually is *not* when a push notification
+  arrives. The action is now `reply to Clawdia: loreport triage`; the banner path remains as a
+  secondary fallback for the rarer case where they *are* at a terminal.
+- Pairs with a new `triage` section in the `loreport-ops` skill, so the agent that receives
+  that reply can read the state, name which of the three states it is, show the *content* of
+  each pending item rather than a filename, and act on the answer — instead of handing back a
+  command. Previously that skill had no coverage of quarantine, contested items, health or the
+  audit at all, which is how a healthy brain came to be reported as three days dead.
+
 ## [1.16.1] — 2026-08-11
 
 ### Fixed

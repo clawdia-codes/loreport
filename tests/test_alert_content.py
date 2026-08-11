@@ -496,7 +496,7 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         self.assertIn("merge and publish are running", msg)
         self.assertIn("backup-schedule", msg)
         self.assertIn("1 item(s)", msg)
-        self.assertIn("what to do: cat ", msg)
+        self.assertIn("what to do — reply to Clawdia", msg)
         for word in self.MISLEADING:
             self.assertNotIn(word, msg)
 
@@ -553,7 +553,7 @@ class AlertTextIsUnambiguous(HealthHarness, unittest.TestCase):
         self.assertIn("…", msg, "the clamp did not fire; this test proves "
                                 "nothing unless the message is truncated")
         self.assertLessEqual(len(msg), 220, len(msg))
-        self.assertIn("what to do: cat ", msg)
+        self.assertIn("what to do — reply to Clawdia", msg)
         self.assertIn("merge and publish are running", msg)
 
     def test_a_missing_report_helper_says_so_instead_of_an_empty_detail(self):
@@ -706,7 +706,7 @@ class TwoReviewSourcesInOneRun(HealthHarness, unittest.TestCase):
         msg = notes[0].replace(" --silent", "")
         self.assertIn("2 item(s)", msg)
         self.assertIn("merge and publish are running", msg)
-        self.assertIn("what to do: cat ", msg)
+        self.assertIn("what to do — reply to Clawdia", msg)
         self.assertLessEqual(len(msg), 400, len(msg))
         for word in ("FAIL", "failed", "stuck", "dead", "broken"):
             self.assertNotIn(word, msg)
