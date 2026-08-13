@@ -29,3 +29,7 @@ __pycache__/
 
 # Runtime lock taken by inbox_ingest.py / brain_merge.py. Never tracked.
 hub/.loreport.lock
+
+# Instance-specific forbidden terms for tests/test_no_personal_identifiers.py.
+# Names of people around the owner must NOT be listed in the public test file.
+.forbidden-extra

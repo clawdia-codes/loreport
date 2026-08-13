@@ -39,6 +39,32 @@ FORBIDDEN = (
 # positives are how a guard gets switched off. Another machine adopting this engine should
 # add its own home directory here.
 
+# THE LIST ABOVE COVERS THE INSTANCE OWNER. IT DOES NOT COVER THE PEOPLE AROUND THEM.
+#
+# On 2026-08-13 a calibration fixture was committed to this public repo carrying a family
+# member's name and date of birth. Every test passed, because the owner's own name and
+# home directory were nowhere in it. The guard was not wrong — it was narrow in a way
+# nothing announced, which is the same failure mode its own docstring describes.
+#
+# Those names cannot simply be appended to FORBIDDEN: this file is public, so listing a
+# partner's or child's name here publishes exactly what it is meant to protect. Instance-
+# specific terms therefore load from outside the repo, and the file that holds them is
+# gitignored. Set one up with:
+#
+#     printf 'name-one\nname-two\n' > .forbidden-extra
+#
+# or export LOREPORT_FORBIDDEN_EXTRA="name-one,name-two". Absent both, the guard behaves
+# exactly as before — the extras are additive and never relax anything.
+def instance_forbidden():
+    terms = []
+    env = os.environ.get("LOREPORT_FORBIDDEN_EXTRA", "")
+    terms += [t.strip() for t in env.split(",") if t.strip()]
+    path = os.path.join(REPO_ROOT, ".forbidden-extra")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            terms += [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+    return tuple(terms)
+
 # This file necessarily names the strings it forbids. Nothing else is exempt:
 # an exemption is how the previous single-assertion version stayed narrow.
 EXEMPT_PATHS = {
@@ -61,7 +87,8 @@ def tracked_files():
 
 class TestNoPersonalIdentifiers(unittest.TestCase):
     def test_tracked_files_carry_no_personal_identifier(self):
-        pattern = re.compile("|".join(re.escape(s) for s in FORBIDDEN), re.IGNORECASE)
+        terms = FORBIDDEN + instance_forbidden()
+        pattern = re.compile("|".join(re.escape(s) for s in terms), re.IGNORECASE)
         offenders = []
 
         for rel in tracked_files():

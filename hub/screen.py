@@ -2,8 +2,15 @@
 """
 hub/screen.py — knowledge-grab Pass 3: the adversarial screen.
 
-Reads Pass 2's drafts (`hub/aggregate.py`) and tries to KILL each one. What survives is
-ranked and handed to a human. Nothing here writes to the brain.
+Reads Pass 2's drafts (`hub/aggregate.py`) and screens each one. What survives is ranked
+and handed to a human. Nothing here writes to the brain.
+
+⚠ DO NOT TRUST THIS PASS UNTIL `hub/screen_calibrate.py` REPORTS SEPARATION ≥ 3/4.
+As of 2026-08-13 both local models score **0/4** on that harness — the adversarial prompt
+killed 8 of 8 including four memories the user already relies on, and the balanced prompt
+kept 8 of 8 including four Barnum drafts. The wording was not the cause; neither local
+model can make this distinction. Run the calibration first, on whatever model you intend
+to use, and treat a uniform verdict as a broken screen rather than a strong opinion.
 
 WHY A CRITIC AND NOT A SCORER
 ------------------------------
@@ -52,10 +59,17 @@ DEFAULT_ENDPOINT = oe.DEFAULT_ENDPOINT
 RANK = {"high": 3, "medium": 2, "low": 1}
 
 CRITIC_PROMPT = """You are screening a candidate memory before it enters a person's \
-permanent second-brain. Every item that survives is loaded into every future assistant \
-session forever, so the bar is high and the default is REJECT.
+permanent second-brain. Decide whether it earns a permanent place.
 
-Your job is to find a reason to REJECT this draft. Only keep it if you cannot.
+Judge it against BOTH tests below. A draft that passes the KEEP test and trips none of \
+the REJECT tests should be kept — do not reject it merely because it is short, obvious, \
+or unexciting. A plain durable fact like "works in the Europe/Oslo timezone" is exactly \
+what belongs here.
+
+KEEP it when ALL THREE hold:
+- SPECIFIC: it says something about THIS person that would not be true of most people.
+- EVIDENCED: the quotes below plainly show it. A single clear quote is enough.
+- USEFUL: an assistant would do something differently knowing it.
 
 DRAFT
 name: {name}
@@ -68,7 +82,7 @@ seen in {evidence} distinct conversations, {first_seen} to {last_seen}, sources:
 quotes:
 {quotes}
 
-Reject if ANY of these hold:
+REJECT if ANY of these hold:
 - BARNUM: it would be true of almost anyone. "Values efficiency", "prefers clear \
 answers", "is curious" are all Barnum. This is the most common failure — check it first.
 - UNACTIONABLE: an assistant would not do anything differently knowing it.
@@ -86,17 +100,25 @@ Answer with ONE JSON object, no prose, no code fence:
   "confidence": "high|medium|low",
   "behavioral_impact": "high|medium|low"}}
 
-If you are uncertain, answer "kill"."""
+Weigh the two tests honestly. Rejecting everything is as wrong as accepting everything."""
 
 
 def thin_evidence(draft):
-    """Rule 4, in arithmetic. Returns True when the draft dies without a model call."""
+    """Rule 4, in arithmetic. Returns True when the draft dies without a model call.
+
+    The directive half reads `stability.has_directive`, which Pass 2 carries down from
+    Pass 1's `kind` field. It must NOT be inferred from the draft's `type`: that is a
+    label a model chose while writing the draft, and on the first full run 146 of 183
+    drafts came back typed `person` — so a type-based carve-out never fired and this
+    function killed 166 drafts that the rule says to keep. Whether the user issued an
+    explicit directive is a fact about the source text, not an opinion about the draft.
+    """
     stats = draft.get("stability") or {}
     if stats.get("evidence", 0) >= 3:
         return False
     # An explicit directive is worth keeping on one telling — the person only had to say
     # it once, and saying it again would be strange.
-    return draft.get("type") not in ("feedback", "decision")
+    return not stats.get("has_directive", False)
 
 
 def quotes_block(draft):

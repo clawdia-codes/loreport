@@ -126,6 +126,26 @@ def cluster(observations, threshold=0.34):
     rows. Merging is union-find: A~B and B~C puts all three together even when A and C
     do not directly pass the threshold, which is what lets a topic accumulate phrasing
     variants across three years.
+
+    THE THRESHOLD IS 0.34 BECAUSE IT WAS MEASURED, NOT GUESSED
+    -----------------------------------------------------------
+    0.34 looks strict — on the real 1,081-observation corpus it leaves 973 clusters whose
+    largest holds only 6 conversations, which reads like under-clustering. It is not a
+    tuning oversight. Loosening it does not merge a little more; it percolates:
+
+        threshold   clusters   largest cluster   draftable
+        0.34            973        6 convos          183
+        0.25            811      111 convos          187
+        0.20            619      311 convos          175
+
+    At 0.20 more than a quarter of the corpus lands in ONE cluster with an arbitrary
+    member as its topic — the same degenerate blob `synth_detect.py` refuses to emit. And
+    the draftable count barely moves across the whole range, so the looser settings buy
+    no extra yield in exchange for that risk.
+
+    Under-clustering costs a few near-duplicate drafts, which Pass 3 and the human review
+    catch. Over-clustering silently destroys the evidence structure of hundreds of
+    observations at once. Given the asymmetry, err strict.
     """
     parent = list(range(len(observations)))
 
@@ -186,6 +206,12 @@ def stability(members):
         "first_seen": dates[0] if dates else None,
         "last_seen": dates[-1] if dates else None,
         "span_days": span_days,
+        # Carried so Pass 3 can apply "evidence <3 AND not an explicit directive" against
+        # the real signal. Pass 3 previously inferred this from the draft's `type`, which
+        # is a model label — 146 of 183 drafts came back typed `person` on the first full
+        # run, so the carve-out silently never fired and the screen killed 166 drafts it
+        # should have kept. The kind comes from Pass 1 and no later model can restate it.
+        "has_directive": any(m.get("kind") == "meta-statement" for m in members),
     }
 
 
@@ -250,6 +276,15 @@ matters and how to apply it.",
   "relates_to": "existing name if relation is update or duplicate, else empty",
   "confidence": "high|medium|low",
   "behavioral_impact": "high|medium|low"}}
+
+What each type means — pick from these, and note that most drafts are `user` or `feedback`:
+- user: who THIS person is — role, expertise, a stable preference of theirs.
+- feedback: guidance THEY gave about how they want to be worked with.
+- project: ongoing work, a goal, or a constraint.
+- reference: a pointer to an external resource or a durable gotcha.
+- decision: a choice they made, with the reasoning.
+- person: ONLY for a memory about a DIFFERENT human being — a partner, a child, a \
+colleague. NEVER use `person` for a fact about the subject of this brain themselves.
 
 Rules:
 - The description line is the product. It is injected into every future session; the body \

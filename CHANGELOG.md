@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.18.1] — 2026-08-13
+
+### Fixed — Pass 3's directive carve-out never fired
+
+The rule is "kill when evidence is under 3 conversations AND the cluster is not an
+explicit directive". The directive half read the draft's `type` field — a label a model
+assigns while writing the draft — and on the first full run over the real corpus **146 of
+183 drafts came back typed `person`**, so the carve-out never evaluated true once. The
+gate killed 166 drafts it was written to keep and the funnel yielded zero.
+
+Pass 2 now carries `has_directive` down from Pass 1's `kind` field, which is a fact about
+the source text rather than an opinion about the draft, and Pass 3 reads that. Correct
+rule keeps 164 of 183 clusters where the broken one kept 17. `tests/test_screen.py`
+asserts both directions and was mutation-verified by re-inserting the original bug.
+
+Also tightened Pass 2's type guidance, which caused the `person` mislabelling: the prompt
+now defines each type and says explicitly that `person` is only for a memory about a
+*different* human being.
+
+### Added — `hub/screen_calibrate.py`, because the screen turned out not to screen
+
+A fixed set of 4 known-good drafts (real accepted memories, with realistic supporting
+quotes) and 4 known-bad ones (real Pass 2 drafts asserting broad traits on the evidence
+of an unrelated question). Reports `separation = GOOD kept − BAD kept`.
+
+**Both local models score 0/4.** The adversarial prompt killed 8 of 8 — including a
+timezone fact and a plain biographical one. Rebalancing the prompt flipped it to keeping
+8 of 8 — including a draft claiming "values plain-language summaries" on the evidence of
+a question about a phone camera. The wording was never the problem.
+
+Fixtures are synthetic on purpose: the first version of this file carried a real brain's
+memories verbatim, including a family member's name and date of birth, into this PUBLIC
+repo. See the guard change below.
+
+`screen.py` now carries a warning not to trust its output below separation 3/4. A screen
+that answers uniformly is not a strict screen or a generous one; it is not a screen, and
+from the outside it is indistinguishable from a working pipeline.
+
 ## [1.18.0] — 2026-08-13
 
 ### Added — the knowledge grab can now read provider exports
