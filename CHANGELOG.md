@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.18.0] — 2026-08-13
+
+### Added — the knowledge grab can now read provider exports
+
+ChatGPT and Claude.ai have no local logs, so they were structurally excluded from the
+corpus. Three new modules close that, completing the three-pass funnel.
+
+- **`hub/export_readers.py`** — Pass 0 adapters for both provider exports, emitting the
+  same record shape `corpus_prep.py` does so Pass 1 onward is unchanged. Measured on the
+  real archives: ChatGPT 1,053 conversations / 3,183 typed turns spanning 2023-04-12 to
+  2026-08-10; Claude.ai 59 / 229.
+- **`hub/aggregate.py`** — Pass 2. Deterministic clustering and arithmetic stability
+  (evidence = distinct conversations, date span, sources), then a strong model reduces
+  each cluster to one draft. Visibility is stamped `local` in code, never taken from the
+  model — the privacy wall is not a thing to ask a model's opinion about.
+- **`hub/screen.py`** — Pass 3. An adversarial critic prompted to *reject*, defaulting to
+  kill when uncertain, with the "under 3 conversations and not a directive" rule applied
+  in arithmetic before any model call. A critic that returns no parseable verdict counts
+  as a kill: a non-answer is not a pass.
+
+### Security — the OpenAI download is a Privacy Center archive, not a ChatGPT export
+
+It ships `Financial/Charge History.csv`, `Payments Invoices`, a `Payments Customer
+Profile`, `Contact Info`, and a 196 MB archive of uploaded files alongside the
+conversations. The reader names the single member it opens; everything else is unreachable
+by construction rather than filtered afterwards, because a filter is a claim someone must
+keep true as next year's archive grows new categories.
+
+`tests/test_export_readers.py` asserts a seeded financial value never reaches a record,
+asserts the fixture actually contains that value (a privacy check that passes on an empty
+fixture has shipped here before), and was mutation-verified: widening the allowlist
+prefix, deleting the `do_not_remember` branch, and dropping `multimodal_text` each redden
+the suite.
+
+### Notes
+- `multimodal_text` turns are kept. 1,659 messages in the real corpus are multimodal, and
+  the text typed beside an image lives in that message's string parts.
+- The four oldest Claude.ai conversations (July 2024) contain no message text at all in
+  the export. Verified against the archive — nothing is being dropped by the reader.
+
 ## [1.17.1] — 2026-08-12
 
 ### Fixed — a new brain no longer inherits a permanently dirty tree
