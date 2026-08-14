@@ -78,11 +78,24 @@ SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".pyc"
 
 
 def tracked_files():
+    """Tracked files PLUS untracked-but-not-ignored ones.
+
+    Scanning only `ls-files` output means a brand-new file is invisible to this guard
+    until it is committed — so the sequence is: write the file, run the suite, watch it
+    pass, commit, push, and only then does the check fire on the next run. That is exactly
+    what happened on 2026-08-14: a test fixture carrying the owner's name and home
+    directory went green, was pushed, and failed afterwards.
+
+    A guard that reports a leak only once it is published is the wrong way round.
+    `--others --exclude-standard` adds untracked files while still honouring .gitignore,
+    so scratch output and the instance's own .forbidden-extra stay out of scope.
+    """
     out = subprocess.run(
-        ["git", "-C", REPO_ROOT, "ls-files", "-z"],
+        ["git", "-C", REPO_ROOT, "ls-files", "-z", "--cached", "--others",
+         "--exclude-standard"],
         capture_output=True, text=True, check=True,
     ).stdout
-    return [p for p in out.split("\0") if p]
+    return sorted({p for p in out.split("\0") if p})
 
 
 class TestNoPersonalIdentifiers(unittest.TestCase):

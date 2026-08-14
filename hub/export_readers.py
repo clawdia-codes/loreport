@@ -139,7 +139,38 @@ def should_skip_conversation(meta):
 
 # --- ChatGPT ------------------------------------------------------------------------
 
-def _chatgpt_user_turns(conv):
+CONTEXT_CHARS = 4000
+
+
+def _msg_text(msg):
+    content = msg.get("content") or {}
+    if content.get("content_type") not in ("text", "multimodal_text"):
+        return ""
+    return "\n".join(p for p in (content.get("parts") or []) if isinstance(p, str)).strip()
+
+
+def _chatgpt_preceding_assistant(mapping, node_id):
+    """Text of the nearest assistant turn ABOVE this user turn in the reply tree.
+
+    Walks `parent` rather than scanning by timestamp, because the mapping is a tree: with
+    edits and regenerations the chronologically previous assistant message is often on a
+    different branch and is not what the user was replying to.
+    """
+    seen = set()
+    cur = (mapping.get(node_id) or {}).get("parent")
+    while cur and cur not in seen:
+        seen.add(cur)
+        node = mapping.get(cur) or {}
+        msg = node.get("message") or {}
+        if (msg.get("author") or {}).get("role") == "assistant":
+            text = _msg_text(msg)
+            if text:
+                return text[:CONTEXT_CHARS]
+        cur = node.get("parent")
+    return ""
+
+
+def _chatgpt_user_turns(conv, include_context=False):
     """Genuine typed user turns from one ChatGPT conversation's mapping tree.
 
     Kept: author.role == "user", content_type in {"text", "multimodal_text"}, string
@@ -149,9 +180,17 @@ def _chatgpt_user_turns(conv):
 
     Excluded: `metadata.is_user_system_message` (custom instructions, not a typed turn)
     and non-string parts (image asset pointers).
+
+    `include_context` additionally attaches, per turn, the assistant text that turn was
+    replying to. It stays OFF by default and the attached text is NEVER treated as
+    something the user said — see the module docstring's note on approval-anchored
+    extraction. Measured on this corpus: the assistant wrote 9x more than the user, and
+    34% of user turns are 25 characters or fewer ("yes do that"), so for a third of the
+    corpus the user's own words carry a verdict and no content at all.
     """
+    mapping = conv.get("mapping") or {}
     turns = []
-    for node in (conv.get("mapping") or {}).values():
+    for node_id, node in mapping.items():
         msg = node.get("message")
         if not msg:
             continue
@@ -159,18 +198,19 @@ def _chatgpt_user_turns(conv):
             continue
         if (msg.get("metadata") or {}).get("is_user_system_message"):
             continue
-        content = msg.get("content") or {}
-        if content.get("content_type") not in ("text", "multimodal_text"):
-            continue
-        text = "\n".join(p for p in (content.get("parts") or []) if isinstance(p, str)).strip()
+        text = _msg_text(msg)
         if not text:
             continue
-        turns.append({"ts": msg.get("create_time"), "text": sx.redact_secrets(text)})
+        turn = {"ts": msg.get("create_time"), "text": sx.redact_secrets(text)}
+        if include_context:
+            ctx = _chatgpt_preceding_assistant(mapping, node_id)
+            turn["context"] = sx.redact_secrets(ctx) if ctx else ""
+        turns.append(turn)
     turns.sort(key=lambda t: (t["ts"] is None, t["ts"]))
     return turns
 
 
-def read_chatgpt_export(zip_path, limit=None):
+def read_chatgpt_export(zip_path, limit=None, include_context=False):
     records, skipped = [], {}
     with zipfile.ZipFile(zip_path) as outer:
         allowed = chatgpt_allowed_outer_members(outer.namelist())
@@ -184,7 +224,7 @@ def read_chatgpt_export(zip_path, limit=None):
                 shards = sorted(n for n in inner.namelist() if CHATGPT_SHARD_RE.match(n))
                 for shard in shards:
                     for conv in json.loads(inner.read(shard)):
-                        turns = _chatgpt_user_turns(conv)
+                        turns = _chatgpt_user_turns(conv, include_context)
                         if not turns:
                             skipped["no_user_turns"] = skipped.get("no_user_turns", 0) + 1
                             continue
@@ -218,7 +258,7 @@ def read_chatgpt_export(zip_path, limit=None):
 
 # --- Claude.ai ----------------------------------------------------------------------
 
-def _claude_user_turns(conv):
+def _claude_user_turns(conv, include_context=False):
     """Genuine typed human turns from one Claude.ai conversation.
 
     Kept: sender == "human". Text is taken from `.text`, falling back to the `text`-typed
@@ -230,8 +270,17 @@ def _claude_user_turns(conv):
     candidate memory about the user.
     """
     turns = []
+    pending_context = ""
     for msg in conv.get("chat_messages") or []:
         if msg.get("sender") != "human":
+            # Remember the most recent assistant text so the next human turn can carry
+            # what it was replying to. chat_messages is a flat ordered list, so the
+            # previous assistant message IS the one being answered.
+            atext = (msg.get("text") or "").strip() or "\n".join(
+                b.get("text", "") for b in (msg.get("content") or [])
+                if b.get("type") == "text").strip()
+            if atext:
+                pending_context = atext[:CONTEXT_CHARS]
             continue
         text = (msg.get("text") or "").strip()
         if not text:
@@ -241,22 +290,25 @@ def _claude_user_turns(conv):
             ).strip()
         if not text:
             continue
-        turns.append({
+        turn = {
             "ts": msg.get("created_at"),
             "text": sx.redact_secrets(text),
-        })
+        }
+        if include_context:
+            turn["context"] = sx.redact_secrets(pending_context) if pending_context else ""
+        turns.append(turn)
     turns.sort(key=lambda t: (t["ts"] is None, str(t["ts"])))
     return turns
 
 
-def read_claude_ai_export(zip_path, limit=None):
+def read_claude_ai_export(zip_path, limit=None, include_context=False):
     records, skipped = [], {}
     with zipfile.ZipFile(zip_path) as z:
         if CLAUDE_MEMBER not in z.namelist():
             raise ValueError(f"{zip_path} has no {CLAUDE_MEMBER}")
         convos = json.loads(z.read(CLAUDE_MEMBER))
     for conv in convos:
-        turns = _claude_user_turns(conv)
+        turns = _claude_user_turns(conv, include_context)
         if not turns:
             skipped["no_user_turns"] = skipped.get("no_user_turns", 0) + 1
             continue
@@ -300,12 +352,16 @@ def main():
                     help="stop after N conversations (testing)")
     ap.add_argument("--stats-only", action="store_true",
                     help="report counts without writing records")
+    ap.add_argument("--with-agent-context", action="store_true",
+                    help="attach the assistant text each user turn was replying to. "
+                         "OFF by default; the attached text is context, never a quote.")
     args = ap.parse_args()
 
     if not args.stats_only and not args.out:
         ap.error("--out is required unless --stats-only")
 
-    records, skipped = READERS[args.provider](args.export, limit=args.limit)
+    records, skipped = READERS[args.provider](
+        args.export, limit=args.limit, include_context=args.with_agent_context)
 
     turns = sum(r["turn_count"] for r in records)
     chars = sum(len(t["text"]) for r in records for t in r["turns"])

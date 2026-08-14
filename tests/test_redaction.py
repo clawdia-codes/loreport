@@ -65,7 +65,7 @@ class MustNotRedact(unittest.TestCase):
         """Paths are the single most common long token in this corpus, and the user has a
         standing rule that full absolute paths must be given. Redacting them would break
         exactly the thing he asked for."""
-        text = "see /home/x/projects/loreport-oyvind-theie/memories/user-timezone.md"
+        text = "see /home/x/projects/loreport-example-brain/memories/user-timezone.md"
         self.assertNotIn(REDACTED, sx.redact_secrets(text))
 
     def test_low_entropy_long_token_survives(self):

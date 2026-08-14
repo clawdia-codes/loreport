@@ -231,5 +231,130 @@ class ClaudeAiTurnFilter(unittest.TestCase):
         self.assertEqual({"no_user_turns": 1}, skipped)
 
 
+class AgentContext(unittest.TestCase):
+    """Attaching what each user turn was REPLYING to.
+
+    Measured on the real corpus: the assistant wrote 9x more than the user, 34% of user
+    turns are <=25 characters and 24% are <=10. For a third of the conversations the
+    user's own words are a verdict ("yes do that") with no content, so an extractor that
+    only ever sees user text has nothing to work with — which is why 339 conversations
+    yielded zero observations and others produced invented traits.
+
+    The context is carried so a later pass can say "the agent proposed X and he approved
+    it". It must never become something he *said*, which is the whole reason the quote
+    gate exists, so these tests pin both halves.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def _chatgpt(self, include_context):
+        conv = convo(text="yes do that", cid="c1")
+        conv["mapping"]["n1"]["parent"] = "a0"
+        conv["mapping"]["a0"] = {
+            "id": "a0", "parent": None, "children": ["n1"],
+            "message": {"id": "a0", "author": {"role": "assistant"},
+                        "create_time": 1699999999.0, "metadata": {},
+                        "content": {"content_type": "text",
+                                    "parts": ["I propose we use Postgres over SQLite."]}},
+        }
+        path = os.path.join(self.tmp, f"cg{include_context}.zip")
+        make_chatgpt_archive(path, [conv], include_financial=False)
+        return er.read_chatgpt_export(path, include_context=include_context)
+
+    def test_context_is_off_by_default(self):
+        """Reddened by defaulting include_context to True anywhere in the chain.
+
+        Calls the public reader with NO argument, which is the only way to exercise a
+        default. An earlier version passed include_context=False explicitly and therefore
+        proved nothing — flipping the default left it green.
+        """
+        conv = convo(text="yes do that", cid="c1")
+        path = os.path.join(self.tmp, "default.zip")
+        make_chatgpt_archive(path, [conv], include_financial=False)
+        records, _ = er.read_chatgpt_export(path)          # no include_context
+        self.assertNotIn("context", records[0]["turns"][0])
+
+        cpath = os.path.join(self.tmp, "default-claude.zip")
+        with zipfile.ZipFile(cpath, "w") as z:
+            z.writestr("conversations.json", json.dumps([{
+                "uuid": "u1", "name": "n", "created_at": "2026-03-02T10:00:00Z",
+                "chat_messages": [{"sender": "human", "text": "hi", "content": [],
+                                   "created_at": "2026-03-02T10:00:00Z"}]}]))
+        crecords, _ = er.read_claude_ai_export(cpath)      # no include_context
+        self.assertNotIn("context", crecords[0]["turns"][0])
+
+    def test_context_carries_the_assistant_turn_being_replied_to(self):
+        """Reddened by returning "" from _chatgpt_preceding_assistant."""
+        records, _ = self._chatgpt(True)
+        self.assertIn("Postgres", records[0]["turns"][0]["context"])
+
+    def test_context_never_leaks_into_the_user_text(self):
+        """THE load-bearing assertion. The quote gate verifies quotes against `text`; if
+        assistant prose reached `text`, a model could 'quote' the agent and have it
+        verified as the user's words. That is the attribution failure that started this
+        whole design. Reddened by concatenating context into text."""
+        records, _ = self._chatgpt(True)
+        turn = records[0]["turns"][0]
+        self.assertEqual("yes do that", turn["text"])
+        self.assertNotIn("Postgres", turn["text"])
+
+    def test_chatgpt_follows_the_reply_tree_not_the_clock(self):
+        """A regenerated branch puts a chronologically-later assistant message on a
+        sibling path. Walking `parent` picks the one actually replied to.
+        Reddened by selecting the most recent assistant message by timestamp."""
+        conv = convo(text="yes do that", cid="c1")
+        conv["mapping"]["n1"]["parent"] = "a0"
+        conv["mapping"]["a0"] = {
+            "id": "a0", "parent": None, "children": ["n1"],
+            "message": {"id": "a0", "author": {"role": "assistant"},
+                        "create_time": 1000.0, "metadata": {},
+                        "content": {"content_type": "text", "parts": ["ON THE REPLY PATH"]}}}
+        conv["mapping"]["a9"] = {
+            "id": "a9", "parent": None, "children": [],
+            "message": {"id": "a9", "author": {"role": "assistant"},
+                        "create_time": 9999999999.0, "metadata": {},
+                        "content": {"content_type": "text", "parts": ["ON A DEAD BRANCH"]}}}
+        path = os.path.join(self.tmp, "tree.zip")
+        make_chatgpt_archive(path, [conv], include_financial=False)
+        records, _ = er.read_chatgpt_export(path, include_context=True)
+        ctx = records[0]["turns"][0]["context"]
+        self.assertIn("ON THE REPLY PATH", ctx)
+        self.assertNotIn("ON A DEAD BRANCH", ctx)
+
+    def test_claude_ai_context_is_the_previous_assistant_message(self):
+        path = os.path.join(self.tmp, "claude.zip")
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("conversations.json", json.dumps([{
+                "uuid": "u1", "name": "n", "created_at": "2026-03-02T10:00:00Z",
+                "chat_messages": [
+                    {"sender": "assistant", "text": "Here is the migration plan.",
+                     "created_at": "2026-03-02T10:00:00Z", "content": []},
+                    {"sender": "human", "text": "good", "content": [],
+                     "created_at": "2026-03-02T10:01:00Z"},
+                ]}]))
+        records, _ = er.read_claude_ai_export(path, include_context=True)
+        turn = records[0]["turns"][0]
+        self.assertEqual("good", turn["text"])
+        self.assertIn("migration plan", turn["context"])
+
+    def test_context_is_redacted_too(self):
+        """An agent turn can echo a credential back. Reddened by dropping redact_secrets
+        from the context path."""
+        conv = convo(text="ok", cid="c1")
+        conv["mapping"]["n1"]["parent"] = "a0"
+        conv["mapping"]["a0"] = {
+            "id": "a0", "parent": None, "children": ["n1"],
+            "message": {"id": "a0", "author": {"role": "assistant"},
+                        "create_time": 1.0, "metadata": {},
+                        "content": {"content_type": "text",
+                                    "parts": ["your key is sk-abcdefghijklmnopqrstuvwxyz123456"]}}}
+        path = os.path.join(self.tmp, "sec.zip")
+        make_chatgpt_archive(path, [conv], include_financial=False)
+        records, _ = er.read_chatgpt_export(path, include_context=True)
+        self.assertIn("[REDACTED]", records[0]["turns"][0]["context"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.19.0] — 2026-08-14
+
+### Added — Pass 1b: the agent's turn can inform a fact without ever becoming one
+
+Measured on the real corpus: the assistant wrote **9x more** than the user, **34%** of user
+turns are 25 characters or fewer and 24% are 10 or fewer, median 41. For a third of an
+agentic corpus the user's own words carry a verdict and no content — so an extractor
+reading only user text either finds nothing (339 conversations yielded zero) or invents a
+trait to cover the gap (the Barnum drafts). Two failure modes, one cause.
+
+- `export_readers.py` gains opt-in `--with-agent-context`, attaching to each user turn the
+  assistant text it replied to. ChatGPT resolution walks the reply **tree**, not the clock:
+  with edits and regenerations the chronologically-previous assistant message is often on a
+  dead branch. Context is redacted like any other text and is **never merged into `text`**,
+  so the quote gate still verifies against the user's words alone — that separation is the
+  safety property, and re-introducing the merge reddens a test.
+- `hub/decide_extract.py` — `decide` mode anchors on turns that actually *respond*, with
+  the proposal supplied as context and every claim framed as "they approved/rejected X".
+  `identity` mode asks only who the person is and what they do.
+
+**`SHORT` IS NOT `RESPONSIVE`, and the first version cost a run to learn it.** Selecting
+any short turn with context above it produced 38 observations from 12 conversations — 4x
+the baseline rate — of which nearly all were task requests relabelled as standing rules
+("They require the assistant to shorten the provided text by 50%"). High yield, no signal.
+The selector now requires verdict-shaped language: 1,877 candidate turns → 142.
+
+### Fixed — the identifier guard only saw committed files
+
+`git ls-files` does not list new files, so a fixture carrying the owner's name passed the
+suite, was committed, was pushed, and failed only on the *next* run. A guard that reports a
+leak after publishing it is the wrong way round. It now scans untracked-but-not-ignored
+files too, verified with a planted probe.
+
+### Honest result
+
+`decide` partially works — 964 of 1,053 conversations correctly yield nothing, and the good
+findings are the intended shape. `identity` **did not work**: 329 of 339 conversations
+returned exactly one bland topic restatement. See `FINDINGS-2026-08-13.md` for the pattern
+this completes — every open-ended judgement asked of a local model this week returned a
+uniform answer, and re-prompting only changed which uniform answer it gave.
+
 ## [1.18.2] — 2026-08-14
 
 ### Fixed — Pass 2 was writing the brain back to itself
