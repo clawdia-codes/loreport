@@ -31,8 +31,23 @@ Single-file, Python-3-stdlib-only. Performs the hub's daily branch merge:
   6. INDEX rebuild — deterministic: same input item set -> same INDEX.md bytes, always.
   7. Fast-forward each provider branch to the new `main`.
 
-Exit code is nonzero whenever a human should look: PROFILE conflicts, add/add
-renames, secret-scrub warnings, or provenance-gate violations.
+Exit codes distinguish two very different outcomes that used to share code 1:
+
+  0  merged (or nothing to merge) and nothing is waiting on a human.
+  1  BROKEN — the merge did not complete. Fail-closed scrub abort, or a merge
+     that never started. Nothing landed on `main`; the tree was rolled back.
+  3  NEEDS REVIEW — the merge completed normally and `main` is publishable;
+     items are parked for a human decision (PROFILE conflicts, add/add renames,
+     scrub warnings, provenance or human-region violations). This is NOT a
+     failure and must not be reported as one: on 2026-08-10 two readers saw a
+     "needs review" signal, read it as "the merge failed", and told the owner
+     the brain had been stuck for three days. It had merged and published every
+     night.
+
+A completed merge — including a no-op one — stamps `hub/merge-state.json` with
+`last_success_epoch`. That file is the only positive assertion that the pipeline
+actually ran; the fail-closed aborts deliberately do not write it, so a brain
+whose merge dies stops looking fresh instead of coasting on an old digest.
 
 CLI:
     python3 hub/brain_merge.py [--brain-dir PATH] [--test-determinism] [--dry-run]
@@ -46,7 +61,44 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import date, datetime
+
+# Sibling import: this module is imported by tooling that does not put hub/ on the
+# path (scripts/check-docs.sh does exactly that), so make the directory importable
+# rather than relying on being run as a script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import synth_detect  # noqa: E402
+
+# Second sibling import, same rationale as synth_detect above. Every other file in
+# hub/ asserts a single-file/stdlib-only doctrine; this one is the exception because
+# the nightly review must run in the SAME nightly job as the detector it consumes.
+# A separate timer would be a second thing that can silently not run — the exact
+# failure the report-only detector spent weeks demonstrating — and it would want its
+# own copy of the repo lock. One job, one lock, one dated artifact.
+import nightly_review  # noqa: E402
+
+# Where the merge parks the detector's report for the weekly health check to read.
+# Gitignored alongside the other hub state files: it is a report artifact, and a
+# tracked file rewritten nightly would leave the tree dirty for sync.sh's guard.
+SYNTHESIS_REPORT_FILE = "hub/synthesis-report.json"
+
+# The merge's liveness stamp. Written ONLY when a merge actually completed, which
+# is what makes it usable as a freshness assertion: hub/digest-*.md is written on
+# the abort paths too, so "a recent digest exists" proves nothing about whether
+# the pipeline ran. Gitignored for the same reason as the digest — local report
+# state, not brain content, and a tracked file rewritten nightly would leave the
+# tree dirty for loreport-sync's post-merge guard.
+MERGE_STATE_FILE = "hub/merge-state.json"
+
+# Exit codes. 1 and 3 are both "nonzero", and telling them apart is the whole
+# point: 1 means nothing merged, 3 means everything merged and a human has some
+# reading to do. Callers that collapse them re-create the false "the merge is
+# broken" diagnosis this split exists to prevent.
+EXIT_OK = 0
+EXIT_BROKEN = 1
+EXIT_NEEDS_REVIEW = 3
 
 # --- constants -------------------------------------------------------------
 
@@ -73,7 +125,21 @@ def _load_provider_order():
 
 
 PROVIDER_ORDER = _load_provider_order()
-ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge"}
+ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
+
+# Lifecycle (docs/taxonomy-lifecycle-design.md Phase 2). Both fields are OPTIONAL;
+# an absent `lifespan` means `permanent`.
+LIFESPANS = {"permanent", "active", "temporary"}
+# The work-vs-private axis. Orthogonal to `visibility`, which is cloud EXPOSURE —
+# a `domain: work` item may be local, and a `domain: personal` item may be shared.
+DOMAINS = {"work", "personal", "both"}
+
+EXPIRES_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+HUMAN_REGION_RE = re.compile(
+    r"<!--\s*human:start\s*-->(.*?)<!--\s*human:end\s*-->",
+    re.DOTALL,
+)
 
 # Same secret-regex set used by inbox_ingest.py and snapshot_publish.py (duplicated
 # on purpose — every hub/*.py file is single-file and stdlib-only, so nothing is
@@ -134,9 +200,21 @@ def read_file(path):
 def _visibility_from_text(text):
     """Return "shared" or "local" for an item's raw text.
 
-    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
-    as `local`. A false `local` merely hides an item from cloud providers --
-    visible and recoverable. A false `shared` leaks it -- neither.
+    FAIL CLOSED: an item is `shared` ONLY when its frontmatter carries an
+    explicit `visibility: shared`. Everything else -- an ABSENT `visibility:`
+    key, a malformed value, no frontmatter block at all -- is `local`. A false
+    `local` merely hides an item from cloud providers -- visible and
+    recoverable. A false `shared` leaks it -- neither.
+
+    The absent-key case used to return "shared" (the old `absent = shared`
+    frontmatter default). That was the only fail-OPEN default in the engine:
+    an item nobody had classified was not merely unfiltered, it was positively
+    published. See docs/format-spec.md 1 -- `visibility:` is now REQUIRED on
+    items, and this parser is what makes forgetting it safe instead of costly.
+
+    Skills are NOT items and never carry `visibility:` (format-spec.md 1).
+    They are always shared. That carve-out lives in the RESOLVERS that know a
+    path is a skill, never here -- this function only ever sees text.
     """
     if text.startswith("﻿"):
         text = text[1:]
@@ -151,17 +229,81 @@ def _visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "local"
+
+
+def _has_explicit_visibility(text):
+    """True when the item's frontmatter carries a `visibility:` key at all,
+    whatever its value.
+
+    `_visibility_from_text` deliberately collapses "absent", "malformed" and
+    "explicitly local" into one answer -- `local` -- because for EGRESS that
+    is the whole point: all three must be withheld. But "absent" and
+    "explicitly local" are not the same fact, and anything that RELAXES a
+    control on the strength of `local` has to tell them apart, or the new
+    default silently buys that relaxation for every unclassified item. Three
+    callers need the distinction: the publish gate in snapshot_publish.py
+    (which refuses while any item is unclassified), the secret-scrub split
+    in brain_merge.py (which may only demote a hit to a warning for an item a
+    human actually marked local), and the skills-are-shared carve-out in the
+    egress resolvers, which exists to supply a default for a key skills do not
+    carry and must not OVERRIDE one a human wrote.
+
+    Same line-scan and same fail-closed framing as `_visibility_from_text`: no
+    `---` frontmatter block means no explicit visibility.
+    """
+    if text is None:
+        return False
+    if text.startswith("﻿"):
+        text = text[1:]
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, _value = line.partition(":")
+        if sep and key.strip().lower() == "visibility":
+            return True
+    return False
+
+
+# --- lifecycle ---------------------------------------------------------------
+
+def parse_expires(value):
+    """Return a `date` for a well-formed `expires: YYYY-MM-DD`, else None.
+
+    Anything unparseable returns None, which means "not expired" — a garbled
+    date must never cause an item to silently vanish from the hot index. The
+    strict-format complaint belongs at capture time (inbox_ingest.validate_schema),
+    where the author can still fix it; by the time an item is on disk, the safe
+    reading of a broken date is to leave the item alone.
+    """
+    if not value or not EXPIRES_RE.match(value.strip()):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def is_expired(fm, today):
+    """True when this item's INDEX line belongs on the cold shelf.
+
+    The trigger is MECHANICAL and is the `expires` date alone — a before/after
+    comparison, never duration math and never a model's judgement of "stale"
+    (docs/taxonomy-lifecycle-design.md Phase 2). An item with no `expires` is
+    never archived by this code, so `permanent` and `active` items are untouched
+    by construction rather than by a separate rule that could drift.
+    """
+    expires = parse_expires(fm.get("expires"))
+    return expires is not None and expires < today
 
 
 # --- deterministic INDEX rebuild --------------------------------------------
 
-def build_index_bytes(brain_dir):
-    """Scan memories/, knowledge/, skills/ and build INDEX.md bytes.
-    Deterministic: sorted alphabetically within each section; no reliance on
-    filesystem iteration order, mtimes, or any other non-content input."""
+def _collect_memories(brain_dir):
+    """Return [(name, desc, typ, frontmatter)] for every valid memory item."""
     memories = []
     mem_dir = os.path.join(brain_dir, "memories")
     if os.path.isdir(mem_dir):
@@ -174,7 +316,58 @@ def build_index_bytes(brain_dir):
             name, desc, typ = fm.get("name"), fm.get("description"), fm.get("type")
             if not name or not desc or typ not in ITEM_TYPES:
                 continue
-            memories.append((name, desc, typ))
+            memories.append((name, desc, typ, fm))
+    return memories
+
+
+def build_archive_index_bytes(brain_dir, today=None):
+    """Build INDEX-ARCHIVE.md bytes — the cold shelf.
+
+    Only the catalog LINE moves here; the item's file stays exactly where it is
+    on disk, so an archived item is still readable, still wikilink-resolvable,
+    and still merged/scrubbed like any other. Archiving is a hot/cold split of
+    the index, not a deletion.
+
+    Returns (bytes, archived_count). Deterministic for a given day and item set.
+    """
+    today = today or date.today()
+    archived = [
+        (name, desc, typ)
+        for name, desc, typ, fm in _collect_memories(brain_dir)
+        if is_expired(fm, today)
+    ]
+    archived.sort(key=lambda t: t[0])
+    lines = [
+        "# Index — Archive",
+        "",
+        # No wikilink-shaped example text in this header: every downstream
+        # consumer (snapshot_publish's visibility filter, doctor.sh's link pass)
+        # treats a `[[...]]` anywhere on a line as an item reference, so a
+        # decorative one here would be scanned as if it were a real entry.
+        "Items whose `expires` date has passed. Their files are untouched and still",
+        "resolve by wikilink; only their catalog line left the hot `INDEX.md`.",
+        "",
+        "## Memories",
+    ]
+    for name, desc, typ in archived:
+        lines.append(f"- [[{name}]] — {desc}  ({typ})")
+    content = "\n".join(lines) + "\n"
+    return content.encode("utf-8"), len(archived)
+
+
+def build_index_bytes(brain_dir, today=None):
+    """Scan memories/, knowledge/, skills/ and build INDEX.md bytes.
+    Deterministic: sorted alphabetically within each section; no reliance on
+    filesystem iteration order, mtimes, or any other non-content input.
+
+    Expired items (`expires` in the past) are omitted here and listed in
+    INDEX-ARCHIVE.md instead — see build_archive_index_bytes."""
+    today = today or date.today()
+    memories = [
+        (name, desc, typ)
+        for name, desc, typ, fm in _collect_memories(brain_dir)
+        if not is_expired(fm, today)
+    ]
 
     knowledge = []
     know_dir = os.path.join(brain_dir, "knowledge")
@@ -222,7 +415,152 @@ def build_index_bytes(brain_dir):
     return content.encode("utf-8"), len(memories), len(knowledge), len(skills)
 
 
+def is_ancestor(brain_dir, maybe_ancestor, descendant):
+    """True when `maybe_ancestor` is already reachable from `descendant`."""
+    r = git(brain_dir, "merge-base", "--is-ancestor", maybe_ancestor, descendant, check=False)
+    return r.returncode == 0
+
+
+def indexes_are_current(brain_dir):
+    """True when INDEX.md and INDEX-ARCHIVE.md on disk already equal a rebuild.
+
+    Deliberately compares the WORKING-TREE bytes, not a git object: a run that
+    was interrupted after writing the index but before committing it must still
+    count as "needs work", not as "already current".
+    """
+    index_bytes, _, _, _ = build_index_bytes(brain_dir)
+    archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
+
+    index_path = os.path.join(brain_dir, "INDEX.md")
+    if not os.path.isfile(index_path):
+        return False
+    with open(index_path, "rb") as fh:
+        if fh.read() != index_bytes:
+            return False
+
+    archive_path = os.path.join(brain_dir, "INDEX-ARCHIVE.md")
+    if archived_n == 0:
+        return not os.path.isfile(archive_path)
+    if not os.path.isfile(archive_path):
+        return False
+    with open(archive_path, "rb") as fh:
+        return fh.read() == archive_bytes
+
+
 # --- consolidation-lite: mechanical dedup flags -----------------------------
+
+def extract_human_regions(text):
+    """Return human-region bodies in document order (pairwise start/end markers)."""
+    return [m.group(1) for m in HUMAN_REGION_RE.finditer(text)]
+
+
+def human_region_violation(main_text, incoming_text):
+    """Return a reason string when `incoming_text` drops or alters any human
+    region present in `main_text`, else None. Region bodies are compared as
+    multisets so a reorder with verbatim content passes; a file with no human
+    regions on main is never a violation."""
+    main_regions = extract_human_regions(main_text)
+    if not main_regions:
+        return None
+    incoming_regions = extract_human_regions(incoming_text)
+    if len(incoming_regions) < len(main_regions):
+        return "dropped human region(s)"
+    main_counts = {}
+    for region in main_regions:
+        main_counts[region] = main_counts.get(region, 0) + 1
+    incoming_counts = {}
+    for region in incoming_regions:
+        incoming_counts[region] = incoming_counts.get(region, 0) + 1
+    for region, count in main_counts.items():
+        if incoming_counts.get(region, 0) < count:
+            if len(incoming_regions) >= len(main_regions):
+                return "altered human region"
+            return "dropped human region(s)"
+    return None
+
+
+def quarantine_merge_update(brain_dir, provider, rel_path, reason, detail, incoming_text):
+    """Park a rejected merge update under hub/quarantine/ and log to digest.md."""
+    qdir = os.path.join(brain_dir, "hub", "quarantine", provider)
+    os.makedirs(qdir, exist_ok=True)
+    today = date.today().isoformat()
+    safe_name = rel_path.replace(os.sep, "__")
+    dest = os.path.join(qdir, f"{today}-{safe_name}")
+    n = 1
+    root_dest = dest
+    while os.path.exists(dest):
+        n += 1
+        dest = f"{root_dest}.{n}"
+    with open(dest, "w", encoding="utf-8") as fh:
+        fh.write(incoming_text)
+
+    digest_path = os.path.join(brain_dir, "hub", "quarantine", "digest.md")
+    os.makedirs(os.path.dirname(digest_path), exist_ok=True)
+    is_new = not os.path.isfile(digest_path)
+    ts = datetime.now().isoformat(timespec="seconds")
+    with open(digest_path, "a", encoding="utf-8") as fh:
+        if is_new:
+            fh.write("# Quarantine digest\n\n"
+                     "Rejected captures and merge updates land here — nothing is "
+                     "silently dropped.\n\n")
+        fh.write(f"## {ts} — QUARANTINE ({provider})\n")
+        fh.write(f"- file: {os.path.relpath(dest, brain_dir)}\n")
+        fh.write(f"- reason: {reason}\n")
+        fh.write(f"- detail: {detail}\n\n")
+
+
+def files_changed_between(brain_dir, old_ref, new_ref):
+    """Return memory/knowledge/PROFILE paths that differ between two git refs.
+
+    Human regions are an item-body convention, but PROFILE.md carries one too
+    (design-wiki-parity §1: the Boundaries section), and it is projected into every
+    provider surface -- so it is the single highest-value file to protect.
+    ITEM_PROVENANCE_DIRS is read at call time: it is defined further down the file.
+    """
+    scope = ITEM_PROVENANCE_DIRS + ("PROFILE.md",)
+    r = git(brain_dir, "diff", "--name-only", old_ref, new_ref, check=False)
+    changed = []
+    for path in r.stdout.splitlines():
+        if path.startswith(scope):
+            changed.append(path)
+    return changed
+
+
+def apply_human_region_guard(brain_dir, head_before, branch, report):
+    """After one provider branch lands on main, reject any update to an existing
+    item that drops or alters a human region present before the merge."""
+    head_after = git(brain_dir, "rev-parse", "HEAD").stdout.strip()
+    if head_before == head_after:
+        return
+    provider = _branch_provider_name(branch)
+    violations = []
+    for path in files_changed_between(brain_dir, head_before, head_after):
+        prior = _read_ref_path(brain_dir, head_before, path)
+        if prior is None:
+            continue  # new file — human regions pass through untouched
+        # A merge that DELETES the file leaves nothing on disk. Treat it as an
+        # empty body: every human region is "dropped", so the guard restores the
+        # pre-merge copy. Reading it unguarded would raise FileNotFoundError and
+        # abort the whole nightly merge -- the one thing this must never do.
+        abs_path = os.path.join(brain_dir, path)
+        current = read_file(abs_path) if os.path.isfile(abs_path) else ""
+        reason = human_region_violation(prior, current)
+        if not reason:
+            continue
+        detail = f"{path}: {reason} from {branch} merge (kept pre-merge copy)"
+        quarantine_merge_update(
+            brain_dir, provider, path, "human-region-guard", detail, current
+        )
+        git(brain_dir, "checkout", head_before, "--", path, check=False)
+        git(brain_dir, "add", path, check=False)
+        violations.append(detail)
+    if violations:
+        report["human_region_violations"].extend(violations)
+        if has_staged_changes(brain_dir):
+            msg_lines = ["brain(merge): revert human-region-guard violations", ""]
+            msg_lines.extend(f"- {detail}" for detail in violations)
+            git(brain_dir, "commit", "-m", "\n".join(msg_lines), check=False)
+
 
 def find_dupes(brain_dir):
     """Mechanical-only dedup flags (fuzzy/semantic merge is consolidate.md's job):
@@ -288,24 +626,30 @@ def scan_brain_for_secrets(brain_dir):
     """Scan the merged-but-not-yet-committed tree for secret-shaped hits, split
     into two buckets (REVIEW.md P3 #17/egress-scope fix):
 
-      - fail_closed: a hit in a SHARED item (per `_visibility_from_text`: an
-        explicit `visibility: shared`, or well-formed frontmatter with no
-        `visibility:` key at all — the documented absent-field default), in
-        `skills/` (no visibility frontmatter exists for skills, so they're
-        always egress-critical), or in PROFILE.md -> cloud egress must stay
-        strictly gated. The FIRST such hit found is returned (same "abort on
-        first hit" contract as before). An item with NO parseable frontmatter
-        at all classifies as `local` (fail-closed toward hiding, not leaking —
-        see `_visibility_from_text`'s docstring), so it lands in warnings
-        below rather than here; such an item is degenerate enough that
-        `build_index_bytes` already excludes it from INDEX/publish entirely.
-      - warnings: a hit in a LOCAL-visibility item -> never aborts the merge.
+      - fail_closed: a hit in a SHARED item (an explicit `visibility: shared`),
+        in an item carrying NO explicit `visibility:` at all, in `skills/` (no
+        visibility frontmatter exists for skills, so they're always
+        egress-critical), or in PROFILE.md -> cloud egress must stay strictly
+        gated. The FIRST such hit found is returned (same "abort on first hit"
+        contract as before).
+      - warnings: a hit in an explicitly LOCAL item -> never aborts the merge.
         `local` items never reach a cloud provider (never-capture rule +
         the private backup are the real controls there; publish/read/search
         already refuse `local` items to cloud callers), so a secret-shaped
         false positive in local infra prose ("token: stored in the keyring")
         must not block SHARED-item propagation to every provider. ALL such
         hits are collected, not just the first.
+
+    NOTE the deliberate asymmetry with `_visibility_from_text`. That parser
+    now classifies an UNMARKED item as `local`, so routing this split through
+    it alone would quietly move every unmarked secret hit out of fail_closed
+    and into warnings — turning "abort the merge" into "a line in a digest".
+    The warnings bucket is only defensible because a `local` item is KNOWN to
+    be withheld from every egress path; an unmarked item is not known to be
+    anything, because no human has classified it yet. So the demotion requires
+    an EXPLICIT `visibility: local`, which is what `_has_explicit_visibility`
+    below is for. Withholding an item from publish on a default is safe;
+    relaxing a secret gate on the same default is not.
 
     Every egress-critical file is scanned regardless of what's found in
     local-visibility files first (and vice versa) — a local-hit warning must
@@ -330,8 +674,11 @@ def scan_brain_for_secrets(brain_dir):
             if not hit:
                 continue
             rel = os.path.join(sub, fname)
-            visibility = _visibility_from_text(text)
-            if visibility == "local":
+            explicitly_local = (
+                _has_explicit_visibility(text)
+                and _visibility_from_text(text) == "local"
+            )
+            if explicitly_local:
                 warnings.append((rel, mask(hit)))
             elif fail_closed is None:
                 fail_closed = (rel, mask(hit))
@@ -359,15 +706,251 @@ def scan_brain_for_secrets(brain_dir):
     return fail_closed, warnings
 
 
+# Files under hub/quarantine/ that are NOT parked blocks. `.gitkeep` is the
+# tracked directory marker (.gitignore keeps it and ignores everything else), so
+# counting it would report one permanently-pending item in every brain that has
+# the marker — and a count that never reaches zero pins the health check into
+# NEEDS REVIEW forever, which is exactly the "always-red, therefore ignored"
+# signal this sprint is removing.
+QUARANTINE_NON_ITEMS = ("digest.md", ".gitkeep")
+
+
 def count_quarantine_items(brain_dir):
     """Count quarantined blocks under hub/quarantine/ (excluding the digest.md
-    log itself) for the daily digest's summary line."""
+    log and the .gitkeep directory marker) for the daily digest's summary line."""
     qdir = os.path.join(brain_dir, "hub", "quarantine")
     count = 0
     if os.path.isdir(qdir):
         for _root, _dirs, files in os.walk(qdir):
-            count += sum(1 for f in files if f != "digest.md")
+            count += sum(1 for f in files if f not in QUARANTINE_NON_ITEMS)
     return count
+
+
+def write_merge_state(brain_dir, report):
+    """Stamp hub/merge-state.json — the merge's positive liveness assertion.
+
+    Called on exactly one path: a merge that ran to completion. A no-op run
+    counts (the pipeline ran; there was simply nothing to merge), and a run that
+    parked items for review counts (main is merged and publishable). The
+    fail-closed aborts do not call this, so `last_success_epoch` going stale is
+    the signal that the merge stopped working rather than merely stayed quiet.
+    Never raises: a brain on a read-only mount should still get its digest.
+
+    `needs_review_kinds` is the authoritative channel to the owner. Exit 3 is a
+    stderr line in the journal, and the health check used to re-derive a SUBSET
+    of the same fact by grepping the digest — so a renamed add/add twin, a
+    secret-scrub warning on a local item and a reverted provenance violation
+    reached the human through nothing at all while the weekly notification said
+    "brain OK". Kinds, not payloads: see needs_review_kinds.
+    """
+    path = os.path.join(brain_dir, MERGE_STATE_FILE)
+    payload = {
+        "last_success_epoch": int(time.time()),
+        "last_success_iso": datetime.now().isoformat(timespec="seconds"),
+        "quarantine_pending": count_quarantine_items(brain_dir),
+        "needs_review": bool(needs_review_reasons(report)),
+        "needs_review_kinds": needs_review_kinds(report),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError as e:
+        print(f"warning: could not write {MERGE_STATE_FILE}: {e}", file=sys.stderr)
+    return path
+
+
+# The five things a completed merge can park for a human, as
+# (report key, human wording). ONE list, so a sixth reason added here reaches
+# both the digest text and hub/merge-state.json — and therefore the health
+# check — without anyone remembering to update a second place. Three of these
+# (renamed, scrub_warnings, provenance_violations) write no quarantine file and
+# appear in no line the health check greps, so before merge-state carried the
+# kinds they reached the owner through NO channel at all: the merge exited 3,
+# loreport-health computed state=ok, deleted the banner and pushed the weekly
+# all-clear.
+NEEDS_REVIEW_KINDS = [
+    ("profile_conflicts", "PROFILE conflicts"),
+    ("renamed", "add/add renames"),
+    ("scrub_warnings", "secret-scrub warnings on local items"),
+    ("provenance_violations", "provenance violations reverted"),
+    ("human_region_violations", "human-region violations quarantined"),
+]
+
+
+def needs_review_kinds(report):
+    """Which subsystems this completed merge parked for a human — KEYS ONLY.
+
+    Deliberately not the payloads. This is what goes into
+    hub/merge-state.json, and `scrub_warnings`' payload carries the matched
+    secret fragment; merge-state.json is untracked-but-not-gitignored in brains
+    that predate this version, so a payload written there is a secret fragment
+    sitting loose in the brain repo. The health check names the subsystem and
+    points at the digest for the detail.
+    """
+    return [key for key, _label in NEEDS_REVIEW_KINDS if report.get(key)]
+
+
+def needs_review_reasons(report):
+    """The things a completed merge parks for a human, named individually.
+
+    Returned as a list rather than a bool so the caller can say WHICH subsystem
+    is waiting. "needs review" with no subsystem is the wording that got read as
+    "the merge failed".
+    """
+    return [f"{label}: {report[key]}"
+            for key, label in NEEDS_REVIEW_KINDS if report.get(key)]
+
+
+def run_synthesis_report(brain_dir, dry_run):
+    """Run the cluster detector and park its report for the health check.
+
+    REPORT-ONLY by construction: `synth_detect` only reads, this function only
+    writes `hub/synthesis-report.json` (a gitignored report artifact, never brain
+    content), and the merge does nothing with the result but print it. Filing a
+    proposal as a `knowledge/` page is the post-calibration step and is not
+    implemented anywhere yet — see design-wiki-parity §2.
+
+    Never raises: a detector that crashes must not take the nightly merge with it.
+    """
+    try:
+        result = synth_detect.detect_clusters(brain_dir)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "clusters": [], "warnings": []}
+
+    if not dry_run:
+        payload = dict(result)
+        payload["generated"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            with open(os.path.join(brain_dir, SYNTHESIS_REPORT_FILE), "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+        except OSError as e:
+            result = dict(result)
+            result["error"] = f"could not write {SYNTHESIS_REPORT_FILE}: {e}"
+    return result
+
+
+def run_nightly_review(brain_dir, synthesis, dry_run):
+    """Give the detector's proposals a disposition queue, and reconcile drift.
+
+    Still files nothing into `memories/` or `knowledge/`: a proposal becomes a
+    DECISION on `hub/proposals/ledger.json`, never an edit. What changes versus
+    the report-only era is that the decision is now tracked, dated, and — once it
+    goes stale — graded a failure by the health check, so proposals stop
+    evaporating into a digest line nobody acts on.
+
+    Never raises, for the same reason run_synthesis_report doesn't: a review step
+    must not take the nightly merge down with it. A review that dies writes no
+    dated artifact, and `loreport-health` section 9 turns that silence into a
+    failure — which is the only reason swallowing the exception here is safe.
+    """
+    try:
+        return nightly_review.run(brain_dir, synthesis, dry_run=dry_run)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "ledger_changed": False}
+
+
+def stage_ledger(brain_dir):
+    """Stage hub/proposals/ledger.json, if it exists.
+
+    UNCONDITIONAL, not keyed on `ledger_changed`. That flag means "the nightly
+    refresh added a proposal" — but `nightly_review.py --dispose` writes the
+    ledger OUT OF BAND, so between the owner recording a decision in the
+    afternoon and the merge running at night the file is a tracked, MODIFIED
+    file with ledger_changed False. Staging only on ledger_changed left that
+    decision uncommitted indefinitely, and (once the file is tracked) left the
+    tree permanently dirty for loreport-sync's post-merge guard. `git add` on an
+    unchanged file is a no-op, so there is no cost to always staging.
+    """
+    if os.path.isfile(os.path.join(brain_dir, nightly_review.LEDGER_FILE)):
+        git(brain_dir, "add", nightly_review.LEDGER_FILE, check=False)
+
+
+def commit_ledger_on_noop(brain_dir, report):
+    """Commit hub/proposals/ledger.json on a night with nothing else to commit.
+
+    WHY THIS EXISTS. The ledger is TRACKED because `first_seen` and the human
+    dispositions must survive a re-clone — a clock that does not survive makes
+    the overdue check, the only assertion in this system that forces a decision
+    rather than hoping for one, quietly fail open. But the staging line rides
+    the INDEX commit, which is inside `if not dry_run and not noop:`, and a
+    no-op is "most days". Measured on a synthetic brain: run 1 reported
+    noop=True, ledger_changed=True, 1 proposal detected — and
+    `git ls-files hub/proposals/ledger.json` came back EMPTY. Run 2 reported
+    ledger_changed=False, so it was never staged again. The proposals and every
+    disposition recorded against them lived only as an untracked local file,
+    never pushed to the private remote and gone on re-clone, at which point
+    every rejected proposal returns as pending and every clock resets to zero.
+
+    Both escape hatches written into the old comment were false: new proposals
+    do NOT require new items (the first night after deploy detects clusters in a
+    brain that has not changed in weeks), and `bin/loreport-sync` has no
+    repo-root `git add -A` to sweep it up — both of its `git add` calls are
+    path-scoped (`prompts skills ENGINE-VERSION .gitignore loreport.conf
+    .obsidian`, and `hub/published`).
+
+    IT NEEDS ITS OWN COMMIT, not just its own `git add`. Staging without
+    committing is worse than the bug: `bin/loreport-sync`'s post-merge guard
+    reads `git status --porcelain --untracked-files=no`, which DOES see staged
+    changes, so the sync would HALT every single night.
+
+    Returns True if a commit was made. On a failed commit it unstages, so the
+    failure is a missing commit rather than a permanently halted nightly sync.
+    """
+    stage_ledger(brain_dir)
+    staged = git(brain_dir, "diff", "--cached", "--name-only",
+                 check=False).stdout.strip()
+    if not staged:
+        # The common quiet night: nothing new, nothing decided. No commit, and
+        # nothing left in the index for the sync guard to trip over.
+        return False
+    res = git(brain_dir, "commit", "-m",
+              "brain(review): record proposal dispositions", check=False)
+    if res.returncode != 0:
+        # Leave nothing staged. A staged-but-uncommitted tree is the state that
+        # halts the sync nightly, and a lost ledger update is recoverable on the
+        # next run while a halted sync is not self-clearing.
+        git(brain_dir, "reset", "-q", "--", nightly_review.LEDGER_FILE,
+            check=False)
+        report.setdefault("conflict_notes", []).append(
+            "could not commit hub/proposals/ledger.json: "
+            + (res.stderr or "").strip())
+        return False
+    return True
+
+
+def format_synthesis_lines(synthesis):
+    """Digest lines for the synthesis section. Says REPORT-ONLY on every run so a
+    reader never mistakes a proposal for something that was filed.
+
+    Still accurate under the disposition ledger: the DETECTOR files nothing. The
+    proposals it emits are entered on the ledger as decisions awaiting an answer
+    (see format_nightly_lines), which is not the same as a memory being written."""
+    if not synthesis:
+        return ["- Synthesis proposals (REPORT-ONLY, none filed): detector did not run"]
+    if synthesis.get("error"):
+        return [f"- Synthesis proposals (REPORT-ONLY, none filed): detector error — {synthesis['error']}"]
+
+    clusters = synthesis.get("clusters") or []
+    warnings = synthesis.get("warnings") or []
+    lines = [
+        f"- Synthesis proposals (REPORT-ONLY, none filed): {len(clusters)} "
+        f"from {synthesis.get('item_count', 0)} items"
+    ]
+    for cluster in clusters:
+        lines.append(
+            f"    - {cluster['topic']} [{cluster['signal']}] "
+            f"members: {', '.join(cluster['members'])}"
+        )
+    if warnings:
+        lines.append(f"- Detector health: {len(warnings)} warning(s)")
+        for warning in warnings:
+            lines.append(
+                f"    - {warning['reason']}: topic={warning['topic']} "
+                f"({len(warning['members'])} members, {warning['signal']})"
+            )
+    return lines
 
 
 def write_digest(brain_dir, today, report):
@@ -396,6 +979,13 @@ def write_digest(brain_dir, today, report):
         f"- Scrub warnings (local-visibility hits; merge continued): "
         f"{scrub_warnings if scrub_warnings else 'none'}"
     )
+    human_violations = report.get("human_region_violations") or []
+    lines.append(
+        f"- Human-region violations (incoming update quarantined, main kept): "
+        f"{human_violations if human_violations else 'none'}"
+    )
+    lines.extend(format_synthesis_lines(report.get("synthesis")))
+    lines.extend(nightly_review.format_lines(report.get("nightly_review")))
     lines.append(f"- Quarantine items pending review: {count_quarantine_items(brain_dir)}")
     m, k, s = report["index_counts"]
     lines.append(f"- INDEX rebuilt: {m + k + s} items ({m} memories, {k} knowledge, {s} skills)")
@@ -749,6 +1339,7 @@ def do_merge(brain_dir, dry_run):
         "ff_skipped": [],
         "conflict_notes": [],
         "provenance_violations": [],
+        "human_region_violations": [],
         "backup_tag": None,
     }
 
@@ -767,9 +1358,43 @@ def do_merge(brain_dir, dry_run):
         # two runs start in the same second, `git tag` (no `-f`) refuses the
         # collision and the loop below picks the next free `-N` suffix rather
         # than silently overwriting the earlier run's backup.
+        git(brain_dir, "fetch", "--all", check=False)
+
+        # Compare-and-swap fast-forward (REVIEW.md #3/#5): record each
+        # provider branch's SHA now, before any merging happens. At the
+        # final ff step we only force a branch onto the new main if it
+        # STILL points at the SHA we actually merged — if a capture landed
+        # on it mid-merge, its extra commit(s) are left alone (main is
+        # still their ancestor, so they merge cleanly next run) instead of
+        # being silently discarded by a blind `branch -f`.
+        pre_merge_shas = {}
+        for branch in PROVIDER_ORDER:
+            if branch_exists(brain_dir, branch):
+                pre_merge_shas[branch] = git(brain_dir, "rev-parse", branch).stdout.strip()
+
+        # NO-OP DETECTION. This runs daily from a timer, and on most days nobody
+        # captured anything. Without this check every one of those days still
+        # produced two commits — "drop INDEX.md" and "rebuild INDEX.md" — plus a
+        # backup tag, for byte-identical content. That is not just untidy: it
+        # buries the days something REAL happened under a wall of noise, so the
+        # log stops being scannable exactly when you need to scan it, and it
+        # makes `git log INDEX.md` useless for answering "when did the catalog
+        # actually change?".
+        #
+        # A run is a no-op only when BOTH are true: nothing is left to merge
+        # (every provider branch is already an ancestor of main), and the
+        # committed indexes already equal what a rebuild would produce. The
+        # second half matters — an index can be stale from an interrupted run
+        # even when no branch has moved, and skipping the rebuild then would
+        # leave it wrong forever.
+        nothing_to_merge = all(is_ancestor(brain_dir, sha, orig_head)
+                               for sha in pre_merge_shas.values())
+        noop = not dry_run and nothing_to_merge and indexes_are_current(brain_dir)
+        report["noop"] = noop
+
         tag_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         tag_name = f"pre-merge/{tag_stamp}"
-        if not dry_run:
+        if not dry_run and not noop:
             attempt = 0
             while True:
                 candidate = tag_name if attempt == 0 else f"{tag_name}-{attempt}"
@@ -787,19 +1412,6 @@ def do_merge(brain_dir, dry_run):
                         f"{attempt} attempts: {tag_res.stderr.strip()}"
                     )
             report["backup_tag"] = tag_name
-        git(brain_dir, "fetch", "--all", check=False)
-
-        # Compare-and-swap fast-forward (REVIEW.md #3/#5): record each
-        # provider branch's SHA now, before any merging happens. At the
-        # final ff step we only force a branch onto the new main if it
-        # STILL points at the SHA we actually merged — if a capture landed
-        # on it mid-merge, its extra commit(s) are left alone (main is
-        # still their ancestor, so they merge cleanly next run) instead of
-        # being silently discarded by a blind `branch -f`.
-        pre_merge_shas = {}
-        for branch in PROVIDER_ORDER:
-            if branch_exists(brain_dir, branch):
-                pre_merge_shas[branch] = git(brain_dir, "rev-parse", branch).stdout.strip()
 
         # Provenance gate (bug fix): figure out, from each provider branch's
         # not-yet-on-main commits and their Trust: trailers, which
@@ -817,15 +1429,25 @@ def do_merge(brain_dir, dry_run):
             # removal must land in its own commit before any branch merge is
             # attempted.) It is regenerated wholesale in step 6, after every
             # provider branch has been merged in.
-            index_path = os.path.join(brain_dir, "INDEX.md")
-            if os.path.exists(index_path) and not dry_run:
-                git(brain_dir, "rm", "-f", "--quiet", "INDEX.md", check=False)
+            # INDEX-ARCHIVE.md is the same kind of artifact and gets the same
+            # treatment — it is rebuilt from the items' `expires` dates, so a
+            # hand-merged version of it could only ever be wrong.
+            # Only when a merge is actually going to happen. Dropping the
+            # indexes exists to keep them out of merge resolution; with nothing
+            # to merge it would spend a delete commit and a restore commit to
+            # arrive back at the same bytes — the churn this guard removes.
+            derived = [p for p in ("INDEX.md", "INDEX-ARCHIVE.md")
+                       if os.path.exists(os.path.join(brain_dir, p))]
+            if derived and not dry_run and not nothing_to_merge:
+                git(brain_dir, "rm", "-f", "--quiet", *derived, check=False)
                 if has_staged_changes(brain_dir):
                     git(brain_dir, "commit", "-m", "brain(merge): drop INDEX.md (derived artifact)", check=False)
 
             for branch in PROVIDER_ORDER:
-                if not branch_exists(brain_dir, branch):
+                if noop or not branch_exists(brain_dir, branch):
                     continue
+
+                head_before_branch = git(brain_dir, "rev-parse", "HEAD").stdout.strip()
 
                 r = git(brain_dir, "merge", "--no-commit", "--no-ff", branch, check=False)
 
@@ -840,7 +1462,9 @@ def do_merge(brain_dir, dry_run):
                         write_digest(brain_dir, today, report)
                     git(brain_dir, "merge", "--abort", check=False)
                     git(brain_dir, "reset", "--hard", orig_head, check=False)
-                    sys.exit(1)
+                    # BROKEN: nothing merged, main rolled back. No merge-state
+                    # stamp -- this run must not make the pipeline look alive.
+                    sys.exit(EXIT_BROKEN)
 
                 if r.returncode != 0:
                     for f in conflicted_files(brain_dir):
@@ -854,13 +1478,14 @@ def do_merge(brain_dir, dry_run):
                             report["profile_conflicts"].append(f)
                             git(brain_dir, "checkout", "--ours", "--", f, check=False)
                             git(brain_dir, "add", f, check=False)
-                        elif base == "INDEX.md":
+                        elif base in ("INDEX.md", "INDEX-ARCHIVE.md"):
                             git(brain_dir, "rm", "-f", f, check=False)
                         else:
                             resolve_conflicted_file(brain_dir, branch, f, report, tag_name)
 
                 if has_staged_changes(brain_dir) or merge_in_progress(brain_dir):
                     git(brain_dir, "commit", "--no-edit", "-m", f"brain(merge): {branch} -> main", check=False)
+                apply_human_region_guard(brain_dir, head_before_branch, branch, report)
                 report["merged"].append(branch)
 
             # Provenance gate: revert any path an untrusted commit touched
@@ -887,17 +1512,60 @@ def do_merge(brain_dir, dry_run):
                 # may not exist yet in --dry-run mode, where no commit is meant
                 # to persist regardless).
                 git(brain_dir, "reset", "--hard", orig_head, check=False)
-                sys.exit(1)
+                # BROKEN, same as above: the merge is gone, so liveness is not
+                # stamped and the freshness budget will start counting.
+                sys.exit(EXIT_BROKEN)
             elif report["scrub_warnings"]:
                 report["scrub"] = "PASS (local-visibility warnings — see scrub_warnings)"
 
+            # Synthesis detection (design-wiki-parity §2) — REPORT-ONLY during the
+            # 2-3 week calibration window. The detector is a pure read: it proposes
+            # topics into the digest and files nothing, and nothing downstream of
+            # here may create a knowledge/ page from its output. It also must never
+            # be able to fail a merge, so a detector bug degrades to a digest note.
+            report["synthesis"] = run_synthesis_report(brain_dir, dry_run)
+
+            # The detector's consumer. Enters each proposal on the disposition
+            # ledger and writes hub/nightly/<date>.json — the dated proof that
+            # the review ran, which section 9 of loreport-health requires.
+            report["nightly_review"] = run_nightly_review(
+                brain_dir, report["synthesis"], dry_run)
+
             # Deterministic INDEX rebuild.
             index_bytes, m, k, s = build_index_bytes(brain_dir)
+            archive_bytes, archived_n = build_archive_index_bytes(brain_dir)
             report["index_counts"] = (m, k, s)
-            if not dry_run:
+            report["archived_count"] = archived_n
+            if not dry_run and not noop:
                 with open(os.path.join(brain_dir, "INDEX.md"), "wb") as fh:
                     fh.write(index_bytes)
                 git(brain_dir, "add", "INDEX.md", check=False)
+
+                # The disposition ledger rides the INDEX commit. It is TRACKED —
+                # it holds human decisions and the first_seen clock the overdue
+                # check measures from, and a clock that lives only in a gitignored
+                # file resets on every re-clone, which would make the one assertion
+                # that forces a decision quietly fail open. It is written only when
+                # a proposal is added or decided, so unlike merge-state.json it
+                # does not dirty the tree nightly. When the night was NOT a no-op
+                # it rides this commit; when it WAS, commit_ledger_on_noop() below
+                # gives it its own — see those two functions for why both paths
+                # exist and why staging is unconditional.
+                stage_ledger(brain_dir)
+
+                # The cold shelf only exists once something is actually on it.
+                # A brain that has never expired an item gets no empty
+                # INDEX-ARCHIVE.md, and one whose last archived item was
+                # revived loses the file again rather than keeping a
+                # misleading empty catalog around.
+                archive_path = os.path.join(brain_dir, "INDEX-ARCHIVE.md")
+                if archived_n:
+                    with open(archive_path, "wb") as fh:
+                        fh.write(archive_bytes)
+                    git(brain_dir, "add", "INDEX-ARCHIVE.md", check=False)
+                elif os.path.isfile(archive_path):
+                    git(brain_dir, "rm", "-f", "--quiet", "INDEX-ARCHIVE.md", check=False)
+
                 git(brain_dir, "commit", "-m", "brain(merge): rebuild INDEX.md", check=False)
 
                 # Fast-forward each provider branch to the new main — but
@@ -914,10 +1582,23 @@ def do_merge(brain_dir, dry_run):
                         report["ff_skipped"].append(
                             f"{branch} advanced during merge; left for next run"
                         )
-            else:
+            elif dry_run:
                 # --dry-run commits nothing: undo every merge commit made while
                 # planning the report, restoring main to exactly where it started.
                 git(brain_dir, "reset", "--hard", orig_head, check=False)
+            else:
+                # A QUIET NIGHT — "most days", by this function's own comment.
+                # Nothing was merged and no tag was taken, so there is nothing
+                # to roll back; the reset above is for --dry-run only.
+                #
+                # It must NOT run here. `reset --hard` reverts tracked files,
+                # and hub/proposals/ledger.json is tracked on purpose: it is
+                # where `--dispose` writes a human decision and where the
+                # first_seen clock the overdue check measures from lives. A
+                # reset on a quiet night would throw away the disposition the
+                # owner recorded that afternoon.
+                report["ledger_committed"] = commit_ledger_on_noop(
+                    brain_dir, report)
         except Exception:
             # ANY exception anywhere in the merge/scrub/index-rebuild/
             # fast-forward section (including a git timeout, or the scrub
@@ -934,28 +1615,42 @@ def do_merge(brain_dir, dry_run):
     # digest file and always exits 0, exactly like before this phase. Only a
     # real run's digest/exit-code reflects what actually landed on `main`.
     if dry_run:
-        return
+        return report
 
     write_digest(brain_dir, today, report)
 
-    # Nonzero exit whenever something needs a human's attention (REVIEW.md
-    # #15): PROFILE conflicts, add/add renames, scrub warnings, or
-    # provenance-gate violations. This runs AFTER the lock is released and
-    # outside the try/except above -- it's a reporting decision on an
-    # already-successful merge, never confused with the fail-closed abort
-    # path (which exits 1 from inside the lock, above).
-    if (
-        report["profile_conflicts"]
-        or report["renamed"]
-        or report["scrub_warnings"]
-        or report["provenance_violations"]
-    ):
-        sys.exit(1)
+    # The merge completed. Stamp liveness BEFORE deciding the exit code, because
+    # "items need review" is an outcome of a healthy run, not a reason to look
+    # dead: a brain with one un-triaged quarantine file would otherwise go stale
+    # forever, since nothing decrements that count without a human.
+    write_merge_state(brain_dir, report)
+
+    # EXIT_NEEDS_REVIEW, not EXIT_BROKEN. Everything merged; main is publishable
+    # and downstream (loreport-sync) must go on to publish and push. This runs
+    # AFTER the lock is released and outside the try/except above -- it is a
+    # reporting decision on an already-successful merge, and must never be
+    # confused with the fail-closed abort path, which exits EXIT_BROKEN from
+    # inside the lock, above, having rolled main back.
+    reasons = needs_review_reasons(report)
+    if reasons:
+        print("NEEDS REVIEW (merge completed, main is publishable):")
+        for reason in reasons:
+            print(f"  - {reason}")
+        sys.exit(EXIT_NEEDS_REVIEW)
+
+    return report
 
 
 def print_report(today, r):
     print(f"=== brain_merge report {today} ===")
-    print(f"Backup tag: {r.get('backup_tag') or 'none (--dry-run)'}")
+    if r.get("noop"):
+        # Say so explicitly. A silent "nothing happened" run is indistinguishable
+        # from a broken one, and this path is the common case on a quiet day.
+        print("No-op: nothing to merge and the indexes are already current — "
+              "no tag, no commits.")
+        print("Backup tag: none (no-op — nothing to back up)")
+    else:
+        print(f"Backup tag: {r.get('backup_tag') or 'none (--dry-run)'}")
     print(f"Merged: {', '.join(r['merged']) if r['merged'] else 'none'} -> main")
     print(f"Conflicts renamed: {r['renamed'] if r['renamed'] else 'none'}")
     print(f"PROFILE conflicts (human review required): {r['profile_conflicts'] if r['profile_conflicts'] else 'none'}")
@@ -967,7 +1662,13 @@ def print_report(today, r):
         print(f"Provenance violations (untrusted commit touched a path it doesn't own, reverted): {r['provenance_violations']}")
     else:
         print("Provenance violations: none")
+    if r.get("human_region_violations"):
+        print(f"Human-region violations (incoming update quarantined, main kept): {r['human_region_violations']}")
+    else:
+        print("Human-region violations: none")
     print(f"Near-dupes flagged: {r['near_dupes'] if r['near_dupes'] else 'none'}")
+    for line in format_synthesis_lines(r.get("synthesis")):
+        print(line.lstrip("- "))
     print(f"Secret-scrub: {r['scrub']}")
     if r.get("scrub_warnings"):
         print(f"Scrub warnings (local-visibility hits, merge continued): {r['scrub_warnings']}")

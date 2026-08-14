@@ -1,0 +1,19 @@
+<MEMORY>
+name: project-beta-followup-pending
+description: A follow-up conversation parked mid-session on 2026-08-04, to be resumed at the next checkpoint - an open commitment, not yet done
+type: project
+visibility: local
+---
+On 2026-08-04, mid-session, the beta design conversation was parked to be resumed after the
+next checkpoint in the current sprint.
+
+The thread lives at
+`/srv/example/project-beta/docs/design-notes.md`
+- a brainstorm, explicitly not yet ruled on.
+
+Three questions were open when it stopped: how far the guardrails scale, what the harness
+costs at the next size up, and which of the two layouts survives review.
+
+Raise this at the next checkpoint rather than waiting to be asked.
+See [[feedback-plan-review-act]].
+</MEMORY>

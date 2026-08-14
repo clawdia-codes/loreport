@@ -1,0 +1,1045 @@
+#!/usr/bin/env bash
+# Loreport health check — consumer of last resort (design-08).
+# Read-only checks; set -uo pipefail without -e so every check runs.
+set -uo pipefail
+
+usage() {
+  cat <<'USAGE'
+usage: loreport-health [--config PATH] [--pasted]
+
+  --config PATH   instance config (default: ./loreport.conf)
+  --pasted        record that hub/surface-chatgpt.md was pasted, then exit
+  -h, --help      this message
+
+Required config keys: LOREPORT_BRAIN, LOREPORT_ENGINE
+Optional:             LOREPORT_NOTIFY, LOREPORT_BANNER,
+                      LOREPORT_MERGE_MAX_AGE_HOURS (default 36)
+
+Exit codes: 0 = healthy (items may be pending review — that is not a failure),
+            1 = unhealthy and already reported, 2 = the check could not start.
+USAGE
+}
+
+CONFIG="./loreport.conf"
+DO_PASTED=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pasted) DO_PASTED=1; shift ;;
+    --config) CONFIG="${2:-}"; shift 2 || true ;;
+    --config=*) CONFIG="${1#*=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "loreport-health: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# A missing config is fatal, not a fallback. This check's whole job is to be the
+# consumer of last resort, so the one thing it must never do is run against a
+# guessed brain and report it healthy. The previous version defaulted BRAIN to
+# $PWD; under systemd that is $HOME, where every path below silently resolves to
+# nothing. Refusing to start is loud, and loud is the point.
+if [ ! -r "$CONFIG" ]; then
+  echo "loreport-health: config not found or unreadable: $CONFIG" >&2
+  echo "loreport-health: pass --config PATH, or run from a brain containing loreport.conf" >&2
+  exit 2
+fi
+
+# shellcheck source=/dev/null
+. "$CONFIG"
+
+# BRAIN and FRAMEWORK get no defaults for the same reason: a wrong-but-plausible
+# value here IS the silent-green failure. :? aborts on unset or empty, which
+# matters because this script runs without -e and would otherwise sail past.
+# ⚠ EXIT 2, NOT 1, AND THAT IS THE WHOLE POINT. These used to be `${VAR:?msg}`,
+# which aborts a non-interactive bash with status **1** — the same code this
+# script uses for "brain unhealthy, already reported". units/loreport-health.service
+# sets SuccessExitStatus=1 so an unhealthy brain is not logged as a broken unit,
+# so a MISCONFIGURED run was being recorded by systemd as a SUCCESS: the weekly
+# timer stayed green while the check had not examined anything at all. The unit's
+# own comment asserted these "keep their own codes (2, and 127 …)"; measured, it
+# was 1. Exit 2 matches the unreadable-config branch a few lines above and
+# scripts/loreport-audit's convention, and is outside SuccessExitStatus=.
+if [ -z "${LOREPORT_BRAIN:-}" ]; then
+  echo "loreport-health: LOREPORT_BRAIN not set in $CONFIG" >&2
+  exit 2
+fi
+if [ -z "${LOREPORT_ENGINE:-}" ]; then
+  echo "loreport-health: LOREPORT_ENGINE not set in $CONFIG" >&2
+  exit 2
+fi
+BRAIN="$LOREPORT_BRAIN"
+FRAMEWORK="$LOREPORT_ENGINE"
+for _d in "$BRAIN" "$FRAMEWORK"; do
+  if [ ! -d "$_d" ]; then
+    echo "loreport-health: not a directory: $_d (check $CONFIG)" >&2
+    exit 2
+  fi
+done
+# These two do have honest defaults — a banner in the standard location, and no
+# notifier at all. Neither can fake a healthy brain.
+BANNER="${LOREPORT_BANNER:-${HOME}/.config/loreport/health-report}"
+TG_NOTIFY="${LOREPORT_NOTIFY:-}"
+# Freshness budget for the nightly merge. 36h, not 24h: the merge runs once a
+# night, so a 24h budget goes red on any single late run, a reboot, or a DST
+# shift, and a check that cries wolf gets muted. 36h still catches "it did not
+# run last night" by the following evening.
+MERGE_MAX_AGE_HOURS="${LOREPORT_MERGE_MAX_AGE_HOURS:-36}"
+# Longest push notification this script will send. The per-item name list is
+# already capped in hub/quarantine_report.py; this is the outer guard so that no
+# future addition to a message can silently push the reassuring half of it off a
+# phone screen.
+#
+# Overridable so the clamp itself is testable: a test that has to build a
+# naturally-400-char message ends up asserting on the fixture's arithmetic
+# rather than on the clamp, and passes silently the day a name gets shorter.
+NOTIFY_MAX_CHARS="${LOREPORT_NOTIFY_MAX_CHARS:-400}"
+
+for d in "$BRAIN" "$FRAMEWORK"; do
+  [ -d "$d" ] || { echo "loreport-health: not a directory: $d (check $CONFIG)" >&2; exit 2; }
+done
+
+HEALTH_STATE="${BRAIN}/hub/health-state.json"
+MANIFEST="${BRAIN}/hub/projection-manifest.json"
+MERGE_STATE="${BRAIN}/hub/merge-state.json"
+NOW=$(date +%s)
+
+# Three states, not one. This check used to collapse "the merge blew up",
+# "nothing has merged in days" and "two files are parked for you to look at"
+# into a single line reading `Loreport health FAIL: merge digest needs review`.
+# On 2026-08-10 two separate readers took that to mean the merge had failed and
+# reported the brain as stuck for three days; it had merged and published every
+# night. Failures and pending-review items are therefore kept in separate lists,
+# rendered separately, worded separately, and only failures set the exit code.
+failures=()
+fixes=()
+impacts=()
+sevs=()
+reviews=()
+review_fixes=()
+review_details=()
+
+# BROKEN or STALE: something is not working. Sets the banner, the FAIL notice
+# and exit 1.
+# $3 = IMPACT (optional): what this means for the reader's memories, in plain
+# words. It exists because the person receiving this is often on a phone and NOT
+# in a prepared state of mind, and the first question anyone asks on seeing an
+# alert is "how bad is this — am I losing anything?" A raw internal failure
+# string cannot answer that, and leaving it unanswered is what makes an alert
+# feel alarming and unactionable at the same time.
+#
+# The DEFAULT is the honest common case and is deliberately reassuring, because
+# it is deliberately TRUE: almost every failure here is a stalled pipeline, and
+# a stalled pipeline loses nothing — captures keep committing to provider
+# branches and merge later. Anything where that is NOT true (an exposure) must
+# pass its own impact and say so.
+note_failure() {
+  failures+=("$1")
+  fixes+=("$2")
+  impacts+=("${3:-Nothing is lost — your saved memories are safe and new ones are still being recorded. What has stopped is the automatic upkeep.}")
+  # $4 = severity rank. 1 = this is about PRIVACY or data exposure; 0 = upkeep.
+  # The notification can only lead with ONE failure, and leading with whichever
+  # happened to be checked first is how the serious one hides behind the dull
+  # one: a "secret found, publishing stopped" alert reached the phone as
+  # "(+2 more)" behind "the nightly tidy-up has never completed". The headline
+  # is now the HIGHEST-severity failure, not the first.
+  sevs+=("${4:-0}")
+}
+
+# NEEDS REVIEW: the pipeline is healthy and nothing is blocked; a human owes it
+# a decision. Never sets the exit code, and its wording must say so — a reader
+# who sees this must not be able to mistake it for a merge that failed.
+#
+# $3 is an OPTIONAL multi-line detail block, printed in the banner only. "Open a
+# file and resolve it" is not something a reader can act on; the detail block
+# names each pending item — name, type, visibility, its own description — and
+# carries a copy-pasteable command per outcome. It is deliberately NOT part of
+# the state-change signature: a reworded description must not re-page, while the
+# item set changing (which lands in $1) must.
+note_review() {
+  reviews+=("$1")
+  review_fixes+=("$2")
+  review_details+=("${3:-}")
+}
+
+# Enumerate hub/quarantine/ for the alert. Captured into a variable and used as
+# an argument — NEVER piped into a `while read` that calls note_review, because
+# a pipe runs the loop in a subshell and every collected message is discarded
+# when it exits (checks 3-4 in this file already had to be rewritten for that).
+# The helper exits 0 unconditionally and renders its own errors, so a missing
+# report degrades to one explanatory line rather than a traceback in the banner.
+#
+# A MISSING or crashed helper must SAY SO. Returning empty here would leave the
+# review line's "each block below carries a show/accept/discard command" sitting
+# over nothing, and the notification pointing the reader at that empty banner —
+# a skipped step reporting success, which is the exact shape this file's header
+# refuses. Name the path that could not be run instead.
+QUARANTINE_REPORT="$FRAMEWORK/hub/quarantine_report.py"
+quarantine_detail() {
+  if [ ! -f "$QUARANTINE_REPORT" ]; then
+    printf '    (no per-block detail: %s is missing — this engine checkout is older than the alert that references it; list %s/hub/quarantine/ by hand)\n' \
+      "$QUARANTINE_REPORT" "$BRAIN"
+    return 0
+  fi
+  local out rc=0
+  out=$(python3 "$QUARANTINE_REPORT" --brain-dir "$BRAIN" --engine-dir "$FRAMEWORK" \
+    --digest-count "${1:-}" --mode banner 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    printf '    (no per-block detail: %s exited %s — list %s/hub/quarantine/ by hand)\n' \
+      "$QUARANTINE_REPORT" "$rc" "$BRAIN"
+    return 0
+  fi
+  printf '%s\n' "$out"
+}
+quarantine_names() {
+  [ -f "$QUARANTINE_REPORT" ] || return 0
+  python3 "$QUARANTINE_REPORT" --brain-dir "$BRAIN" --mode names 2>/dev/null || true
+}
+
+tg_notify() {
+  local msg="$1"
+  shift || true
+  [ -x "$TG_NOTIFY" ] && "$TG_NOTIFY" "$msg" "$@" >/dev/null 2>&1 || true
+}
+
+index_item_count() {
+  # `grep -c` prints 0 AND exits 1 when it matches nothing, so the old
+  # `|| echo 0` emitted the string "0\n0" on an empty INDEX — which then blew up
+  # the baseline writer with a ValueError and left check 5 crashed but silent
+  # (this script runs without -e). Capture, then substitute only on failure.
+  local n
+  n=$(grep -c '\[\[[^]]\+\]\]' "$BRAIN/INDEX.md" 2>/dev/null) || n=0
+  printf '%s' "${n:-0}"
+}
+
+json_get() {
+  json_get_from "$HEALTH_STATE" "$1"
+}
+
+json_get_from() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    print("")
+    raise SystemExit(0)
+cur = data
+for part in key.split("."):
+    if not isinstance(cur, dict) or part not in cur:
+        print("")
+        raise SystemExit(0)
+    cur = cur[part]
+print(cur if cur is not None else "")
+PY
+}
+
+json_set_pasted() {
+  local surface="$BRAIN/hub/surface-chatgpt.md"
+  python3 - "$HEALTH_STATE" "$surface" <<'PY'
+import hashlib, json, os, sys, time
+
+state_path, surface_path = sys.argv[1], sys.argv[2]
+begin = "<!-- loreport:begin -->"
+end = "<!-- loreport:end -->"
+try:
+    with open(surface_path, encoding="utf-8") as fh:
+        text = fh.read()
+except OSError:
+    print("error: cannot read surface", file=sys.stderr)
+    raise SystemExit(1)
+if begin in text and end in text:
+    _, rest = text.split(begin, 1)
+    inner, _ = rest.split(end, 1)
+    payload = inner.strip("\n") + "\n"
+else:
+    payload = text
+digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["chatgpt_pasted"] = {
+    "region_hash": f"sha256:{digest}",
+    "recorded_epoch": int(time.time()),
+}
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+print(f"recorded ChatGPT paste hash sha256:{digest}")
+PY
+}
+
+region_hash_file() {
+  local path="$1" mode="$2"
+  python3 - "$path" "$mode" "$FRAMEWORK/hub" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[3])
+from project import region_hash
+path, mode = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as fh:
+    text = fh.read()
+print(region_hash(text, mode))
+PY
+}
+
+if [ "$DO_PASTED" -eq 1 ]; then
+  json_set_pasted
+  exit 0
+fi
+
+# --- 1. Sync ran recently ----------------------------------------------------
+last_main_ct=$(git -C "$BRAIN" log -1 --format=%ct main 2>/dev/null || echo 0)
+if [ "$last_main_ct" -eq 0 ] || [ $((NOW - last_main_ct)) -gt $((48 * 3600)) ]; then
+  note_failure "your memory brain has not synced for 2+ days (brain sync stale)" "run or inspect loreport-brain-sync.service / sync.sh"
+fi
+
+# --- 2. Sync succeeded -------------------------------------------------------
+sync_result=$(systemctl --user show loreport-brain-sync.service -p Result --value 2>/dev/null || echo unknown)
+if [ "$sync_result" != "success" ]; then
+  note_failure "the last memory sync failed (last sync FAILED)" "journalctl --user -u loreport-brain-sync.service -n 80"
+fi
+
+# --- 3–4. Projection fresh + no hand-edits -----------------------------------
+main_sha=$(git -C "$BRAIN" rev-parse main 2>/dev/null || echo "")
+if [ -f "$MANIFEST" ] && [ -n "$main_sha" ]; then
+  # Capture first, loop after: `python3 ... | while` would run the loop in a subshell
+  # and every note_failure inside it would be discarded when the subshell exits.
+  projection_out=$(python3 - "$MANIFEST" "$BRAIN" "$main_sha" "$FRAMEWORK/hub" <<'PY'
+import json, os, sys
+sys.path.insert(0, sys.argv[4])
+from project import region_hash, resolve_target_path
+
+manifest_path, brain, main_sha, _ = sys.argv[1:5]
+with open(manifest_path, encoding="utf-8") as fh:
+    manifest = json.load(fh)
+for entry in manifest.get("targets", []):
+    rel = entry.get("path", "")
+    mode = entry.get("mode", "block")
+    path = resolve_target_path(brain, rel)
+    label = entry.get("provider") or rel
+    if not os.path.isfile(path):
+        print(f"stale\tprojection stale/missing: {label}\tproject.py live run or inspect permissions on {rel}")
+        continue
+    mtime = os.path.getmtime(path)
+    recorded = entry.get("mtime")
+    if recorded is not None and mtime + 1 < float(recorded):
+        print(f"stale\tprojection stale/missing: {label}\tre-run projection after editing {rel}")
+    if entry.get("sha") != main_sha:
+        print(f"stale\tprojection stale/missing: {label}\twait for nightly sync or run hub/project.py")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    current = region_hash(text, mode)
+    if entry.get("region_hash") and current != entry["region_hash"]:
+        print(f"edit\thand-edit inside generated region: {label} — edits will be lost tonight\trevert hand-edits in {rel} or accept overwrite tonight")
+    # dropped_budget ONLY. The manifest also carries dropped_visibility (local
+    # items correctly withheld from a cloud surface) and their sum as `dropped`;
+    # reading either of those here would grade the visibility filter working
+    # correctly as a failure — on this brain that is 68 items every night.
+    # Budget truncation is the one that loses data: the line reaches no session.
+    # Word it TRUNCATED/cut, never "dropped", so it cannot be read as the filter.
+    truncated = entry.get("dropped_budget") or 0
+    if truncated:
+        print(f"trunc\tindex TRUNCATED: {label} — {truncated} index line(s) cut to fit budget_chars, so those memories reach no session\traise budget_chars for {label} in hub/projection-targets.json or prune the index")
+PY
+)
+  while IFS=$'\t' read -r kind target fix; do
+    [ -n "${kind:-}" ] || continue
+    case "$kind" in
+      stale|edit|trunc) note_failure "$target" "$fix" ;;
+    esac
+  done <<< "$projection_out"
+elif [ ! -f "$MANIFEST" ]; then
+  note_failure "your memories are not being written into any assistant yet (projection manifest missing)" "run hub/project.py once projection is activated" \
+      "Memories are being saved, but nothing is copying them into Claude/Codex/OpenClaw, so your sessions cannot see them."
+fi
+
+# --- 5. Capture alive (14-day INDEX count) -----------------------------------
+count_now=$(index_item_count)
+baseline_count=$(json_get "index_count_baseline.count")
+baseline_epoch=$(json_get "index_count_baseline.recorded_epoch")
+# Alarm only once the baseline is genuinely 14 days old AND the count has not moved;
+# then re-baseline. A fresh (or missing) baseline is recorded silently — comparing a
+# 7-day-old baseline would cry "dead for 14 days" after a single quiet week.
+if [ -n "$baseline_epoch" ] && [ $((NOW - baseline_epoch)) -ge $((14 * 86400)) ] \
+   && [ -n "$baseline_count" ] && [ "$count_now" -eq "$baseline_count" ]; then
+  note_failure "nothing has been saved to memory in 14 days — saving is probably broken (capture dead)" "capture via Loreport MCP or emit-blocks; check provider branches" \
+      "Older memories are safe, but anything you thought you saved in the last two weeks may not have been recorded."
+fi
+if [ -z "$baseline_epoch" ] || [ $((NOW - baseline_epoch)) -ge $((14 * 86400)) ]; then
+  python3 - "$HEALTH_STATE" "$count_now" "$NOW" <<'PY'
+import json, os, sys
+state_path, count, now = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["index_count_baseline"] = {"count": count, "recorded_epoch": now}
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+fi
+
+# --- 5b. Per-provider capture alive ------------------------------------------
+# NOT `git log -1 provider/<p>`: brain_merge.py fast-forwards every provider branch to
+# main after each merge, so all four branch tips share main's timestamp and that check
+# can never fire. The durable per-provider signal is the items themselves — each carries
+# `source:` (the capturing host) and `captured:` (the date) in its frontmatter.
+# A provider with zero captures ever is "not onboarded", not "dying", so it is skipped.
+provider_out=$(python3 - "$BRAIN" "$NOW" <<'PY'
+import os, re, sys, time
+
+brain, now = sys.argv[1], int(sys.argv[2])
+# source: value -> provider branch it belongs to
+SOURCE_MAP = {
+    "claude": "claude", "claude-code": "claude", "claude.ai": "claude",
+    "codex": "codex",
+    "openclaw": "openclaw", "clawdia": "openclaw",
+    "chatgpt": "chatgpt",
+}
+newest = {}
+for sub in ("memories", "knowledge"):
+    d = os.path.join(brain, sub)
+    if not os.path.isdir(d):
+        continue
+    for fn in os.listdir(d):
+        if not fn.endswith(".md"):
+            continue
+        src = cap = None
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("---") and src is not None:
+                        break
+                    m = re.match(r"^source:\s*(\S+)", line)
+                    if m:
+                        src = m.group(1).strip().lower()
+                    m = re.match(r"^captured:\s*(\d{4}-\d{2}-\d{2})", line)
+                    if m:
+                        cap = m.group(1)
+        except OSError:
+            continue
+        prov = SOURCE_MAP.get(src or "")
+        if prov and cap:
+            newest[prov] = max(newest.get(prov, ""), cap)
+
+for prov, cap in sorted(newest.items()):
+    age_days = (now - time.mktime(time.strptime(cap, "%Y-%m-%d"))) / 86400
+    if age_days > 30:
+        print(f"provider/{prov} silent 30+ days\tlast capture {cap} — check the {prov} capture path (MCP connector / emit-blocks)")
+PY
+)
+while IFS=$'\t' read -r target fix; do
+  [ -n "${target:-}" ] || continue
+  note_failure "$target" "$fix"
+done <<< "$provider_out"
+
+# --- 6. Merge liveness (STALE) -----------------------------------------------
+# Nothing used to assert that the merge had actually run. Check #1 looks at the
+# age of main's last commit, which only moves when content changes — a brain
+# where the merge died on a quiet week still looks fine — and check #6b below
+# grades the newest hub/digest-*.md without ever asking how old it is, so a
+# merge that stopped a month ago kept being graded on its last good day.
+# hub/merge-state.json is written by brain_merge.py on exactly one path: a run
+# that completed. Its age is therefore the honest liveness signal.
+merge_last_success=$(json_get_from "$MERGE_STATE" "last_success_epoch")
+if [ ! -f "$MERGE_STATE" ] || [ -z "$merge_last_success" ]; then
+  # Distinct from "old": nothing has ever recorded a completed merge here. On a
+  # brain that just took this engine version it clears on the first nightly run.
+  note_failure "the nightly memory tidy-up has never completed (merge liveness)" \
+    "run the merge once — python3 hub/brain_merge.py --brain-dir $BRAIN — then re-check"
+else
+  merge_age_h=$(( (NOW - merge_last_success) / 3600 ))
+  if [ "$merge_age_h" -ge "$MERGE_MAX_AGE_HOURS" ]; then
+    note_failure "merge liveness: last completed merge ${merge_age_h}h ago, budget ${MERGE_MAX_AGE_HOURS}h — the nightly merge is not running" \
+      "journalctl --user -u loreport-brain-sync.service -n 80; the merge aborts do not stamp hub/merge-state.json"
+  fi
+fi
+
+# --- 6b. Merge outcome: what the last completed merge left behind -------------
+# Three independent conditions, deliberately no longer an elif chain: they can
+# hold at once, they belong to different subsystems, and reporting only the
+# first hid the other two. Each message names its subsystem and what actually
+# happened, so none of them can be read as "the merge failed" unless it did.
+# Which needs-review kinds 6b manages to say in the digest's own words, so 6c
+# below does not say them a second time. Tracked by NAME rather than by "6b
+# covers the first two", so a kind 6b has never heard of always falls through
+# to 6c instead of into a gap.
+digest_reported_kinds=""
+latest_digest=$(ls -1 "$BRAIN"/hub/digest-*.md 2>/dev/null | sort | tail -1 || true)
+if [ -n "$latest_digest" ] && [ -f "$latest_digest" ]; then
+  # BROKEN. A fail-closed scrub hit rolls main back and merges nothing; the
+  # packet providers are served is whatever last succeeded.
+  if grep -qiE 'secret-scrub: (FAIL|ABORT)' "$latest_digest"; then
+    note_failure "a memory contains what looks like a secret, so nothing was published (secret-scrub)" \
+      "inspect $latest_digest, remove or mark the item visibility: local, then re-run the merge" \
+      "This is protective, not broken: publishing STOPPED on purpose so the secret did not leave your machine. Nothing was exposed, and nothing new publishes until it is cleared." "1"
+  fi
+
+  # NEEDS REVIEW. Quarantined blocks are parked copies; main kept its own
+  # version and the merge went on to publish. Nothing is blocked by them, and
+  # the count never falls on its own, so this must not be a failure — it would
+  # be a permanently-red check, which is a check nobody reads.
+  q_line=$(grep -iE 'quarantine items pending review: [0-9]+' "$latest_digest" | tail -1 || true)
+  q_count=$(printf '%s' "${q_line:-}" | grep -oE '[0-9]+$' || true)
+  if [ -n "${q_count:-}" ] && [ "$q_count" -gt 0 ]; then
+    # The names go in the MESSAGE, not only the detail block: the message is
+    # what reaches the phone, and "N block(s)" without a name is precisely the
+    # line that sent two readers off to investigate. Capped at NOTIFY_MAX_NAMES
+    # inside the helper so six parked blocks cannot push the part that says the
+    # pipeline is healthy out of a notification preview.
+    q_names=$(quarantine_names)
+    q_msg="merge quarantine: ${q_count} block(s) awaiting your decision — the merge and publish completed normally"
+    [ -n "${q_names:-}" ] && q_msg="${q_msg}: ${q_names}"
+    note_review "$q_msg" \
+      "each block below carries a show/accept/discard command; nothing is blocked until you run one" \
+      "$(quarantine_detail "$q_count")"
+    digest_reported_kinds="${digest_reported_kinds} human_region_violations"
+  fi
+
+  # NEEDS REVIEW. An identity conflict is resolved --ours and flagged; the merge
+  # completed either way.
+  if ! grep -qi 'PROFILE conflicts (human review required): none' "$latest_digest"; then
+    note_review "PROFILE conflict: two providers edited identity, main's version was kept and flagged — the merge and publish completed normally" \
+      "compare the flagged files named in $latest_digest and pick the correct PROFILE.md content"
+    digest_reported_kinds="${digest_reported_kinds} profile_conflicts"
+  fi
+fi
+
+# --- 6c. NEEDS REVIEW, taken from the merge's own record ----------------------
+# brain_merge.needs_review_reasons() has FIVE members. 6b above re-derives two of
+# them by grepping the digest — and the other three (a renamed add/add twin, a
+# secret-scrub warning on a local-visibility item, a reverted provenance
+# violation) write no quarantine file and appear in no line it greps. They
+# reached the owner through NO channel: the merge exited 3, that exit is a plain
+# stderr line in the journal, and this script then computed state=ok, deleted the
+# banner and pushed the weekly "brain OK". An unremediated secret sitting in the
+# brain announced itself as healthy.
+#
+# hub/merge-state.json already carries the answer — write_merge_state stamps the
+# subsystem KEYS (never the payloads; scrub_warnings' payload is a secret
+# fragment). This is the consumer. It iterates whatever kinds are present rather
+# than testing a fixed list, so a sixth reason added to brain_merge is reported
+# here the day it lands instead of being silent until someone remembers.
+merge_review_kinds=$(python3 - "$MERGE_STATE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    raise SystemExit(0)
+kinds = data.get("needs_review_kinds")
+if isinstance(kinds, list):
+    for k in kinds:
+        if str(k).strip():
+            print(str(k).strip())
+elif data.get("needs_review"):
+    # merge-state stamped by an engine older than the kinds field. We know a
+    # human is owed a decision, just not by which subsystem — say exactly that
+    # rather than nothing. Clears itself on the first merge under this version.
+    print("unspecified")
+PY
+)
+while IFS= read -r kind; do
+  [ -n "${kind:-}" ] || continue
+  # Already said, in the digest's own words, by 6b. Skipping is by NAME, so a
+  # kind 6b does not know about can never fall through this gap.
+  case " ${digest_reported_kinds:-} " in *" $kind "*) continue ;; esac
+  case "$kind" in
+    profile_conflicts)
+      note_review "PROFILE conflict: two providers edited identity, main's version was kept and flagged — the merge and publish completed normally" \
+        "compare the flagged files named in the newest $BRAIN/hub/digest-*.md and pick the correct PROFILE.md content" ;;
+    renamed)
+      note_review "add/add rename: two providers created the same item name and one copy was filed under a new name — the merge and publish completed normally" \
+        "see 'Renamed (add/add conflicts)' in the newest $BRAIN/hub/digest-*.md; merge the two items or keep both deliberately" ;;
+    scrub_warnings)
+      note_review "secret-scrub: a secret pattern matched inside a visibility:local item — nothing egressed and the merge completed, but the secret is still sitting in the brain" \
+        "see 'Scrub warnings' in the newest $BRAIN/hub/digest-*.md; remove or rotate the credential, then re-run the merge" ;;
+    provenance_violations)
+      note_review "provenance: an untrusted commit touched a path it does not own and was reverted — the merge and publish completed normally" \
+        "see 'Provenance violations' in the newest $BRAIN/hub/digest-*.md; confirm the revert was right and check that provider's capture path" ;;
+    human_region_violations)
+      note_review "human-region: a provider edited a human-owned region and the edit was quarantined — the merge and publish completed normally" \
+        "each block below carries a show/accept/discard command; nothing is blocked until you run one" \
+        "$(quarantine_detail)" ;;
+    unspecified)
+      note_review "merge needs review: the last completed merge parked something for you, and it was stamped by an engine older than this one, so it could not name the subsystem — the merge and publish completed normally" \
+        "read the newest $BRAIN/hub/digest-*.md; the next merge under this engine version will name it" ;;
+    *)
+      note_review "merge needs review ($kind): the last completed merge parked this for you — the merge and publish completed normally" \
+        "read the newest $BRAIN/hub/digest-*.md" ;;
+  esac
+done <<< "$merge_review_kinds"
+
+# --- 6b. Synthesis detector health (design-wiki-parity §2) --------------------
+# "If the cluster detector emits degenerate output (single-token topics — the REM
+# failure), alarm." The detector itself refuses such topics and reports them as
+# warnings instead of proposals; this is the consumer that makes those warnings
+# visible, so the calibration window is tuned on something a human actually reads.
+SYNTH_REPORT="$BRAIN/hub/synthesis-report.json"
+if [ -f "$SYNTH_REPORT" ]; then
+  synth_out=$(python3 - "$SYNTH_REPORT" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError) as e:
+    print(f"synth\tsynthesis report unreadable: {e}\tcheck hub/synthesis-report.json or re-run hub/brain_merge.py")
+    raise SystemExit(0)
+if data.get("error"):
+    print(f"synth\tsynthesis detector errored: {data['error']}\tsee hub/synth_detect.py")
+warnings = data.get("warnings") or []
+degenerate = [w for w in warnings if w.get("reason") == "degenerate-topic"]
+oversized = [w for w in warnings if w.get("reason") == "oversized-cluster"]
+if degenerate:
+    topics = ", ".join(sorted({w.get("topic", "?") for w in degenerate})[:5])
+    print(f"synth\tsynthesis detector emitting degenerate topics ({len(degenerate)}): {topics}\tthe REM failure mode — retune the signal in hub/synth_detect.py before arming synthesis")
+if oversized:
+    print(f"synth\tsynthesis detector emitting oversized clusters ({len(oversized)})\tlink-graph sprawl, not a topic — tighten clustering before arming synthesis")
+PY
+)
+  while IFS=$'\t' read -r kind target fix; do
+    [ -n "${kind:-}" ] || continue
+    [ "$kind" = "synth" ] && note_failure "$target" "$fix"
+  done <<< "$synth_out"
+fi
+
+# --- 7. ChatGPT surface staleness ---------------------------------------------
+# Review, not failure: the pipeline produced a correct new surface, and the only
+# outstanding action is a human pasting it, since ChatGPT has no write path.
+# Grading it as a failure made every genuinely broken run arrive in a mailbox
+# that was already red.
+#
+# The old 30-day nag throttle is GONE, and its removal is load-bearing. It gated
+# whether the item entered the list at all, so it gated the state as well: week 0
+# reported `review`, week 1 the throttle suppressed the item, the state fell back
+# to `ok`, the banner was deleted — and once recovery announcements existed, the
+# check would cheerfully report "all checks green" while the surface was still
+# unpasted, on a 30-day loop. Throttling belongs to the state-change gate below,
+# which is one throttle; two stacked ones oscillate.
+chatgpt_surface="$BRAIN/hub/surface-chatgpt.md"
+pasted_hash=$(json_get "chatgpt_pasted.region_hash")
+if [ -f "$chatgpt_surface" ] && [ -n "$pasted_hash" ]; then
+  current_hash=$(region_hash_file "$chatgpt_surface" block)
+  if [ "$current_hash" != "$pasted_hash" ]; then
+    note_review "ChatGPT surface: regenerated since your last paste — nothing is broken, ChatGPT is just serving older content" \
+      "re-paste hub/surface-chatgpt.md into ChatGPT, then run: loreport-health --pasted --config $CONFIG"
+  fi
+fi
+
+# --- 8. Leak assertion (the audit gets a consumer) ----------------------------
+# WHY HERE AND NOT ON ITS OWN TIMER. scripts/loreport-audit is the only thing in
+# the engine that asserts "nothing unclassified is being published" — the exact
+# property whose absence let three batches of memories reach cloud surfaces on
+# 2026-08-07. When written it was referenced by no unit, no timer, and neither
+# this script nor bin/loreport-sync: it ran only when a human typed it, the same
+# producer-with-no-consumer shape that caused the leaks it exists to catch. A
+# second timer is a second thing to forget; this script already runs on one and
+# already alerts, so the assertion belongs inside it.
+#
+# SEVERITY IS MAPPED, NOT FLATTENED. The first version of this section routed
+# every audit finding to note_failure, which turned a memory missing a `domain:`
+# field into a permanently red brain — i.e. it rebuilt the single-FAIL-state
+# defect that section 6c exists to remove, inside the commit that consumes 6c.
+#   LEAK  -> failure. Something local is exposed. Nothing else qualifies.
+#   BLIND -> failure. The check could not see a surface, so "clean" is vacuous —
+#            the packet-privacy check that passed on an EMPTY packet is this
+#            project's own precedent for why silence here is not safety.
+#   RISK / META -> review. The pipeline is healthy; a human owes it a decision.
+#
+# THE EXIT CODES ARE NOT INTERCHANGEABLE, and 2 is the important one:
+# 0 = audited something, found nothing. 1 = findings. 2 = COULD NOT AUDIT (bad
+# config, missing dirs, `main` unresolvable). Treating 2 as clean would be the
+# vacuous-truth bug one layer up, silently.
+audit_bin="$FRAMEWORK/scripts/loreport-audit"
+if [ ! -x "$audit_bin" ]; then
+  note_failure \
+    "the privacy check is missing, so nothing is verifying what gets published (leak audit)" \
+    "check LOREPORT_ENGINE in $CONFIG" \
+      "This one is about PRIVACY: right now nothing is confirming that your private memories stay private. Worth a look today." "1"
+else
+  audit_out=$("$audit_bin" --quiet --config "$CONFIG" 2>&1)
+  audit_rc=$?
+  if [ "$audit_rc" -ge 2 ]; then
+    note_failure \
+      "leak audit: COULD NOT RUN (exit $audit_rc) — nothing is asserting that unclassified items stay unpublished" \
+      "run: $audit_bin --config $CONFIG   # then fix the config/dirs it names"
+  elif [ "$audit_rc" -eq 1 ]; then
+    hard=$(printf '%s\n' "$audit_out" | grep -cE '\[(LEAK|BLIND)\]' || true)
+    soft=$(printf '%s\n' "$audit_out" | grep -cE '\[(RISK|META)\]' || true)
+    if [ "${hard:-0}" -gt 0 ]; then
+      first=$(printf '%s\n' "$audit_out" | grep -E '\[(LEAK|BLIND)\]' | head -2 \
+              | sed 's/^[[:space:]]*✗ //' | tr '\n' ' ')
+      note_failure \
+        "leak audit: $hard exposure/blind-spot finding(s) — $first" \
+        "run: $audit_bin --config $CONFIG" \
+        "This one is about PRIVACY, not upkeep: something marked private may have reached a cloud surface, or the check could not see one of them. Worth looking at today." "1"
+    fi
+    if [ "${soft:-0}" -gt 0 ]; then
+      firsts=$(printf '%s\n' "$audit_out" | grep -E '\[(RISK|META)\]' | head -2 \
+               | sed 's/^[[:space:]]*✗ //' | tr '\n' ' ')
+      note_review \
+        "leak audit: $soft item(s) need a metadata decision — $firsts" \
+        "run: $audit_bin --config $CONFIG"
+    fi
+    # ⚠ EXIT 1 WITH NOTHING PARSEABLE IS A FAILURE, NOT SILENCE.
+    # An independent review found this hole and demonstrated it twice: exit 1
+    # means "findings", but a Python traceback ALSO exits 1 and contains neither
+    # a [LEAK]/[BLIND] nor a [RISK]/[META] token. Both counts then read 0, both
+    # branches above are skipped, and health reported "brain OK" having asserted
+    # nothing — the exact vacuous-truth bug the exit-2 branch was written to
+    # prevent, arriving through the other door. Reproduced naturally by one
+    # non-UTF-8 byte in a committed memory (see brain_audit._run_git).
+    if [ "${hard:-0}" -eq 0 ] && [ "${soft:-0}" -eq 0 ]; then
+      note_failure \
+        "leak audit: exit 1 but no parseable finding — the audit failed in a way this check cannot read, so NOTHING asserted that unclassified items stay unpublished" \
+        "run: $audit_bin --config $CONFIG   # first line was: $(printf '%s\n' "$audit_out" | head -1)"
+    fi
+  fi
+fi
+
+# --- 9. Nightly review ran, and its proposals are reaching decisions ----------
+# The synthesis detector was a producer with no consumer for weeks: it emitted
+# proposals into a digest line that said "none filed", nobody filed them, and
+# nobody was asked to. hub/nightly_review.py is the consumer, and THIS is what
+# makes the consumer real — without an assertion here, "the review runs nightly"
+# is unfalsifiable and decays exactly the way the detector did.
+#
+# Four DISTINCTLY NAMED conditions, because one word covering two states is how
+# "merge digest needs review" got read as "the merge failed" by two readers:
+#   never ran        — hub/nightly/ holds no artifact at all (install/regression)
+#   did not run      — yesterday's specifically is absent (last night was missed)
+#   unreadable       — the artifact exists but cannot be parsed
+#   overdue          — it ran, but proposals are rotting undecided
+# The first three are FAILURES: the review is the thing that forces dispositions,
+# so a review that did not run means nothing is forcing anything. Proposals merely
+# waiting are REVIEW — a queue with a human in it is a healthy queue, right up
+# until PENDING_MAX_DAYS, past which it is a graveyard and grades as a failure.
+#
+# Yesterday's, not "today's or yesterday's". The weaker rule cannot be falsified
+# by deleting an artifact while a newer one exists, and a liveness check nobody
+# can break by breaking the thing it watches is decoration. The nightly runs at
+# 02:00 and this check runs Mon 09:05, so there is no window where yesterday's
+# legitimately does not exist.
+#
+# NOTE the wording: "the nightly did not complete". The review runs inside
+# brain_merge, so an aborted merge also leaves no artifact and this co-fires with
+# check 6. The message has to be true under both causes, not just the one.
+NIGHTLY_DIR="$BRAIN/hub/nightly"
+# GNU form first, BSD second. If BOTH fail the variable would be empty and the
+# path would be ".../.json", which never exists — reporting "did not run last
+# night" forever with a nonsense fix line. Exit 2 instead: this is the check
+# failing, not the brain, and 2 is the code the unit does not forgive.
+YESTERDAY=$(date -d 'yesterday' '+%Y-%m-%d' 2>/dev/null || date -v-1d '+%Y-%m-%d' 2>/dev/null || true)
+if [ -z "$YESTERDAY" ]; then
+  echo "loreport-health: could not compute yesterday's date (neither GNU nor BSD date)" >&2
+  exit 2
+fi
+nightly_yesterday="$NIGHTLY_DIR/$YESTERDAY.json"
+if [ ! -d "$NIGHTLY_DIR" ] || [ -z "$(ls -A "$NIGHTLY_DIR" 2>/dev/null)" ]; then
+  note_failure \
+    "nightly review has never run — no dated artifact exists, so nothing is forcing synthesis proposals to a decision" \
+    "run: python3 $FRAMEWORK/hub/nightly_review.py --brain-dir $BRAIN --run   (it normally runs inside the nightly hub/brain_merge.py)"
+elif [ ! -f "$nightly_yesterday" ]; then
+  note_failure \
+    "last night's memory review did not run (nightly review did not run last night)" \
+    "expected $nightly_yesterday; check the nightly merge: journalctl/hub/logs/merge.log, then re-run hub/brain_merge.py"
+else
+  nightly_out=$(python3 - "$nightly_yesterday" <<'PY' 2>/dev/null || true
+import json, sys
+# Catch EVERYTHING, not only the read/parse errors. The invocation swallows
+# stderr and forces success, so any OTHER exception — an AttributeError because
+# the artifact parsed as valid JSON of the wrong SHAPE, e.g. `{"synthesis": {},
+# "reconciliation": "in-sync"}` — killed this checker, produced no output, and
+# switched every one of section 9's assertions off at once while the run still
+# exited 0. Measured: five parseable-but-wrong-shape payloads each gave EXIT=0
+# with zero nightly-review lines in the banner, including the payload that is
+# supposed to FAIL for having no reconciliation section. "The checker crashed"
+# must never route to "healthy" — that is the fail-open shape this repo has
+# already paid for twice.
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"artifact is a {type(data).__name__}, not an object")
+except Exception as e:
+    print(f"fail\tnightly review artifact unreadable ({type(e).__name__}): {e}\tinspect or delete {sys.argv[1]} and re-run hub/nightly_review.py --run")
+    raise SystemExit(0)
+
+
+def _obj(value, label):
+    """A section that is PRESENT but not an object is schema drift, which is a
+    different condition from the section being absent — and absence already has
+    its own message below. One word must not mean two conditions."""
+    if value is None or isinstance(value, dict):
+        return value
+    raise ValueError(f"{label} is a {type(value).__name__}, not an object")
+
+
+def check(data):
+    syn = _obj(data.get("synthesis"), "synthesis") or {}
+    overdue = syn.get("overdue") or []
+    pending = syn.get("pending") or []
+    maxd = syn.get("pending_max_days", 14)
+
+    if overdue:
+        ids = ", ".join(str(i) for i in overdue[:5])
+        print(f"fail\tsynthesis proposals overdue ({len(overdue)}): undecided for more than {maxd} days — {ids}\tdecide each: hub/nightly_review.py --brain-dir BRAIN --dispose <id> --status accept|reject|defer --reason '...'")
+    waiting = [p for p in pending if p.get("id") not in set(overdue)]
+    if waiting:
+        ids = ", ".join(str(p.get("id")) for p in waiting[:5])
+        print(f"review\t{len(waiting)} synthesis proposal(s) awaiting your disposition: {ids}\thub/nightly_review.py --brain-dir BRAIN --list, then --dispose <id> --status accept|reject|defer --reason '...'")
+
+    rec = _obj(data.get("reconciliation"), "reconciliation")
+    if rec is None:
+        print("fail\tnightly review artifact has no reconciliation section — it asserted nothing about native-memory drift\tregenerate with hub/nightly_review.py --run; if it persists the artifact schema and this check have drifted")
+        return
+    status = rec.get("status")
+    if status == "unconfigured":
+        print(f"review\treconciliation is NOT CONFIGURED — nothing is comparing your native memory against Loreport, so no result here means 'unchecked', not 'clean'\tcreate BRAIN/hub/reconcile-sources.json listing each native memory store; see hub/HUB.md")
+    elif status == "error":
+        print(f"fail\treconciliation could not run: {rec.get('detail') or 'the artifact recorded no detail'}\tfix BRAIN/hub/reconcile-sources.json")
+    elif status == "blind":
+        print("fail\treconciliation compared against an empty set — a diff over nothing is vacuously clean\tcheck BRAIN/INDEX.md and the configured native stores in hub/reconcile-sources.json")
+    elif status == "drift":
+        n = sum(s.get("only_native_count", 0) for s in rec.get("sources", []))
+        print(f"review\treconciliation drift: {n} item(s) live in native memory that Loreport has never seen\trun the memory-reconcile skill, or capture them via the Loreport MCP")
+
+
+# The OUTER guard, and the reason the body is a function. Section 9 has three
+# independent assertions; a crash anywhere in any one of them used to silence
+# all three. Anything unexpected below now becomes a named FAIL instead of an
+# empty stdout that the caller reads as "nothing to report".
+try:
+    check(data)
+except Exception as e:
+    print(f"fail\tnightly review check crashed on the artifact ({type(e).__name__}): {e}\tinspect {sys.argv[1]}; the artifact and this check disagree about its shape")
+PY
+)
+  while IFS=$'\t' read -r kind msg fix; do
+    [ -n "${kind:-}" ] || continue
+    case "$kind" in
+      fail) note_failure "$msg" "$fix" ;;
+      review) note_review "$msg" "$fix" ;;
+    esac
+  done <<< "$nightly_out"
+fi
+
+# --- outcome -----------------------------------------------------------------
+# One of exactly three states. `review` is a healthy state: it exits 0, it keeps
+# the weekly heartbeat alive, and its notice never contains the word FAIL.
+if [ "${#failures[@]}" -gt 0 ]; then
+  state="failing"
+elif [ "${#reviews[@]}" -gt 0 ]; then
+  state="review"
+else
+  state="ok"
+fi
+
+if [ "$state" != "ok" ]; then
+  mkdir -p "$(dirname "$BANNER")"
+  {
+    echo "=== Loreport health ($(date '+%Y-%m-%d %H:%M %Z')) ==="
+    echo
+    if [ "${#failures[@]}" -gt 0 ]; then
+      echo "FAILING — these are broken or stale:"
+      echo
+      for i in "${!failures[@]}"; do
+        echo "✗ ${failures[$i]}"
+        echo "  fix: ${fixes[$i]}"
+        echo
+      done
+    fi
+    if [ "${#reviews[@]}" -gt 0 ]; then
+      echo "NEEDS REVIEW — the pipeline is healthy and nothing is blocked;"
+      echo "these are waiting on a decision from you:"
+      echo
+      for i in "${!reviews[@]}"; do
+        echo "⧗ ${reviews[$i]}"
+        echo "  next: ${review_fixes[$i]}"
+        [ -n "${review_details[$i]:-}" ] && printf '%s\n' "${review_details[$i]}"
+        echo
+      done
+    fi
+    echo "When nothing is failing or pending, this file is removed automatically."
+  } >"$BANNER"
+else
+  rm -f "$BANNER"
+fi
+
+# Alert on state CHANGE, not on every run. A weekly timer that re-sends the same
+# line indefinitely trains the reader to ignore it, and a quarantine count never
+# falls without a human, so an unchanged "needs review" would repeat forever.
+# The signature covers the message set as well as the state, so a NEW failure
+# arriving while an old one is unresolved still speaks up.
+liveness_changed=$(python3 - "$HEALTH_STATE" "$state" "$NOW" \
+  ${failures[@]+"${failures[@]}"} ${reviews[@]+"${reviews[@]}"} <<'PY'
+import hashlib, json, os, re, sys
+
+state_path, state, now = sys.argv[1], sys.argv[2], int(sys.argv[3])
+messages = sys.argv[4:]
+
+# ⚠ NORMALISE THE CLOCK OUT OF THE SIGNATURE, AND ONLY THE CLOCK.
+# The signature exists so a NEW problem speaks up while an old one is still
+# unresolved. But "merge liveness: last completed merge 88h ago" carries an age
+# that increments every hour, so its signature changed on every run — and the
+# one condition that CANNOT self-clear without a human was therefore the one
+# that re-paged hardest. Measured: three runs at 40h/64h/88h produced three
+# notifications; three runs at a fixed 88h produced none. That is the alert
+# fatigue the whole state-change gate exists to prevent, reintroduced by a
+# number inside the text.
+#
+# Deliberately NOT a blanket digit strip. A count moving 1 -> 5 items is a real
+# change and must still alert; only a monotonically advancing clock is noise.
+# So exactly the "<N>h ago" shape is collapsed, and nothing else.
+_AGE_RE = re.compile(r"\b\d+h ago\b")
+sig_source = [_AGE_RE.sub("<age>h ago", m) for m in messages]
+signature = "sha256:" + hashlib.sha256("\n".join(sig_source).encode("utf-8")).hexdigest()
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+previous = data.get("liveness") or {}
+changed = previous.get("state") != state or previous.get("signature") != signature
+# "changed" alone would make a brand-new brain's FIRST run announce a recovery
+# from a state it was never in. Recovery is only meaningful against a recorded
+# prior state, so it is reported separately from mere change.
+recovered = changed and state == "ok" and previous.get("state") in ("failing", "review")
+print("recovered" if recovered else ("changed" if changed else "same"))
+if changed:
+    data["liveness"] = {"state": state, "signature": signature, "reported_epoch": now}
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+PY
+)
+
+case "${liveness_changed}:${state}" in
+  changed:failing)
+    # THREE LINES, ALWAYS, IN THIS ORDER: what happened, what it means for you,
+    # what to do. The reader may be on a phone and unprepared; a bare internal
+    # failure string answers none of those and reads as alarming AND
+    # unactionable. Order is deliberate — the impact line sits between the
+    # problem and the action so the reader learns "nothing is lost" BEFORE
+    # deciding whether this can wait.
+    # Lead with the most serious, not the first-checked.
+    lead=0
+    for i in "${!sevs[@]}"; do
+      if [ "${sevs[$i]}" -gt "${sevs[$lead]}" ]; then lead=$i; fi
+    done
+    more=""
+    [ "${#failures[@]}" -gt 1 ] && more=" (+$(( ${#failures[@]} - 1 )) more)"
+    headline="${failures[$lead]}${more}"
+    # Clamp the VARIABLE part only, and clamp it first: the impact and action
+    # lines are fixed-size and must survive, since they are the two the reader
+    # acts on. A long failure string must never evict them.
+    # ⚠ THE ACTION MUST WORK FROM A PHONE. This used to be `cat <banner path>`,
+    # which is only actionable sitting at the machine — and the machine is the
+    # one place the reader usually is NOT when a push notification arrives.
+    # Clawdia is on Telegram AND on this box, so she is the actionable surface;
+    # `loreport triage` is the verb her loreport-ops skill answers to. The
+    # banner path stays as a fallback for the case where the reader IS at a
+    # terminal, but it is second, because it is the rarer case.
+    action="reply to Clawdia: loreport triage   (or at a terminal: cat ${BANNER})"
+    fixed_len=$(( ${#impacts[$lead]} + ${#action} + 40 ))
+    head_max=$(( NOTIFY_MAX_CHARS - fixed_len ))
+    [ "$head_max" -lt 80 ] && head_max=80
+    if [ "${#headline}" -gt "$head_max" ]; then
+      headline="${headline:0:$((head_max - 1))}…"
+    fi
+    msg="🧠 Loreport needs a look: ${headline}
+${impacts[$lead]}
+What to do: ${action}"
+    tg_notify "$msg"
+    ;;
+  changed:review)
+    # Deliberately not "FAIL", and it says what still works. This is the line
+    # that got misread on a phone; it now has to be read correctly there. It
+    # names the pending items (capped in quarantine_report.py) and says where
+    # the per-item commands are, because a reader who has only this line must
+    # still be able to state the right cause and take the next step.
+    msg="🧠 Loreport OK — merge and publish are running; ${#reviews[@]} item(s) awaiting your review: ${reviews[0]}"
+    # Hard cap, belt and braces over the per-item cap. A notification preview
+    # that truncates mid-sentence can leave "merge" and "review" visible with
+    # every reassuring clause cut off — the original misreading, rebuilt by a
+    # message that grew.
+    #
+    # ORDER MATTERS. The clamp cuts from the END, so the actionable pointer is
+    # appended AFTER it: appending first meant a long item name evicted the one
+    # element of the payload the reader can act on, leaving a truncated name
+    # where "what to do" should have been. Clamp the variable part, then add the
+    # fixed suffix, and size the clamp so the whole thing still fits.
+    suffix=" · what to do — reply to Clawdia: loreport triage"
+    body_max=$(( NOTIFY_MAX_CHARS - ${#suffix} ))
+    # Floor: a pathologically long BANNER path must not squeeze the body to
+    # nothing. Overrunning the cap by a little beats emitting a message that
+    # says which state we are in and nothing else.
+    [ "$body_max" -lt 120 ] && body_max=120
+    if [ "${#msg}" -gt "$body_max" ]; then
+      msg="${msg:0:$((body_max - 1))}…"
+    fi
+    msg="${msg}${suffix}"
+    tg_notify "$msg" --silent
+    ;;
+  recovered:*)
+    # Only after a RECORDED failing/review state — never on a first run, where
+    # there is nothing to have recovered from. Closing the loop matters: the
+    # failure notice was pushed, so without this the reader never learns it
+    # cleared and keeps treating the brain as broken.
+    tg_notify "🧠 Loreport health recovered — all checks green" --silent
+    ;;
+esac
+
+if [ "$state" = "failing" ]; then
+  exit 1
+fi
+
+# Below here the pipeline is alive — `ok` and `review` both qualify. The
+# heartbeat must NOT be gated on an empty review list: a quarantine count only
+# falls when a human clears it, so one un-triaged block would otherwise silence
+# the weekly "brain OK" ping forever and turn a review item into a liveness
+# blackout — the exact failure this sprint exists to remove.
+#
+# 6 days, not 7, against a weekly timer. Two consecutive Monday 09:05 firings are
+# exactly 7.00 days apart, so a 7-day threshold loses a slot to any manual run,
+# Persistent= catch-up, or DST shift — and a silently-skipped heartbeat reads as
+# "the brain died", which is the one false signal this check must never send.
+last_hb=$(json_get "last_heartbeat_epoch")
+if [ -z "$last_hb" ] || [ $((NOW - last_hb)) -ge $((6 * 86400)) ]; then
+  mem_count=$(index_item_count)
+  proj_date=$(python3 - "$MANIFEST" <<'PY' 2>/dev/null || echo "unknown"
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(json.load(fh).get("projected_at", "unknown"))
+except Exception:
+    print("unknown")
+PY
+)
+  tg_notify "🧠 brain OK — ${mem_count} memories, projected ${proj_date}" --silent
+  python3 - "$HEALTH_STATE" "$NOW" <<'PY'
+import json, os, sys
+state_path, now = sys.argv[1], int(sys.argv[2])
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    data = {}
+data["last_heartbeat_epoch"] = now
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+fi
+
+exit 0

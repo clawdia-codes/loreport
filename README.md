@@ -52,9 +52,11 @@ always-loaded. It grows one line per item, not one file per item.
 
 ## Shared vs. local — what leaves your machine
 
-Every item carries a `visibility`: **`shared`** (the default) syncs to every connected
-provider; **`local`** never leaves your machine — excluded from the published packet, and
-refused outright to a cloud provider that asks for it. Onboarding offers five always-local topics
+Every item carries a `visibility`, and it is required: **`shared`** syncs to every
+connected provider; **`local`** never leaves your machine — excluded from the published
+packet, and refused outright to a cloud provider that asks for it. There is no shared-by-
+default: an item that omits the field is treated as `local`, and publishing refuses until
+you say which you meant, so forgetting to classify something can never expose it. Onboarding offers five always-local topics
 by default — **health, finances, relationships, credentials/security, employer** — and you can add your own.
 Those items stay on your disk while remaining fully yours, backed up, and readable by
 your local agents.
@@ -146,6 +148,7 @@ Licensed under **MIT** (`prompts/`, `hub/` Python code) and **CC BY 4.0** (`docs
 | [`prompts/`](prompts/) | The three pasteables: `onboard.md`, `bootstrap.md`, `consolidate.md`. |
 | [`scripts/init-brain.sh`](scripts/init-brain.sh) | **Start here** — creates a new brain: folder, git repo, private GitHub backup. |
 | [`brain-template/`](brain-template/) | The skeleton it copies, if you'd rather do it by hand. |
+| [`scripts/loreport-audit`](scripts/loreport-audit) | Point it at any brain's `loreport.conf`: is anything unclassified being published? |
 | [`examples/`](examples/) | A filled fixture brain with a worked consolidation example. |
 | [`hub/`](hub/) | The opt-in Tier-2 sync hub. |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release, written to be read. |

@@ -11,10 +11,13 @@ byte-identical copy of a text defined in Appendix A here.
 ---
 name: <kebab-slug>            # stable id; unique across the whole brain; used bare in [[wikilinks]]
 description: <one line>       # becomes the INDEX line hook; feeds provider retrieval
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host>               # provenance — assistant/app the capture came from (claude, chatgpt, openclaw, …)
 captured: <YYYY-MM-DD>       # provenance — capture date
-visibility: shared | local   # optional — see below; absent = shared
+visibility: shared | local   # REQUIRED — see below; absent = local, and publish refuses
+lifespan: permanent | active | temporary   # optional — absent = permanent
+expires: <YYYY-MM-DD>        # optional — the archival trigger; only on temporary
+domain: work | personal | both             # optional — which side of life this belongs to
 ---
 ```
 
@@ -33,10 +36,38 @@ visibility: shared | local   # optional — see below; absent = shared
   writing one brain. `source` is stamped from the pinned **Host** value and matches the
   writing provider's Tier-2 branch (`provider/<source>`). Hand-authored / seed items may
   omit both; consolidation preserves them.
-- **`visibility`** (optional) is `shared` or `local`. **`shared`** (the default when the
-  field is absent) participates in the published packet and is readable by all connected
+- **`visibility`** is `shared` or `local`, and it is **required on every item**.
+  **`shared`** participates in the published packet and is readable by all connected
   providers. **`local`** never leaves this machine — excluded from publish, and cloud
   provider reads refuse it.
+  An item is treated as `shared` **only** on an explicit `visibility: shared`. Every other
+  state — the field absent, a value that doesn't parse, no frontmatter block at all — is
+  `local`. Two consequences, and they are the point:
+  - **Forgetting the field withholds; it never publishes.** Until 2026-08 the field was
+    optional and absent meant `shared`, so an item nobody had classified was not merely
+    unfiltered — it was positively published. That was the one fail-open default in an
+    otherwise fail-closed engine, and it leaked three batches on 2026-08-07.
+  - **Forgetting the field is loud.** `hub/snapshot_publish.py` refuses to publish *at all*
+    while any `memories/`/`knowledge/` item lacks the field, naming each one. A safe default
+    that is also silent would just turn a leak into a growing pile of items no provider can
+    see; the default protects, the gate reports.
+  Skills are exempt because they are not items: a skill package carries `meta.yaml`, not
+  item frontmatter (below), has no `visibility:` field to omit, and is always shared.
+- **`lifespan`** (optional) is `permanent` | `active` | `temporary`; absent = `permanent`.
+  `permanent` — identity, long-term goals, durable knowledge, architecture, decisions.
+  `active` — current projects and present responsibilities. `temporary` — travel,
+  reminders, context that should expire.
+- **`expires`** (optional, `YYYY-MM-DD`) is the **mechanical** archival trigger, and the
+  only one: an item whose `expires` is before today has its INDEX line moved to
+  `INDEX-ARCHIVE.md` (see "Archive"). It belongs only on a `temporary` item — declaring
+  `permanent`/`active` *and* an expiry is a contradiction and is rejected at capture. An
+  item with no `expires` is never archived by machinery, so `permanent` and `active` items
+  are untouchable by construction rather than by a separate rule that could drift.
+- **`domain`** (optional) is `work` | `personal` | `both` — which side of life an item
+  belongs to. **This is not cloud exposure.** That is `visibility`, and the two axes are
+  independent: a work item may be `local` and a personal item may be `shared`. Nothing may
+  infer one from the other. `domain` exists so a reader can scope itself ("only work
+  context in this session"); it grants and revokes nothing.
 
 ---
 
@@ -140,15 +171,29 @@ large enough item count that starts to matter: on a paste host it eventually cro
 custom-instructions character limit; even on a filesystem host it's just more noise to
 scan per session than a genuinely "hot" catalog needs to be.
 
-**Design note (no code ships for this yet):** once the brain is large, split `INDEX.md`
-into a hot/cold pair. Items that haven't been touched (read, updated, or linked from a
-recent capture) in a long while move their INDEX line into `INDEX-ARCHIVE.md`, fetched
-on demand — the same lazy-load pattern detail files already use, one level up. `INDEX.md`
-stays the always-in-context catalog of what's actually active; `INDEX-ARCHIVE.md` is a
-cold shelf the model asks for explicitly ("anything archived about X?") rather than
-something pinned into every session. The cutoff (by age, by explicit "archive this" during
-consolidation, or both) and the exact split mechanics are deferred to whenever a brain
-actually reaches this scale — most brains never will.
+**This now ships** (it was a deferred design note through v1.10). `INDEX.md` is a hot/cold
+pair: an item whose `expires` date has passed has its INDEX line moved into
+`INDEX-ARCHIVE.md`, rebuilt deterministically by `hub/brain_merge.py` alongside `INDEX.md`.
+`INDEX.md` stays the always-in-context catalog of what's active; `INDEX-ARCHIVE.md` is a
+cold shelf a filesystem host fetches on demand ("anything archived about X?") rather than
+something pinned into every session. The file is only created once something is actually
+on the shelf.
+
+Three properties make this safe to run unattended, and each is worth stating because the
+obvious implementation gets them wrong:
+
+- **Only the catalog line moves.** The item's file stays exactly where it is, still
+  readable, still `[[wikilink]]`-resolvable, still merged and secret-scrubbed like any
+  other. Archiving is a hot/cold split of the index, never a deletion.
+- **The trigger is a date comparison, not a judgement.** `expires` before today. No
+  duration math, no model guess about staleness, and no notion of "untouched" — which
+  would need access-time tracking the brain deliberately doesn't keep.
+- **The cloud seam.** Cloud providers receive the published *packet*, not the repository,
+  and cannot lazy-fetch a cold shelf. So the packet carries `INDEX.md` **and**
+  `INDEX-ARCHIVE.md`, both through the same visibility filter — otherwise archiving a
+  `shared` item would silently revoke every cloud assistant's access to it while every
+  health check stayed green. The only thing ever excluded from the packet remains
+  `visibility: local`; that invariant is unchanged.
 
 ---
 
@@ -172,10 +217,13 @@ ranges must produce zero output.
 ---
 name: <kebab-slug>
 description: <one line — this becomes the index line>
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
-visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+visibility: shared | local    # REQUIRED — always state it; omitting it withholds the item AND blocks publish
+lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
+expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
+domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>
@@ -193,6 +241,59 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
   than the longest fence inside (four instead of three) — otherwise the block splits and
   the copy button grabs only half of it.
 <!-- /spec-slice -->
+
+#### What the gate tolerates, and what it still refuses
+
+The grammar above is what a model is taught to emit. `hub/inbox_ingest.py` also accepts
+three deviations from it, because each one accounted for real captures that were thrown
+away — eleven quarantine events between 2026-08-04 and 2026-08-07, six of them on one day.
+`tests/test_capture_reliability.py` replays a reproduction of every one of those artifacts.
+
+- **`<MEMORY>` with no `file=` / `action=`** (or only one of them). The path is inferred
+  from the block's own frontmatter: `memories/<name>.md`, or `knowledge/<name>.md` when
+  `type: knowledge`, per the folder rule in §1. An absent `action` becomes `new`.
+- **Frontmatter missing its opening `---`.** Restored, but only when the leading lines are
+  unambiguously frontmatter — every line up to the terminator is `<known-key>: <value>`,
+  including `name:` and `type:`. Only delimiters are added; nothing is edited or supplied.
+  This travels with the previous case: in all four archived instances the attributes and
+  the delimiter went missing in the same emit, and inferring the path while committing an
+  unreadable body would only trade a loud failure for a silent one.
+- **A missing trailing `INDEX:` line.** Nothing consumes it — `INDEX.md` is rebuilt from
+  item frontmatter by `brain_merge.build_index_bytes`, and the item's content is already
+  bounded by `</MEMORY>`, so its absence signals nothing about truncation. Still emit it:
+  it is how a human reads back what a block will do before running it.
+
+The inference can only re-read what the block states, so it refuses — quarantining exactly
+as before — when `name:` is absent or is not a kebab slug, when `type:` is not a known item
+type, and when the leading lines are not plainly frontmatter. An **absent** `action` never
+resolves to `delete`; it defaults to `new`.
+
+Two honest caveats, because an overstated guarantee is worse than none:
+
+- A block that **states** `action="delete"` and omits `file=` will have its path inferred
+  from its own frontmatter and the delete executed, at cloud trust as well as local. That
+  is a *write*, so "none of this widens what may be written" would be false. It is a
+  deliberate, narrow allowance: the emitter did say delete and did name the item, the
+  synthesized path is confined to `<folder>/<kebab>.md`, the ownership gate still applies,
+  and a target that does not exist still quarantines. It is stated here because it is the
+  one destructive path the recovery can reach.
+- The "a block that got the tag right keeps the strict frontmatter rule" carve-out is keyed
+  on `MEMORY_RE` matching, and that regex fixes the attribute ORDER. So `file=` before
+  `action=` takes the strict path, while the same block with those two attributes swapped
+  takes the recovery path and has its headless frontmatter repaired. Well-formedness is not
+  what decides; matching that one regex is.
+
+Every commit produced by the recovery path carries an `Inferred:` trailer naming what was
+synthesized or repaired, and `hub/sweep_run.py` reports the same in its outcome string —
+so a repaired capture is never byte-indistinguishable in `git log` from one the emitter
+authored correctly, and `git log --grep='^Inferred:'` answers how often the grammar is
+actually being lost.
+
+An **empty** capture is quarantined under its own reason, `empty-block`, rather than as a
+`parse-error`. It is not a malformed block; it is a caller that emitted nothing — a
+different diagnosis and a different fix (see `hub/mcp_server.py`'s `loreport_save_memory`
+dispatch, which refuses an absent `block` argument instead of manufacturing an empty one).
+The quarantine artifact is 0 bytes because `quarantine()` copies its input verbatim.
 
 ### profile-template v1
 
@@ -216,7 +317,7 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
 <!-- spec-slice: rules-compact v1 — verbatim copy; canonical text: docs/format-spec.md Appendix A -->
 Every item: YAML frontmatter with `name` (kebab-slug, unique across the whole brain,
 equal to the filename stem), `description` (one line), `type` (one of
-`user | feedback | project | reference | knowledge`); body in plain markdown;
+`user | feedback | project | reference | knowledge | person | decision`); body in plain markdown;
 `[[wikilinks]]` are bare slugs naming other items. `INDEX.md` holds exactly one line per
 item — `- [[name]] — hook  (type)` — under `## Memories` / `## Knowledge`, plus one line
 per skill package — `- [[skill-name]] — hook  (skill)` — under `## Skills`. Changed or

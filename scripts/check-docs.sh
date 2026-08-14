@@ -118,6 +118,19 @@ else:
         if _func(other, SIG) != canon_vis:
             bad.append(f"{other}: _visibility_from_text DRIFTED from hub/brain_merge.py")
 
+# The companion primitive: _visibility_from_text deliberately cannot tell "absent"
+# from "explicitly local", and the three callers that RELAX a control on `local` -- the
+# publish gate, the secret-scrub split, and the skills-are-shared carve-out in the egress
+# resolvers -- must. Same duplication rule, so same drift check.
+SIG2 = "def _has_explicit_visibility(text):"
+canon_exp = _func("hub/brain_merge.py", SIG2)
+if canon_exp is None:
+    bad.append("hub/brain_merge.py: _has_explicit_visibility not found")
+else:
+    for other in ["hub/snapshot_publish.py", "hub/mcp_server.py"]:
+        if _func(other, SIG2) != canon_exp:
+            bad.append(f"{other}: _has_explicit_visibility DRIFTED from hub/brain_merge.py")
+
 # --- 3. relative links ---------------------------------------------------------
 for f in root.rglob("*.md"):
     if ".maestro" in str(f) or ".git/" in str(f):
@@ -136,24 +149,63 @@ sys.exit(1 if bad else 0)
 PY
 
 # --- 4. make-surface behaviour --------------------------------------------------
+# Run against BOTH copies of the script. examples/brain/make-surface.sh is the one a
+# reader sees; brain-template/make-surface.sh is the one scripts/init-brain.sh installs
+# into every real brain, and it was the only duplicated file in the repo with no checker
+# of any kind — reverting its fail-closed rule left every gate here green. The two are
+# byte-identical by intent, so the same fixture and the same assertions apply to each.
+export BOOTSTRAP="$PWD/prompts/bootstrap.md"
+for surface_src in examples/brain/make-surface.sh brain-template/make-surface.sh; do
 tmp=$(mktemp -d)
 cp -r examples/brain "$tmp/b"
+cp "$surface_src" "$tmp/b/make-surface.sh"
+chmod +x "$tmp/b/make-surface.sh"
 # Copied out of the repo, the fixture can no longer find ../../prompts/bootstrap.md —
 # which is exactly the case the BOOTSTRAP override exists for.
-export BOOTSTRAP="$PWD/prompts/bootstrap.md"
 if ! (cd "$tmp/b" && ./make-surface.sh --host "CheckRunner" >/dev/null 2>&1); then
-  echo "FAIL: make-surface.sh errored on examples/brain"; fail=1
+  echo "FAIL: $surface_src errored on examples/brain"; fail=1
 elif grep -q 'set it here: `____`' "$tmp/b/surface.md"; then
-  echo "FAIL: --host did not fill the protocol's Host blank"; fail=1
+  echo "FAIL: $surface_src --host did not fill the protocol's Host blank"; fail=1
 fi
 # a local item must never appear in a default surface
 printf -- '---\nname: checkrunner-local\ndescription: probe\ntype: reference\nvisibility: local\n---\nprobe\n' > "$tmp/b/memories/checkrunner-local.md"
 printf -- '- [[checkrunner-local]] — probe  (reference)\n' >> "$tmp/b/INDEX.md"
+# ...and an UNMARKED item must not either. `visibility:` is required (format-spec.md §1);
+# the filter is fail-closed, so an item nobody classified is withheld exactly like a
+# `local` one. This case is the whole reason the old exact-line `grep -qi '^visibility:
+# local$'` test was replaced: it included anything that did not match that one literal.
+printf -- '---\nname: checkrunner-unmarked\ndescription: probe\ntype: reference\n---\nprobe\n' > "$tmp/b/memories/checkrunner-unmarked.md"
+printf -- '- [[checkrunner-unmarked]] — probe  (reference)\n' >> "$tmp/b/INDEX.md"
+# ...and neither must a SKILL a human marked local. The skills carve-out supplies a
+# default for a key skills do not carry; unconditional, it OVERRODE the key and made
+# `visibility: local` on a SKILL.md a control that reported success and still pasted the
+# skill into a cloud assistant.
+mkdir -p "$tmp/b/skills/checkrunner-local-skill"
+printf -- '---\nname: checkrunner-local-skill\ndescription: probe\nvisibility: local\n---\nprobe\n' > "$tmp/b/skills/checkrunner-local-skill/SKILL.md"
+printf -- '- [[checkrunner-local-skill]] — probe  (skill)\n' >> "$tmp/b/INDEX.md"
 (cd "$tmp/b" && ./make-surface.sh >/dev/null 2>&1)
 if grep -q 'checkrunner-local' "$tmp/b/surface.md"; then
-  echo "FAIL: make-surface.sh leaked a visibility:local item into the default surface"; fail=1
+  echo "FAIL: $surface_src leaked a visibility:local item into the default surface"; fail=1
+fi
+if grep -q 'checkrunner-unmarked' "$tmp/b/surface.md"; then
+  echo "FAIL: $surface_src leaked an UNMARKED item into the default surface"; fail=1
+fi
+if grep -q 'checkrunner-local-skill' "$tmp/b/surface.md"; then
+  echo "FAIL: $surface_src leaked a visibility:local SKILL into the default surface"; fail=1
+fi
+# The assertions above are satisfied by an EMPTY surface, which the fail-closed
+# filter makes a live possibility rather than a theoretical one: get the rule wrong and
+# make-surface silently withholds the entire brain instead of leaking it. So assert the
+# positive too — a `visibility: shared` item and an UNMARKED skill (no `visibility:`
+# field exists for skills) must both still be there.
+if ! grep -q 'prefers-plain-language-answers' "$tmp/b/surface.md"; then
+  echo "FAIL: $surface_src dropped a visibility:shared item from the default surface"; fail=1
+fi
+if ! grep -q 'distill-source-into-knowledge' "$tmp/b/surface.md"; then
+  echo "FAIL: $surface_src dropped an unmarked skill from the default surface"; fail=1
 fi
 rm -rf "$tmp"
+done
 
 # --- 4b. report_build's visibility parser must AGREE with the canonical one ------
 # report_build.py deliberately returns "private" instead of "local" (human wording),
@@ -166,6 +218,7 @@ def load(name, path):
     s.loader.exec_module(m); return m
 canon = load("bm", "hub/brain_merge.py")
 rep   = load("rb", "hub/report_build.py")
+aud   = load("ba", "hub/brain_audit.py")
 CASES = ['visibility: local', 'visibility: "local"', "visibility: 'local'", 'visibility: Local',
          'visibility: LOCAL', 'Visibility: local', 'visibility: local  # note', 'visibility: shared',
          'visibility: nonsense', 'type: project']
@@ -177,14 +230,25 @@ for line in CASES:
     b_norm = "local" if b == "private" else b
     if a != b_norm:
         bad.append(f"  {line!r}: brain_merge={a} report_build={b}")
+    # hub/brain_audit.py is the CHECKER. A checker that classifies differently
+    # from the publisher is worse than none — it certifies the wrong thing. It
+    # must stay on the fail-closed rule and never drift to the whole-line
+    # `^visibility:\s*local\s*$` match used by project.py / make-surface.sh /
+    # doctor.sh: under that rule `visibility: "local"` reads as SHARED, and the
+    # audit would report green on a real leak.
+    c = aud.effective_visibility(text)
+    if a != c:
+        bad.append(f"  {line!r}: brain_merge={a} brain_audit={c}")
 for text, label in (('no frontmatter at all', 'bare'), ('---\nname: x\n', 'unterminated')):
     a = canon._visibility_from_text(text); b = rep.visibility_from_text(text)
     b_norm = "local" if b == "private" else b
     if a != b_norm: bad.append(f"  {label}: brain_merge={a} report_build={b}")
+    c = aud.effective_visibility(text)
+    if a != c: bad.append(f"  {label}: brain_merge={a} brain_audit={c}")
 if bad:
-    print("FAIL: report_build.py visibility parser disagrees with hub/brain_merge.py:")
+    print("FAIL: a visibility parser disagrees with hub/brain_merge.py:")
     print("\n".join(bad)); sys.exit(1)
-print("visibility parsers agree across 12 cases")
+print("visibility parsers agree across 12 cases (report_build + brain_audit)")
 PYEQ
 
 # --- 5. version-bump discipline -------------------------------------------------

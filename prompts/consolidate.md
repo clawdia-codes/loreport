@@ -9,7 +9,7 @@ can actually write files and I say so.
 <!-- spec-slice: rules-compact v1 — verbatim copy; canonical text: docs/format-spec.md Appendix A -->
 Every item: YAML frontmatter with `name` (kebab-slug, unique across the whole brain,
 equal to the filename stem), `description` (one line), `type` (one of
-`user | feedback | project | reference | knowledge`); body in plain markdown;
+`user | feedback | project | reference | knowledge | person | decision`); body in plain markdown;
 `[[wikilinks]]` are bare slugs naming other items. `INDEX.md` holds exactly one line per
 item — `- [[name]] — hook  (type)` — under `## Memories` / `## Knowledge`, plus one line
 per skill package — `- [[skill-name]] — hook  (skill)` — under `## Skills`. Changed or
@@ -30,7 +30,7 @@ for `source:` and `captured:` — carry them through unchanged.
 and flag mismatches — but never merge, prune, or rewrite a skill package in this plan.
 Skill edits are a human job; your job is to keep the catalog honest.
 
-## Operations — do all five, in this order
+## Operations — do all six, in this order
 1. **Lint** — flag: invalid/missing frontmatter · name≠filename · INDEX lines with no
    item or skill package · items/skills with no INDEX line · wikilinks that resolve to
    nothing · duplicate names.
@@ -45,8 +45,18 @@ Skill edits are a human job; your job is to keep the catalog honest.
    persist in git history, provider uploads, and chat transcripts — so tell me to rotate
    the secret first, then apply the redaction. This scrub is the backstop; the standing
    rule is that these never get saved at all.
-5. **Reindex** — rebuild `INDEX.md` in full: one line per surviving item plus one per
-   skill package, grouped by section, alphabetical within each.
+5. **Lifecycle** — you know today's date; use it, don't estimate durations. Any item whose
+   `expires` is **before today** is archived: its INDEX line moves to `INDEX-ARCHIVE.md`
+   and **the file itself stays exactly where it is** — archiving is a catalog move, never a
+   deletion, and an archived item must still resolve by `[[wikilink]]`. A `temporary` item
+   with no `expires` is the only case you judge rather than compute: say whether it has
+   passed its useful window, and propose either an `expires` date or archival. An `active`
+   item nothing has touched in months gets a one-line "still current?" nudge — never an
+   automatic change. **`permanent` items are never archived**, and never propose adding
+   `expires` to one; that combination is invalid and will be rejected at capture.
+6. **Reindex** — rebuild `INDEX.md` in full: one line per surviving *unarchived* item plus
+   one per skill package, grouped by section, alphabetical within each. If anything is
+   archived, rebuild `INDEX-ARCHIVE.md` the same way.
 
 ## Output — the change plan, exactly these sections
 Open the plan with this line, verbatim:
@@ -58,6 +68,9 @@ Open the plan with this line, verbatim:
   replacement block.
 - **Fixes** — lint repairs as `<MEMORY action="update">` blocks.
 - **New INDEX.md** — the complete file in one fenced block.
+- **Archived** — every item whose line moved to the cold shelf, with the `expires` date
+  that triggered it, plus the complete `INDEX-ARCHIVE.md` in one fenced block. If nothing
+  was archived, say "none" — the shelf staying empty is a result, not an absence of one.
 - **Visibility changes** — every item whose `visibility` differs from before, with why.
   If there are none, say "none" — I need to see that explicitly, not infer it.
 - **Untouched** — a count, so I know you saw everything.

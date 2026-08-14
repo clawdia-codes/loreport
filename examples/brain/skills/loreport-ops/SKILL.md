@@ -19,7 +19,7 @@ Do this first — it decides how every operation below is performed.
 | **Filesystem** | Shell / file access to the brain directory | Read and edit files directly; `git show main:<path>` for canonical reads. Run `assets/loreport-status.sh` for status. |
 | **Paste** | Neither | Emit `<MEMORY …>` blocks and ask the user to file them; ask them to paste items you need. |
 
-The brain lives at `~/projects/loreport-oyvind-theie` on the user's machine (adjust if
+The brain lives in the user's Loreport brain repo (adjust if
 they say otherwise). Never guess a path on a host that has no filesystem.
 
 ## ② Run the requested operation
@@ -64,10 +64,13 @@ it captured itself. If a change is refused, say so plainly — don't retry again
 
 ## ③ Rules that always apply
 
-- **`shared` vs `local`.** `shared` (default) syncs to every provider. `local` never
-  leaves the machine — health, finances, credentials, employer details, another person's
-  private information. When capturing something sensitive, set `visibility: local`
-  without being asked. When unsure, ask before defaulting to shared.
+- **`shared` vs `local`.** State `visibility:` on every item — it is required, and there
+  is no shared-by-default. `shared` syncs to every provider. `local` never leaves the
+  machine — health, finances, credentials, employer details, another person's private
+  information. When capturing something sensitive, set `visibility: local` without being
+  asked. When unsure, ask; an item left unclassified is withheld from every provider and
+  blocks the next publish, so guessing `shared` to avoid the question is the one move that
+  can actually expose something.
 - **Never store secrets.** No credentials, API keys, or tokens, ever — even if pasted.
   Describe the fact without the value ("the deploy key lives in 1Password").
 - **Fetch before update.** Never emit `action="update"` for an item whose current body you

@@ -1,0 +1,20 @@
+{
+  "acked_signature": null,
+  "entries": [
+    {
+      "artifact": "hub/quarantine/claude/2026-08-11-4ed0ca55704e.txt",
+      "detail": "git checkout provider/claude failed: error: pathspec 'provider/claude' did not match any file(s) known to git",
+      "dismissed": null,
+      "first_seen": "2026-08-11T23:30:48",
+      "guess": null,
+      "id": "9a7e5796",
+      "last_seen": "2026-08-11T23:30:48",
+      "names": [],
+      "path": "memories/user-review-this-change-for-security-vulnerabilities-4ed0ca.md",
+      "reason": "git-error",
+      "resolved": null,
+      "state": "parked"
+    }
+  ],
+  "version": 1
+}

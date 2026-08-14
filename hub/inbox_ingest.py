@@ -54,6 +54,17 @@ from datetime import date, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Sibling import, same pattern as brain_merge.py's `synth_detect`: make hub/
+# importable rather than relying on being run as a script. Narrow, deliberate
+# exception to the single-file doctrine — hub/attention.py owns the attention
+# queue's schema and its ONE rendering path, and re-implementing either here is
+# how the same condition ends up with two names. It carries no security
+# primitive, so nothing below is imported from it: SECRET_PATTERNS,
+# _visibility_from_text and friends stay duplicated-and-checked as they are.
+sys.path.insert(0, HERE)
+
+import attention  # noqa: E402
+
 _FALLBACK_PROVIDERS = ("chatgpt", "claude", "codex", "openclaw")
 
 
@@ -72,7 +83,14 @@ def _load_providers():
 
 
 PROVIDERS = _load_providers()
-ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge"}
+ITEM_TYPES = {"user", "feedback", "project", "reference", "knowledge", "person", "decision"}
+# Lifecycle + work/private axis (docs/taxonomy-lifecycle-design.md). All three
+# fields below are OPTIONAL; absent `lifespan` means `permanent`, and absent
+# `domain` means unclassified. Kept byte-identical to brain_merge.py's copies —
+# every hub/*.py file is single-file and stdlib-only, nothing is imported between them.
+LIFESPANS = {"permanent", "active", "temporary"}
+DOMAINS = {"work", "personal", "both"}
+EXPIRES_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 # Identical secret-regex set to brain_merge.py / snapshot_publish.py (duplicated on
@@ -121,8 +139,25 @@ MEMORY_RE = re.compile(
     r'<MEMORY\s+file="(?P<file>[^"]+)"\s+action="(?P<action>[^"]+)"\s*>(?P<body>.*?)</MEMORY>',
     re.DOTALL,
 )
+# Fallback for the ONE malformation that produced six of the eleven observed
+# quarantines: a `<MEMORY>` opening tag with the file=/action= attributes absent
+# (or only one of them present). The content is intact and the block carries a
+# valid `name:` in its own frontmatter, so the attributes are recoverable —
+# see _infer_attrs, which refuses rather than guessing when they are not.
+MEMORY_ANY_RE = re.compile(r"<MEMORY(?P<attrs>[^>]*)>(?P<body>.*?)</MEMORY>", re.DOTALL)
+ATTR_RE = re.compile(r'(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"(?P<val>[^"]*)"')
 INDEX_LINE_RE = re.compile(r"^INDEX:\s*(.*)$", re.MULTILINE)
+EMPTY_BLOCK_DETAIL = ("empty-block: the capture block was empty (0 bytes or whitespace only) — "
+                      "the caller emitted nothing to ingest; the block never reached this gate")
 FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.DOTALL)
+# Used ONLY by _repair_headless_frontmatter, to decide whether the lines at the
+# top of a body are a frontmatter block that lost its opening `---`. The key set
+# is the schema's own vocabulary (validate_schema below): an unknown key means
+# "this is prose, leave it alone", which is what keeps a line like
+# `Continuation doc: …` from being swallowed as metadata.
+FM_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):\s+(?=\S)")
+FM_KEYS = {"name", "description", "type", "visibility", "source", "captured",
+           "domain", "lifespan", "expires"}
 
 
 # --- parsing helpers ---------------------------------------------------------
@@ -159,25 +194,147 @@ def strip_fence(text):
     return "\n".join(lines) + "\n"
 
 
+def _repair_headless_frontmatter(body):
+    """Restore a frontmatter block whose OPENING `---` the emitter dropped.
+    Returns (body, repaired).
+
+    Every one of the four archived bare-`<MEMORY>` captures has this shape too —
+    the tag's attributes and the opening delimiter went missing together, in the
+    same emit. Three end their key lines with `---`; one has no delimiter at all
+    and runs into prose after a blank line. Inferring the path but committing
+    the body as-is would trade a quarantine for something worse: a committed
+    file whose frontmatter no parser in hub/ can read, so it lands in no INDEX
+    and is invisible to every visibility check.
+
+    This only ever ADDS delimiters. It never edits, reorders or supplies a key,
+    and it refuses (returning the body untouched, for the schema gate to reject
+    as before) unless the leading lines are unambiguously frontmatter: every
+    line up to the terminator is `<known-key>: <value>`, and `name:` and `type:`
+    are both among them. A body starting with prose, or with one unrecognised
+    key, is left alone rather than guessed at."""
+    if FRONTMATTER_RE.match(body):
+        return body, False
+    lines = body.split("\n")
+    keys, i = [], 0
+    while i < len(lines) and lines[i].strip() not in ("---", ""):
+        m = FM_KEY_RE.match(lines[i])
+        if not m or m.group(1) not in FM_KEYS:
+            return body, False
+        keys.append(m.group(1))
+        i += 1
+    if i >= len(lines) or "name" not in keys or "type" not in keys:
+        return body, False
+    head = "\n".join(lines[:i])
+    # `---` terminator: consume it (it is the frontmatter's closing delimiter).
+    # Blank-line terminator: keep the blank line, it separates body from
+    # frontmatter once the closing `---` is inserted above it.
+    rest = "\n".join(lines[i + 1:] if lines[i].strip() == "---" else lines[i:])
+    return f"---\n{head}\n---\n{rest}", True
+
+
+def _infer_attrs(attrs, body):
+    """Fill in a `<MEMORY>` tag's missing `file=`/`action=` from the block's OWN
+    frontmatter. Returns (file, action, err).
+
+    FAIL CLOSED: this may only ever RE-READ a name the block already states. It
+    never falls back to the block file's name (a temp file called
+    `mpb-capture-9x7u7u37.txt` would become `memories/mpb-capture-9x7u7u37.md`),
+    never to a slug derived from the description, and never to a folder for a
+    `type:` the schema doesn't know. Anything it cannot read from the
+    frontmatter is a refusal, i.e. the same quarantine as before — the point of
+    the inference is to stop losing recoverable captures, not to accept more.
+
+    `action` defaults to "new" and NOT to "delete": an absent attribute must
+    never resolve to the one action that destroys an item. "new" vs "update" is
+    safe to guess because ownership is enforced per PATH, not per action
+    (check_ownership takes no action argument) and commit_block writes the file
+    identically for both; the action reaches only the commit trailer.
+
+    The folder comes from `type:` per docs/format-spec.md ("user/feedback/
+    project/reference live in memories/; knowledge in knowledge/"). Skills are
+    deliberately not inferrable — they are a directory with a meta.yaml, not a
+    single item file."""
+    file_attr = attrs.get("file")
+    action = attrs.get("action") or "new"
+    if file_attr:
+        return file_attr, action, None
+
+    missing = 'parse-error: <MEMORY> tag has no file="…" attribute'
+    fm, _ = parse_frontmatter(body)
+    if not fm:
+        return None, None, f"{missing} and the block has no frontmatter to infer one from"
+    name = fm.get("name")
+    if not name:
+        return None, None, f"{missing} and the block's frontmatter has no `name:` to infer one from"
+    if not KEBAB_RE.match(name):
+        return None, None, (f"{missing} and its frontmatter `name: {name[:60]}` is not a "
+                            "kebab-case slug, so it cannot be turned into a path")
+    typ = fm.get("type")
+    if typ not in ITEM_TYPES:
+        return None, None, (f"{missing} and its frontmatter `type: {str(typ)[:40]}` is not a "
+                            "known item type, so the target folder is unknown")
+    folder = "knowledge" if typ == "knowledge" else "memories"
+    return f"{folder}/{name}.md", action, None
+
+
 def parse_block(raw_text):
+    """Parse one emit-grammar block. Returns (block, err); `err` is the
+    quarantine DETAIL, and quarantine_reason() maps it to the reason."""
+    # An empty input is its own condition, not a malformed block. Every 0-byte
+    # quarantine artifact ever written here came from this path (quarantine()
+    # copies the input verbatim, so an empty input yields an empty artifact),
+    # and it was reported with the same "no <MEMORY> block found" wording as a
+    # genuinely malformed block — one message covering two conditions, which
+    # left two 2026-08-07 events unexplainable from the digest alone.
+    if not raw_text.strip():
+        return None, EMPTY_BLOCK_DETAIL
     text = strip_fence(raw_text)
     m = MEMORY_RE.search(text)
-    if not m:
-        return None, "parse-error: no <MEMORY file=\"…\" action=\"…\">…</MEMORY> block found"
-    body = m.group("body")
-    if body.startswith("\n"):
-        body = body[1:]
+    if m:
+        # A well-formed tag stays on the strict path, byte for byte as before:
+        # the recovery below is for an emitter that demonstrably lost the
+        # grammar, not a licence to repair blocks that kept it.
+        file_attr, action, body = m.group("file"), m.group("action"), m.group("body")
+        body = body[1:] if body.startswith("\n") else body
+        inferred = []
+    else:
+        bare = MEMORY_ANY_RE.search(text)
+        if not bare:
+            return None, "parse-error: no <MEMORY …>…</MEMORY> block found"
+        body = bare.group("body")
+        body = body[1:] if body.startswith("\n") else body
+        attrs = dict(ATTR_RE.findall(bare.group("attrs")))
+        body, repaired = _repair_headless_frontmatter(body)
+        file_attr, action, err = _infer_attrs(attrs, body)
+        if err:
+            return None, err
+        inferred = [k for k in ("file", "action") if k not in attrs]
+        if repaired:
+            inferred.append("frontmatter delimiters")
+    # A missing trailing `INDEX:` line is NOT an error. Nothing reads it: the
+    # parsed value has no consumer anywhere in hub/, and INDEX.md is rebuilt
+    # deterministically from item frontmatter by brain_merge.build_index_bytes.
+    # It cannot even serve as a truncation check — the item's content is
+    # already bounded by the `</MEMORY>` tag that MEMORY_ANY_RE requires. So
+    # discarding a whole capture over it lost real content for no signal.
     idx_m = INDEX_LINE_RE.search(text)
-    if not idx_m:
-        return None, "parse-error: no trailing INDEX: line found"
     block = {
-        "file": m.group("file"),
-        "action": m.group("action"),
+        "file": file_attr,
+        "action": action,
         "body": body,
-        "index_line": idx_m.group(0),
+        "index_line": idx_m.group(0) if idx_m else None,
+        "inferred": inferred,
         "raw": text,
     }
     return block, None
+
+
+def quarantine_reason(err):
+    """The quarantine REASON for a parse_block error detail. An empty capture
+    gets its own reason: "parse-error" says the emitter sent something this
+    gate could not read, which is a different diagnosis (and a different fix)
+    from the emitter having sent nothing at all."""
+    return "empty-block" if err == EMPTY_BLOCK_DETAIL else "parse-error"
 
 
 def validate_schema(block):
@@ -226,15 +383,65 @@ def validate_schema(block):
     if visibility is not None and visibility not in ("shared", "local"):
         return f"schema-invalid: visibility '{visibility}' must be 'shared' or 'local'"
 
+    # Optional lifecycle fields (docs/taxonomy-lifecycle-design.md Phase 2).
+    lifespan = fm.get("lifespan")
+    if lifespan is not None and lifespan not in LIFESPANS:
+        return f"schema-invalid: lifespan '{lifespan}' not in enum {sorted(LIFESPANS)}"
+
+    expires = fm.get("expires")
+    if expires is not None:
+        # Format is enforced HERE and only here. Downstream (brain_merge.is_expired)
+        # treats an unparseable date as "not expired", because once an item is on
+        # disk the safe reading of a broken date is to leave it in the hot index —
+        # so capture time is the last moment a bad date can still be rejected while
+        # the author is present to fix it.
+        if not EXPIRES_RE.match(expires) or not _is_real_date(expires):
+            return f"schema-invalid: expires '{expires}' must be a real YYYY-MM-DD date"
+        # A stated contradiction, not an inference: `expires` is the archival
+        # trigger for temporary context, so an item that declares itself
+        # permanent or active cannot also declare an expiry date. An item that
+        # omits `lifespan` entirely is NOT rejected — capture models routinely
+        # emit an expiry without the lifespan, and quarantining a well-formed
+        # memory over a missing default would lose real content.
+        if lifespan in ("permanent", "active"):
+            return f"schema-invalid: lifespan '{lifespan}' cannot carry an expires date"
+
+    # Optional `domain` — the work-vs-private axis. This is NOT cloud exposure:
+    # that is `visibility`, and the two are independent (a work note may be local,
+    # a personal note may be shared). Nothing here may be used to infer visibility.
+    domain = fm.get("domain")
+    if domain is not None and domain not in DOMAINS:
+        return f"schema-invalid: domain '{domain}' not in enum {sorted(DOMAINS)}"
+
     return None
+
+
+def _is_real_date(value):
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _visibility_from_text(text):
     """Return "shared" or "local" for an item's raw text.
 
-    FAIL CLOSED: anything we cannot parse as an explicit `shared` is treated
-    as `local`. A false `local` merely hides an item from cloud providers --
-    visible and recoverable. A false `shared` leaks it -- neither.
+    FAIL CLOSED: an item is `shared` ONLY when its frontmatter carries an
+    explicit `visibility: shared`. Everything else -- an ABSENT `visibility:`
+    key, a malformed value, no frontmatter block at all -- is `local`. A false
+    `local` merely hides an item from cloud providers -- visible and
+    recoverable. A false `shared` leaks it -- neither.
+
+    The absent-key case used to return "shared" (the old `absent = shared`
+    frontmatter default). That was the only fail-OPEN default in the engine:
+    an item nobody had classified was not merely unfiltered, it was positively
+    published. See docs/format-spec.md 1 -- `visibility:` is now REQUIRED on
+    items, and this parser is what makes forgetting it safe instead of costly.
+
+    Skills are NOT items and never carry `visibility:` (format-spec.md 1).
+    They are always shared. That carve-out lives in the RESOLVERS that know a
+    path is a skill, never here -- this function only ever sees text.
     """
     if text.startswith("﻿"):
         text = text[1:]
@@ -249,8 +456,6 @@ def _visibility_from_text(text):
         if not sep or key.strip().lower() != "visibility":
             continue
         seen = value.split("#", 1)[0].strip().strip('"').strip("'").strip().lower()
-    if seen is None:
-        return "shared"
     return "shared" if seen == "shared" else "local"
 
 
@@ -326,7 +531,10 @@ def check_ownership(brain_dir, provider, trust, rel_path):
       is decided via the same fail-closed parser as the read path
       (_visibility_from_text) so a hand-edited/malformed `visibility: local`
       field can't be used to bypass this check the way it could bypass a
-      naive `== "local"` string compare.
+      naive `== "local"` string compare. Since that parser now reads an
+      ABSENT `visibility:` as `local` too, an unclassified item on main is
+      update-protected as well: a cloud provider's write to one is refused
+      and quarantined with this reason attached, rather than applied.
     """
     if trust == "local":
         return None
@@ -379,7 +587,16 @@ def is_noop_commit(brain_dir):
 
 # --- quarantine / commit --------------------------------------------------------
 
-def quarantine(brain_dir, provider, block_file, reason, detail):
+def quarantine(brain_dir, provider, block_file, reason, detail, item_path=None):
+    """Set the raw block aside AND raise it on the attention queue.
+
+    The quarantine artifact alone reached nobody: hub/quarantine/ is gitignored,
+    so a failed capture existed only as a local file — of nine audited events,
+    seven files were already gone. `item_path` is the relpath the block tried to
+    write (None when it failed before anyone could tell, e.g. a parse error);
+    the queue turns it into a `parked` annotation on the projected surface the
+    next session unavoidably reads.
+    """
     qdir = os.path.join(brain_dir, "hub", "quarantine", provider)
     os.makedirs(qdir, exist_ok=True)
     today = date.today().isoformat()
@@ -412,6 +629,74 @@ def quarantine(brain_dir, provider, block_file, reason, detail):
     print(f"QUARANTINED: {reason} — {detail}")
     print(f"Quarantine file: {dest}")
 
+    # Best-effort, and deliberately so: this is the FAILURE handler. If raising
+    # the entry fails too, the block is still set aside and still in the digest,
+    # and the exit code is still 1 — turning a reportable capture failure into an
+    # unhandled traceback would lose the report we just wrote.
+    try:
+        attention.record_parked(
+            brain_dir,
+            item_path,
+            reason,
+            detail,
+            artifact=os.path.relpath(dest, brain_dir),
+        )
+    except Exception as exc:  # noqa: BLE001 - see comment above
+        print(f"warning: could not record the parked capture: {exc}", file=sys.stderr)
+
+
+class CleanupError(RuntimeError):
+    """Raised when the scoped post-failure cleanup cannot put the capture's own
+    path back the way it found it. Never swallowed and never widened into a
+    tree-wide wipe: an operator resolving one half-staged path by hand is
+    strictly better than silently discarding every other uncommitted change in
+    the shared working tree."""
+
+
+def _path_in_head(brain_dir, rel_path):
+    """True if `rel_path` is committed on the currently checked-out branch."""
+    return git(brain_dir, "cat-file", "-e", f"HEAD:{rel_path}", check=False).returncode == 0
+
+
+def _restore_capture_path(brain_dir, rel_path, in_head):
+    """Undo THIS capture's index/worktree change to `rel_path` — and nothing
+    else (REVIEW.md #13, live data loss measured 2026-08-07/08).
+
+    The predecessor of this function was `git checkout -- .` + a pathless
+    `git reset`, which discarded every uncommitted change in the shared
+    working tree, not just the paths this capture wrote. Because a dirty tree
+    is exactly what makes `git checkout provider/<host>` fail, that handler
+    destroyed the very hand-edit that caused the failure.
+
+    `in_head` must be sampled BEFORE the capture mutates anything — after a
+    `git rm` the path is still in HEAD, but after a failed create it never
+    was, and the two need opposite repairs (restore vs. delete the untracked
+    leftover, which the old handler left behind for `finally`'s
+    `git checkout main` to carry onto main).
+
+    Raises CleanupError if the path is not clean afterwards. The postcondition
+    is asserted against `git status`, not inferred from the individual return
+    codes, so a git that "succeeds" without restoring is still caught.
+    """
+    abs_path = os.path.join(brain_dir, rel_path)
+    git(brain_dir, "reset", "-q", "HEAD", "--", rel_path, check=False)
+    if in_head:
+        git(brain_dir, "checkout", "HEAD", "--", rel_path, check=False)
+    elif os.path.exists(abs_path):
+        try:
+            os.remove(abs_path)
+        except OSError:
+            pass  # reported by the postcondition check below
+
+    status = git(brain_dir, "status", "--porcelain", "--", rel_path, check=False)
+    leftover = (not in_head) and os.path.exists(abs_path)
+    if status.returncode != 0 or status.stdout.strip() or leftover:
+        raise CleanupError(
+            f"scoped cleanup did not restore {rel_path}: "
+            f"git status --porcelain -> {status.stdout.strip()!r} "
+            f"(rc={status.returncode}, exists_on_disk={os.path.exists(abs_path)})"
+        )
+
 
 def commit_block(brain_dir, provider, block, trust):
     """Commit `block` to provider/<provider>. Returns "committed" or
@@ -423,12 +708,17 @@ def commit_block(brain_dir, provider, block, trust):
     interleave with brain_merge.py's git mutations — the ownership check
     itself also runs inside this lock, so it can't race a concurrent merge
     that changes what's on `main` between the check and the write. On ANY
-    git failure (including a timeout raised by git()) the working tree is
-    restored to clean (`git checkout -- .` + `git reset`) before the
-    exception propagates, so a failed capture never poisons the next capture
-    or the nightly merge with a half-staged change (REVIEW.md #13). Either
-    way, the branch is restored to `main` on exit so the shared working tree
-    is never left parked on a provider branch (REVIEW.md #3 partial)."""
+    git failure (including a timeout raised by git()) the ONE path this
+    capture wrote is restored to its committed state before the exception
+    propagates, so a failed capture never poisons the next capture or the
+    nightly merge with a half-staged change (REVIEW.md #13) — and no other
+    uncommitted change in the shared working tree is touched. If the capture
+    failed before mutating anything (e.g. `git checkout provider/<host>`
+    refused because the tree was dirty) nothing is restored at all: repairing
+    a path this capture never wrote would destroy the hand-edit that caused
+    the failure. Either way, the branch is restored to `main` on exit so the
+    shared working tree is never left parked on a provider branch
+    (REVIEW.md #3 partial)."""
     with brain_lock(brain_dir):
         rel_path = block["file"]
         denial = check_ownership(brain_dir, provider, trust, rel_path)
@@ -436,9 +726,15 @@ def commit_block(brain_dir, provider, block, trust):
             raise OwnershipError(denial)
 
         branch = f"provider/{provider}"
+        # Set the instant before the first mutation, and only then: the
+        # cleanup below must be a no-op for a capture that never wrote
+        # anything, otherwise it repairs a path it did not dirty.
+        touched = False
+        in_head = False
         try:
             git(brain_dir, "checkout", branch)
             abs_path = os.path.join(brain_dir, rel_path)
+            in_head = _path_in_head(brain_dir, rel_path)
 
             if block["action"] == "delete":
                 name = os.path.splitext(os.path.basename(rel_path))[0]
@@ -446,9 +742,17 @@ def commit_block(brain_dir, provider, block, trust):
                     raise RuntimeError(
                         f"delete target does not exist under brain_dir: {rel_path}"
                     )
+                # AFTER the rm, not before: `git rm` fails at pathspec-match
+                # (mutating nothing) when the target exists on disk but is
+                # untracked — a session's hand-created file. Flagging it as
+                # touched would send the cleanup down the not-in-HEAD branch
+                # and delete that file, which the old handler never did.
                 git(brain_dir, "rm", "-f", rel_path)
+                touched = True
             else:
                 os.makedirs(os.path.dirname(abs_path) or brain_dir, exist_ok=True)
+                # BEFORE the open, which truncates on entry.
+                touched = True
                 with open(abs_path, "w", encoding="utf-8") as fh:
                     fh.write(block["body"])
                 git(brain_dir, "add", rel_path)
@@ -467,14 +771,37 @@ def commit_block(brain_dir, provider, block, trust):
                 f"File: {rel_path}\n"
                 f"Ingested-At: {ts}\n"
             )
+            # THE DURABLE RECORD OF THE RECOVERY. The recovery path does two
+            # things the emitter did not: it SYNTHESIZES file/action from
+            # frontmatter, and it REWRITES the committed body by inserting `---`
+            # delimiters. Without this trailer the only record of either is a
+            # stdout line in main() — so a repaired capture is byte-identical in
+            # `git log` to one the emitter authored correctly, and the SWEEP
+            # (which is where the four real bare-tag emits came from, and which
+            # prints nothing) leaves no record anywhere at all. A trailer is the
+            # right home: it travels with the commit, survives a re-clone, and
+            # `git log --grep='^Inferred:'` answers "how often is the emitter
+            # actually losing the grammar?" — the question that decides whether
+            # this recovery path can ever be retired.
+            if block.get("inferred"):
+                msg += f"Inferred: {', '.join(block['inferred'])}\n"
             git(brain_dir, "commit", "-m", msg)
             return "committed"
-        except Exception:
-            # Leave the tree clean rather than poisoning the next
+        except Exception as exc:
+            # Leave OUR path clean rather than poisoning the next
             # capture/merge with a half-staged change, then let the caller
-            # map this to a real quarantine (not a silent loss).
-            git(brain_dir, "checkout", "--", ".", check=False)
-            git(brain_dir, "reset", check=False)
+            # map this to a real quarantine (not a silent loss). Everything
+            # else in the shared working tree is none of our business.
+            if touched:
+                try:
+                    _restore_capture_path(brain_dir, rel_path, in_head)
+                except Exception as cleanup_exc:
+                    raise CleanupError(
+                        f"capture of {rel_path} failed ({exc}) AND the scoped "
+                        f"cleanup failed ({cleanup_exc}); that path may still "
+                        f"hold a half-staged change. Refusing to fall back to "
+                        f"wiping the working tree — resolve {rel_path} by hand."
+                    ) from exc
             raise
         finally:
             # Never leave the shared working tree parked on a provider
@@ -507,34 +834,43 @@ def main():
 
     block, err = parse_block(raw)
     if err:
-        quarantine(brain_dir, args.provider, args.block_file, "parse-error", err)
+        quarantine(brain_dir, args.provider, args.block_file, quarantine_reason(err), err)
         sys.exit(1)
+
+    if block["inferred"]:
+        # Say so on stdout: an inferred path is a decision the emitter did not
+        # make, and the MCP tool relays this text back to the caller.
+        print(f"INFERRED {', '.join(block['inferred'])} from frontmatter: "
+              f"file=\"{block['file']}\" action=\"{block['action']}\"")
 
     schema_err = validate_schema(block)
     if schema_err:
-        quarantine(brain_dir, args.provider, args.block_file, "schema-invalid", schema_err)
+        quarantine(brain_dir, args.provider, args.block_file, "schema-invalid", schema_err,
+                   item_path=block.get("file"))
         sys.exit(1)
 
     secret_hit = scan_secrets(block["raw"])
     if secret_hit:
         masked = secret_hit[:6] + "…" if len(secret_hit) > 6 else secret_hit
         quarantine(brain_dir, args.provider, args.block_file, "secret-scan",
-                   f"matched a secret pattern: {masked}")
+                   f"matched a secret pattern: {masked}", item_path=block.get("file"))
         sys.exit(1)
 
     imp_hit = scan_imperative(block["raw"])
     if imp_hit:
         quarantine(brain_dir, args.provider, args.block_file, "imperative-scan",
-                   f"unattributed standing instruction: \"{imp_hit}\"")
+                   f"unattributed standing instruction: \"{imp_hit}\"", item_path=block.get("file"))
         sys.exit(1)
 
     try:
         result = commit_block(brain_dir, args.provider, block, args.trust)
     except OwnershipError as e:
-        quarantine(brain_dir, args.provider, args.block_file, "ownership-denied", str(e))
+        quarantine(brain_dir, args.provider, args.block_file, "ownership-denied", str(e),
+                   item_path=block.get("file"))
         sys.exit(1)
     except Exception as e:
-        quarantine(brain_dir, args.provider, args.block_file, "git-error", str(e))
+        quarantine(brain_dir, args.provider, args.block_file, "git-error", str(e),
+                   item_path=block.get("file"))
         sys.exit(1)
 
     if result == "skipped: no change":

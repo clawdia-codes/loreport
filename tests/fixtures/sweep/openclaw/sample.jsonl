@@ -1,0 +1,2 @@
+{"type":"message","timestamp":"2026-08-04T12:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The nightly merge runs at midnight local."}]}}
+{"type":"message","timestamp":"2026-08-04T12:00:30.000Z","message":{"role":"user","content":"No, actually — the merge runs at 00:00 UTC, not local midnight."}}

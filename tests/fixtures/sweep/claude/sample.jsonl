@@ -1,0 +1,5 @@
+{"type":"user","timestamp":"2026-08-04T10:00:00.000Z","message":{"role":"user","content":"Please remember this: Loreport sweeps must stay precision-first."}}
+{"type":"assistant","timestamp":"2026-08-04T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I'll note that preference."}]}}
+{"type":"user","timestamp":"2026-08-04T10:01:00.000Z","message":{"role":"user","content":"Ruling: synthesis stays report-only until calibration ends."}}
+{"type":"assistant","timestamp":"2026-08-04T10:01:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Understood."}]}}
+{"type":"user","timestamp":"2026-08-04T10:02:00.000Z","message":{"role":"user","content":"You said \"the merge runs at midnight\" but that's wrong — it runs at 00:00 UTC."}}

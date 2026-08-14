@@ -1,0 +1,19 @@
+<MEMORY>
+name: project-alpha-phase1-shipped-2026-08-05
+type: project
+visibility: shared
+description: Project alpha phase 1 (intake lane, sandbox allowlist, fail-loud launchers) is in review; the timer is DISARMED pending a live-tree fast-forward
+---
+Project alpha phase 1.1-1.4 shipped to review on 2026-08-05 (branch `feat/intake-lane`,
+8 commits). Not merged.
+
+**The timer is disarmed**, chosen deliberately over racing a scheduled fire with an
+unsandboxed runner. If the runner ever "stops running", this is why. Re-arm only after the
+live tree is fast-forwarded.
+
+Three things a merge does not do, each of which produces something that looks installed
+but is not: it does not copy units, it does not reload the manager, and it does not
+fast-forward the deployed tree.
+
+See also [[project-alpha-pipeline]].
+</MEMORY>

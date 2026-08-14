@@ -26,10 +26,13 @@ shape, inside one fenced code block, so I can save it with one paste:
 ---
 name: <kebab-slug>
 description: <one line — this becomes the index line>
-type: user | feedback | project | reference | knowledge
+type: user | feedback | project | reference | knowledge | person | decision
 source: <host this was captured in — from the Host: line if set, else your best guess or unknown>
 captured: <YYYY-MM-DD>
-visibility: shared | local    # optional — omit for shared (default); local = never leaves this machine
+visibility: shared | local    # REQUIRED — always state it; omitting it withholds the item AND blocks publish
+lifespan: permanent | active | temporary   # optional — omit for permanent; temporary = context that should expire
+expires: <YYYY-MM-DD>         # optional — only on temporary; set it whenever a real end date is knowable
+domain: work | personal | both # optional — which side of life; NOT exposure, that is visibility
 ---
 <the fact, in plain markdown. For feedback/project add:
 **Why:** <why this matters>
@@ -49,13 +52,24 @@ INDEX: - [[<kebab-slug>]] — <description>  (<type>)
 <!-- /spec-slice -->
 
 - Pick names that read well in a sentence, since other items will link them as [[names]].
-- The frontmatter above may include `visibility: shared | local` (default `shared` when
-  omitted). Mark `visibility: local` when the capture obviously touches a sensitive/
+- The frontmatter above must state `visibility: shared | local` — always, on every item.
+  Mark `visibility: local` when the capture obviously touches a sensitive/
   always-local topic — health, finances, relationships, credentials/security, employer —
-  so it never leaves this machine.
+  so it never leaves this machine. Omitting the field does not make an item shared: it is
+  withheld from every provider AND blocks the next publish until a human classifies it.
 - Never emit `action="update"` for an item whose current body you have not read this
   session — read it first, then fold in the change. A full replacement rebuilt from only
-  the INDEX line will erase the rest of the item.
+  the INDEX line will erase the rest of the item. Every existing
+  `<!-- human:start -->…<!-- human:end -->` region in that body must pass through
+  verbatim; if you cannot see the current body, do not claim `action="update"`.
+- `type: person` defaults to `visibility: local` (entities — family, colleagues, partners).
+- `lifespan`, `expires` and `domain` are optional and stay omitted unless they are obvious.
+  Omitted `lifespan` means `permanent`, which is the right default for most captures —
+  stamp `temporary` only for context that genuinely stops being true (a trip, a deadline,
+  a stand-in arrangement), and when a real end date is knowable, stamp `expires` with it:
+  that date is what later files the item to the archive, and without it nothing does.
+  `domain: work | personal | both` is which side of life the item belongs to — it is NOT
+  exposure, so never let it influence `visibility` or vice versa.
 
 ## If this host has its own memory (capture parity)
 Your native memory and this brain coexist; neither replaces the other.

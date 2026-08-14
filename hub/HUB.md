@@ -107,10 +107,197 @@ Run once a day (see `hub/config/cron.txt` for the schedule):
    common base.
 
 Read `hub/digest-<date>.md` (see "Daily digest to the user", below) before you
-consider the day's cycle closed. `brain_merge.py` exits nonzero whenever that
-digest needs your attention — a PROFILE conflict, a renamed add/add twin, or a
-local-visibility scrub warning — so a cron/notify hook can catch it without you
-having to remember to look.
+consider the day's cycle closed. `brain_merge.py` distinguishes two nonzero
+exits, and a hook that collapses them into "the merge failed" will misreport a
+healthy pipeline:
+
+| exit | meaning |
+|------|---------|
+| `0`  | merged (or nothing to merge); nothing waiting on you. |
+| `1`  | **BROKEN** — the merge did not complete: a fail-closed scrub abort, or a merge that never started. `main` was rolled back; nothing landed. |
+| `3`  | **NEEDS REVIEW** — the merge completed and `main` is publishable; a PROFILE conflict, a renamed add/add twin, a local-visibility scrub warning, a provenance revert or a quarantined human-region update is waiting on you. Publishing and pushing must continue. |
+
+Exit 3 itself is a stderr line in the journal, so it is not how the owner hears
+about any of those five. The merge stamps `needs_review_kinds` — the subsystem
+keys, never the payloads — into `hub/merge-state.json`, and
+`scripts/loreport-health` §6c turns each one into a NEEDS REVIEW banner entry
+and notification. Three of the five (renamed, scrub warnings, provenance
+reverts) write no quarantine file and appear in no line the digest greps read,
+so that field is their only route to a human.
+
+**What the NEEDS REVIEW entry says.** Naming the state was not enough on its own:
+`merge digest needs review` told the owner a decision was owed but not *which*
+item, *why*, or *what to do*, and the investigation that followed reported a
+healthy pipeline as three days dead. So for anything parked under
+`hub/quarantine/`, `hub/quarantine_report.py` enumerates the blocks and the
+banner names each one — item name, `type`, `visibility`, the block's own
+`description` (truncated), and the reason recorded in
+`hub/quarantine/digest.md` — followed by a copy-pasteable command per outcome:
+
+- **show** — `cat <the parked file>`;
+- **accept** — for a *capture* block, re-run `hub/inbox_ingest.py` on it at
+  `--trust local`, which re-runs the parse, schema, secret and imperative gates
+  and relaxes the ownership check to the tier a human at their own machine
+  actually has. Two classes deliberately get **no** one-liner and are told why
+  in words instead: a rejected *merge update* (applying one by hand would skip
+  the secret scrub, the visibility classification and the provenance revert),
+  and a capture parked as `ownership-denied` — there `--trust local` would
+  switch OFF the very check that refused it, and the commit it produced would
+  carry `Trust: local`, which `collect_provenance_violations()` skips as well,
+  so one pasted line would waive both defences against a cross-provider
+  takeover. **A verb in this alert never claims a gate it does not run**;
+- **discard** — `rm <the parked file>`.
+
+Every path in a printed command is `shlex.quote`d. These lines exist to be
+pasted into a shell, so a filename is command text, not a display string.
+
+The push notification carries the same facts in phone-sized form: the item names
+(capped, then `+N more`), the clause that says merge and publish completed, and
+where to read the commands. `hub/quarantine/` is gitignored, so when the count in
+the digest and the files on disk disagree the alert states both numbers rather
+than rendering a confident empty list.
+
+A completed merge — a quiet no-op night included — stamps
+`hub/merge-state.json` with `last_success_epoch`. The abort paths deliberately
+do not, and that asymmetry is what makes the file a real liveness signal: the
+daily digest is written on the abort paths too, so "a recent digest exists" says
+nothing about whether the pipeline ran. `scripts/loreport-health` fails when
+that stamp is older than `LOREPORT_MERGE_MAX_AGE_HOURS` (default 36).
+
+## Nightly review — proposals get a disposition, drift gets reported
+
+`hub/synth_detect.py` proposes clusters of related items. For its first weeks it
+was report-only in the strict sense: it emitted proposals into a digest line that
+said "none filed", nobody filed them, and nobody was ever asked to. A producer
+nothing consumes decays silently and forever, so `hub/nightly_review.py` is its
+consumer. It runs inside `brain_merge.py`, in the same nightly job as the detector
+— one job, one lock, one artifact.
+
+**It never edits a memory.** A proposal becomes a *decision*, recorded next to it.
+`accept` does not create a `knowledge/` page, does not merge two memories and does
+not touch `memories/`; auto-merging memories from a link heuristic is exactly what
+this design refuses. What changes is that a proposal now has to be answered.
+
+### The disposition ledger — `hub/proposals/ledger.json`
+
+Every detected cluster is entered as `pending` and must reach one of:
+
+| disposition | meaning | requires |
+|---|---|---|
+| `accept` | worth writing up; you will author the page | a reason |
+| `reject` | not a real topic | a reason (and it **stays** rejected — see below) |
+| `defer`  | not now | a reason **and** `--until <future date>` |
+
+```
+python3 hub/nightly_review.py --brain-dir "$BRAIN" --list
+python3 hub/nightly_review.py --brain-dir "$BRAIN" --dispose <id> \
+        --status reject --reason "link sprawl, not a topic"
+```
+
+Both refusals in that table are load-bearing. A disposition with no reason is a
+cleared queue, not a decision — six months later nothing distinguishes "considered
+and dismissed" from "clicked away". A deferral with no return date is a reject
+wearing a disguise: the entry stops being pending and nothing brings it back.
+
+Rejection is **sticky across membership churn**. A proposal's identity is its
+member set, so a rejected cluster that gains one member would otherwise return as a
+brand-new pending proposal every time the brain grows, and you would re-decide the
+same thing forever. A newly detected cluster is suppressed when it is a subset of a
+rejected one, or that rejected one plus at most one newcomer. Two newcomers is a
+materially different cluster and comes back for a fresh decision.
+
+A proposal left pending longer than `PENDING_MAX_DAYS` (14) is graded a **failure**
+by `scripts/loreport-health`. That is the only part of this that makes an undecided
+proposal cost anything; everything else merely records.
+
+The ledger is **tracked** — it holds human decisions and the `first_seen` clock the
+overdue check measures from, so it must survive a re-clone. It is written only when
+a proposal is added or decided, never on a quiet night. (An expiring deferral is
+therefore *computed* from `defer_until` at read time, not written back.)
+
+**The merge commits it on every night it changed, no-op nights included.** That is
+not incidental: a no-op is *most* days, and the first night after this feature
+deploys is one — the brain already holds the clusters, so proposals are detected
+against a repository nothing has pushed to in weeks. Riding the INDEX commit alone
+left live proposals in an untracked file that no re-clone would recover.
+
+Two consequences the code depends on, both easy to get wrong:
+
+- Staging is **unconditional**, not keyed on "a proposal was added". `--dispose`
+  writes the ledger out of band, so between the owner deciding in the afternoon and
+  the merge running at night the file is tracked and *modified*.
+- A no-op night must **commit**, never merely stage, and must **not** `reset --hard`.
+  `loreport-sync`'s post-merge guard reads `git status --porcelain
+  --untracked-files=no`, which sees staged changes — leaving the ledger staged would
+  HALT the sync every night — and a `reset --hard` on a quiet night would revert the
+  tracked, modified ledger, throwing away the decision the owner just recorded.
+
+### Reconciliation — `hub/reconcile-sources.json`
+
+A name-set diff between each **native** memory store (the assistant's own memory,
+which Loreport does not own) and Loreport's `INDEX.md`. This is the mechanical half
+of the `memory-reconcile` skill, run nightly and reported. It never repairs anything.
+
+It is **not** the projection check: `loreport-health` §3–4 assert the *outbound*
+surface still matches what `project.py` wrote. This asserts something different —
+that the native store holds no item Loreport has never seen.
+
+```json
+{
+  "sources": [
+    {"provider": "claude", "path": "~/.claude/projects/<project>/memory", "kind": "dir"},
+    {"provider": "openclaw", "path": "~/.openclaw/wiki/main/INDEX.md", "kind": "file"}
+  ]
+}
+```
+
+`kind: "dir"` takes each `*.md` stem as a name; `kind: "file"` takes every
+`[[wikilink]]`. Relative paths resolve against the brain root; `~` expands.
+
+**A missing or empty config reports `unconfigured`, never `in-sync`,** and health
+renders that as "NOT CONFIGURED — asserting nothing". A diff over zero sources is
+vacuously clean, and this repo has shipped that bug twice; absence of a result must
+never read as "checked and clean". The same guard covers an empty `INDEX.md` and an
+empty native store, both of which report `blind` and grade as failures.
+
+### The dated artifact — `hub/nightly/<YYYY-MM-DD>.json`
+
+Written on every nightly run: the machine-checkable proof that the review happened,
+carrying the disposition counts, the pending and overdue ids, and the reconciliation
+result. Gitignored, same class as `hub/digest-*.md`.
+
+**`scripts/loreport-health` §9 FAILS when yesterday's is missing** — strictly
+yesterday's, not "today's or yesterday's", because the weaker rule cannot be
+falsified by deleting the thing it watches. Distinctly named conditions, so no
+single word covers two states:
+
+| condition | grade |
+|---|---|
+| `hub/nightly/` holds no artifact at all — *nightly review has never run* | FAIL |
+| yesterday's specifically absent — *did not run last night* | FAIL |
+| present but unparseable, or missing its reconciliation section | FAIL |
+| proposals overdue past 14 days | FAIL |
+| proposals merely pending, reconciliation drift, or unconfigured | REVIEW |
+
+The review runs inside the merge, so an aborted merge also leaves no artifact and
+this co-fires with the merge-liveness check. The message says "the nightly did not
+complete", which is true under both causes.
+
+### ⚠ Deploying this to a brain that already exists
+
+A brain gets `.gitignore` **once, at init**, from `brain-template/`. An existing
+brain therefore does not pick up the new `hub/nightly/` line, and `loreport-sync`'s
+`git add -A` would start committing a dated report file every night. Add it by hand,
+once, and confirm the ledger is *not* caught by any broader rule:
+
+```
+echo 'hub/nightly/' >> "$BRAIN/.gitignore"
+git -C "$BRAIN" check-ignore -v hub/proposals/ledger.json   # must print NOTHING
+```
+
+If that second command prints a match, the ledger will never be committed, the
+`first_seen` clock lives only on disk, and the overdue check — the one assertion
+that forces a decision — fails open. Add a `!hub/proposals/` negation.
 
 ## Monthly full consolidation
 
@@ -144,6 +331,52 @@ warnings), and how many items are sitting in quarantine. Read that file first ea
 cycle. For the raw quarantine detail — secrets and imperative-injection attempts
 alike, from `inbox_ingest.py` — see `hub/quarantine/digest.md`. Also watch for any
 cycle that took unusually long (>10s) as a possible anomaly worth a look.
+
+### The attention queue — what the brain has to ASK about
+
+`hub/quarantine/digest.md` is a report you have to go and read; nothing made a
+failed capture reach the session that needed it. `hub/attention.py` is the other
+half — it carries two states, and they never share a name:
+
+- **`parked`** — a capture that never landed. Its content is **not** in the
+  brain; only the raw block under `hub/quarantine/` has it. Recorded
+  automatically by `inbox_ingest.py`'s quarantine handler.
+- **`contested`** — two or more items that both landed and disagree. Recorded
+  with `python3 hub/attention.py contest <name> <name> --guess <name>`.
+
+Both are **annotations, never blocks**: `hub/project.py` marks the item's own
+line in every projected surface (`⚠ CONTESTED#<id>`) and adds a short section
+naming both claims and the recommended answer, so a session states its best
+guess and asks — it never silently picks, and it never withholds the memory.
+The question is announced as new only while the open set differs from what you
+last answered; after that it stands quietly. Local items are withheld from the
+cloud surfaces here exactly as they are from the index.
+
+Clearing one is a single command:
+
+```
+python3 hub/attention.py list
+python3 hub/attention.py resolve <id> --winner <name>   # records the answer, clears the marker
+python3 hub/attention.py dismiss <id>                   # false candidate — no reason required
+```
+
+`hub/attention.json` is local state and gitignored, like `hub/merge-state.json`.
+Because it is untracked and hand-editable, `attention.load()` **validates every
+entry**, not just the container — id, state, schema version, `names` — and
+refuses the file outright otherwise. `project.build_attention()` then wraps its
+*whole* body, not only the load. Both matter for the same reason: `project.py`
+catches per target, so one malformed local JSON file failed all five targets and
+left `hub/projection-manifest.json` with `targets: []` — and every projection
+check in `loreport-health` then iterates an empty list and asserts nothing while
+the surfaces sit frozen. An unreadable queue must cost one visible line, never
+the whole memory.
+
+**Every producer must pass `item_path`.** `hub/sweep_run.py` — not
+`inbox_ingest.main` — is the nightly bulk producer of parked captures, so it is
+where these entries come from in practice. Without `item_path` the entry stores
+`path: None`, `annotated_names()` returns `[]`, and no marker is ever placed on
+the item's index line: the primary delivery hook, because injection beats
+retrieval. Only a parse error legitimately passes `None` — it named no file.
 
 If a check ever needs re-verifying by hand: `brain_merge.py --test-determinism`
 re-checks INDEX determinism; feeding a valid, a secret-bearing, and an

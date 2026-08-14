@@ -1,0 +1,35 @@
+[Unit]
+Description=Loreport weekly health check (design-08)
+# The script Telegrams on its own failure path and exits 1 to mean "brain is
+# unhealthy" — an ordinary, well-reported outcome, not a systemd failure. Any
+# OTHER nonzero status means the check itself died before it could report, which
+# is the case nothing else can see. Requires loreport-alert@.service installed.
+OnFailure=loreport-alert@%N.service
+
+[Service]
+Type=oneshot
+# exit 1 is "unhealthy, already reported". Without this, OnFailure= would fire a
+# second Telegram every time the brain is merely unhealthy, and the last-resort
+# alarm would stop meaning "the check is broken".
+#
+# Only BROKEN and STALE reach exit 1. Items merely awaiting a human decision —
+# quarantined blocks, a PROFILE conflict, an unpasted ChatGPT surface — exit 0:
+# the merge and publish completed normally, and grading that as a failure is
+# what once had this brain reported as three days dead while it ran fine every
+# night. The check's startup errors exit 2 so they remain real unit
+# failures; do not normalize those to 1, which SuccessExitStatus= would hide.
+#
+# WARNING, corrected 2026-08-11: this used to claim "2, and 127 from an unset
+# required key". The 127 was wrong. An unset required key went through
+# `${VAR:?msg}`, which aborts a non-interactive bash with status 1 — exactly the
+# code this line tells systemd to forgive. A MISCONFIGURED run was therefore
+# recorded green on a weekly timer while the check had examined nothing at all.
+# The startup guards are now explicit `exit 2`, matching loreport-audit. Pinned
+# by tests/test_health_liveness.py::StartupErrorsAreNotHiddenBySuccessExitStatus,
+# including an assertion that SuccessExitStatus never forgives 2.
+SuccessExitStatus=1
+# Edit the --config path to point at YOUR brain's loreport.conf; the engine ships
+# no instance paths. There is deliberately no ConditionPathExists= here: a failed
+# condition marks the unit successful-and-skipped, which on a weekly timer is
+# indistinguishable from a healthy run — a permanently green, permanently dead check.
+ExecStart=%h/projects/loreport/scripts/loreport-health --config %h/projects/my-brain/loreport.conf

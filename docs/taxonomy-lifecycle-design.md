@@ -9,6 +9,13 @@ model infers `type` and lifecycle; the user never fills a form. Every addition b
 `visibility` tiering — a `decision` or entity page about Coach/Portia/finance, or one naming a
 real person, defaults `local` and never reaches a cloud provider.
 
+**Status (2026-08-04, S2):** item 1's enum change has *shipped ahead of this spec* — S2
+(`design-wiki-parity.md` §4) added BOTH `decision` and `person` to `ITEM_TYPES` in
+`inbox_ingest.py` / `brain_merge.py`, to the prompt grammars, and to `project.py`'s
+truncation ranking. So item 1 below is done and its "concrete landmine" is closed; read
+"the ONLY new type this sprint" as historical. Item 2 (`lifespan`) and everything after
+it remain unbuilt.
+
 ---
 
 ## Schema delta (the whole change, precisely)
@@ -128,7 +135,7 @@ that produced it is transient.
 - `consolidate.md`: enforce the reject-list (drop casual/transient/obsolete on consolidation).
 - Document, in `taxonomy-lifecycle-design.md` "Deferred" below, *why* confidence-scores and
   conflict-coexistence are out (they fight dedup; revisit only with a real runtime).
-- **Full re-verification on the LIVE brain** `~/projects/loreport-oyvind-theie`:
+- **Full re-verification on the LIVE brain** the live brain repo:
   `brain_merge.py` stays **exit-0**; local items stay cloud-invisible; INDEX rebuilds; the
   daily backup still pushes. No regression to the shipped visibility enforcement.
 

@@ -1,0 +1,25 @@
+<MEMORY file="memories/decision-defer-bulk-import.md" action="new">
+---
+name: decision-defer-bulk-import
+description: The bulk import waits for BOTH source exports and runs as a single pass - one is in hand, the other is not; decided 2026-08-07, do not start early
+type: decision
+source: claude-code
+captured: 2026-08-07
+visibility: local
+domain: personal
+---
+**Decision (2026-08-07 evening):** the bulk import - import, distill, synthesize, reconcile -
+waits until **both** source exports are in hand and then runs as **one pass**. The first
+export arrived 2026-08-07 (verified). The **second has not arrived** and was expected to
+take another day or two.
+
+**Why:** the two corpora overlap heavily in subject matter. A split run means the second
+pass must dedupe against items the first pass already wrote, with no shared adjudicator -
+the synthesis detector is report-only. A single pass over both keeps "recency beats volume"
+decidable in one place.
+
+**How to apply:** when the second export lands, do not go straight to ingestion. Restore a
+runnable health check first - importing hundreds of items into a brain with no runnable
+check reproduces an earlier failure at scale.
+</MEMORY>
+INDEX: - [[decision-defer-bulk-import]] — The bulk import waits for BOTH source exports and runs as a single pass  (decision)

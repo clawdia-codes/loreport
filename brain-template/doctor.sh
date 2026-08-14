@@ -68,7 +68,7 @@ fi
 
 # --------------------------------------------------------------- 3. items ----
 head_ "Items"
-TYPES="user feedback project reference knowledge"
+TYPES="user feedback project reference knowledge person decision"
 items=0; bad_fm=0
 for f in memories/*.md knowledge/*.md; do
   [ -f "$f" ] || continue
@@ -88,35 +88,84 @@ for f in memories/*.md knowledge/*.md; do
 done
 [ "$bad_fm" = "0" ] && ok "$items items, all with valid frontmatter"
 
-# INDEX <-> files, both directions
+# INDEX <-> files, both directions.
+#
+# INDEX-ARCHIVE.md counts as catalogued: archiving moves an item's line to the cold
+# shelf and leaves the file on disk, so an archived item is catalogued, not missing.
+# Checking INDEX.md alone would report every archived item as "invisible to search"
+# the day it expires — a false alarm that would train the reader to ignore doctor.
+#
+# Build the file list instead of piping `cat`: this script runs under
+# `set -o pipefail`, so `cat INDEX.md INDEX-ARCHIVE.md | grep -q` returns cat's
+# failure whenever the archive doesn't exist yet — reporting EVERY item as
+# "invisible to search" on a brain that has simply never archived anything.
+# Caught by running this against a real brain; it reads fine.
+indexes=(INDEX.md)
+[ -f INDEX-ARCHIVE.md ] && indexes+=(INDEX-ARCHIVE.md)
+
 missing_file=0; missing_line=0
 while read -r name; do
   [ -z "$name" ] && continue
   [ -f "memories/$name.md" ] || [ -f "knowledge/$name.md" ] || [ -f "skills/$name/SKILL.md" ] \
     || { no "INDEX lists [[$name]] but no such item exists"; missing_file=$((missing_file+1)); }
-done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX.md 2>/dev/null)
+done < <(grep -hoP '(?<=^- \[\[)[^]]+' "${indexes[@]}" 2>/dev/null)
 for f in memories/*.md knowledge/*.md; do
   [ -f "$f" ] || continue
   case "$(basename "$f")" in README.md) continue ;; esac
   n=$(basename "$f" .md)
-  grep -q "^- \[\[$n\]\]" INDEX.md 2>/dev/null || { no "$f has no INDEX line — it is invisible to search"; missing_line=$((missing_line+1)); }
+  grep -q "^- \[\[$n\]\]" "${indexes[@]}" 2>/dev/null \
+    || { no "$f has no INDEX line — it is invisible to search"; missing_line=$((missing_line+1)); }
 done
 [ "$missing_file" = "0" ] && [ "$missing_line" = "0" ] && ok "INDEX matches the files on disk, both directions"
 
-# Dangling wikilinks. A link to an item you haven't written yet is FINE by design --
-# it marks something worth writing later. So these are reported as one summary line,
-# not one warning per link. The exception worth acting on is a link that would
-# resolve if underscores were hyphens: that is a naming-migration leftover, not an
-# intentional forward reference.
-dangling=0; slugfix=0
+# An item must be catalogued in exactly ONE of the two indexes. Both = it is listed
+# twice in the surface a reader loads; the hot/cold split has stopped being a split.
+if [ -f INDEX-ARCHIVE.md ]; then
+  double=0
+  while read -r name; do
+    [ -z "$name" ] && continue
+    grep -q "^- \[\[$name\]\]" INDEX.md 2>/dev/null \
+      && { no "[[$name]] is listed in BOTH INDEX.md and INDEX-ARCHIVE.md"; double=$((double+1)); }
+  done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX-ARCHIVE.md 2>/dev/null)
+  [ "$double" = "0" ] && ok "hot and cold indexes do not overlap"
+fi
+
+# Dangling and ambiguous wikilinks. A link to an item you haven't written yet is FINE
+# by design — it marks something worth writing later. Report dangling and ambiguous
+# links as summary lines (not one line per link). Ambiguous = the slug resolves to
+# more than one of memories/<name>.md, knowledge/<name>.md, skills/<name>/SKILL.md.
+resolve_link() {
+  local name="$1"
+  local hits=0 hit=""
+  for candidate in "memories/${name}.md" "knowledge/${name}.md" "skills/${name}/SKILL.md"; do
+    if [ -f "$candidate" ]; then
+      hits=$((hits+1))
+      hit="$candidate"
+    fi
+  done
+  if [ "$hits" -eq 1 ]; then
+    printf '%s' "$hit"
+  elif [ "$hits" -gt 1 ]; then
+    printf 'ambiguous'
+  fi
+}
+
+dangling=0; ambiguous=0; slugfix=0
 for f in memories/*.md knowledge/*.md skills/*/SKILL.md; do
   [ -f "$f" ] || continue
   while read -r l; do
     [ -z "$l" ] && continue
-    if [ ! -f "memories/$l.md" ] && [ ! -f "knowledge/$l.md" ] && [ ! -f "skills/$l/SKILL.md" ]; then
+    target=$(resolve_link "$l")
+    if [ "$target" = "ambiguous" ]; then
+      ambiguous=$((ambiguous+1))
+      [ "${DOCTOR_VERBOSE:-0}" = "1" ] && echo "      $f: [[$l]] resolves ambiguously"
+      continue
+    fi
+    if [ -z "$target" ]; then
       dangling=$((dangling+1))
       alt=$(printf '%s' "$l" | tr '_' '-')
-      if [ -f "memories/$alt.md" ] || [ -f "knowledge/$alt.md" ] || [ -f "skills/$alt/SKILL.md" ]; then
+      alt_target=$(resolve_link "$alt")
+      if [ -n "$alt_target" ] && [ "$alt_target" != "ambiguous" ]; then
         slugfix=$((slugfix+1))
         [ "${DOCTOR_VERBOSE:-0}" = "1" ] && echo "      $f: [[$l]] -> [[$alt]]"
       else
@@ -129,10 +178,14 @@ if [ "$slugfix" -gt 0 ]; then
   no "$slugfix wikilink(s) use underscores where the item uses hyphens — a naming-migration leftover"
   echo "      Re-run with DOCTOR_VERBOSE=1 to list them."
 fi
+if [ "$ambiguous" -gt 0 ]; then
+  no "$ambiguous ambiguous [[wikilink]](s) — slug matches more than one item path"
+  echo "      Re-run with DOCTOR_VERBOSE=1 to list them."
+fi
 if [ "$((dangling-slugfix))" -gt 0 ]; then
   ok "$((dangling-slugfix)) forward reference(s) to items not written yet (fine by design)"
 fi
-[ "$dangling" = "0" ] && ok "no dangling [[wikilinks]]"
+[ "$dangling" = "0" ] && [ "$ambiguous" = "0" ] && ok "no dangling or ambiguous [[wikilinks]]"
 
 # ------------------------------------------------------- 4. the privacy wall --
 head_ "Privacy wall"
@@ -186,13 +239,63 @@ if [ -d hub ] || git show-ref --quiet refs/heads/provider/openclaw 2>/dev/null; 
   done
   if [ -f hub/published/packet.md ]; then
     pleak=0
+    pcount=0
     while read -r n; do
       [ -z "$n" ] && continue
+      pcount=$((pcount + 1))
       for p in "memories/$n.md" "knowledge/$n.md"; do
         [ -f "$p" ] && grep -qx 'visibility: local' "$p" && { no "LEAK: local item [[$n]] is in the published packet"; pleak=1; }
       done
     done < <(grep -oP '(?<=^- \[\[)[^]]+' hub/published/packet.md 2>/dev/null)
+
+    # POSITIVE assertion — the leak check above is VACUOUSLY TRUE on an empty packet:
+    # its loop body never runs, pleak stays 0, and it reports success. That makes the
+    # instrument blind to the exact failure it exists to catch (a refactor that stops
+    # the packet being populated silently stops shared memories reaching every cloud
+    # provider, with a green health check). So assert the packet is actually populated
+    # whenever the brain holds shared items.
+    shared_on_disk=0
+    for f in memories/*.md knowledge/*.md; do
+      [ -f "$f" ] || continue
+      grep -qx 'visibility: local' "$f" || shared_on_disk=$((shared_on_disk + 1))
+    done
+    if [ "$shared_on_disk" -gt 0 ] && [ "$pcount" = "0" ]; then
+      no "published packet is EMPTY but $shared_on_disk shared item(s) exist — cloud providers are receiving nothing"
+    elif [ "$pcount" = "0" ]; then
+      hmm "published packet is empty (and no shared items exist on disk — consistent)"
+    else
+      ok "published packet carries $pcount item(s), $shared_on_disk shared on disk"
+    fi
+
     [ "$pleak" = "0" ] && ok "published packet contains no local item"
+
+    # ARCHIVE SEAM — an archived SHARED item must still reach the packet. Cloud
+    # providers get the packet, not the repo, and cannot fetch the cold shelf, so
+    # if publishing carried INDEX.md alone every archived shared item would drop
+    # out of every cloud assistant's view with nothing reporting it. Same shape as
+    # the vacuous check above: a silent, green-looking loss of reach.
+    #
+    # Both delivery surfaces are checked. `surface.md` is the paste-host path and
+    # a paste host cannot fetch a cold shelf either, so checking only the packet
+    # would leave exactly half of this property guarded.
+    if [ -f INDEX-ARCHIVE.md ]; then
+      amiss=0; ashared=0
+      while read -r n; do
+        [ -z "$n" ] && continue
+        for p in "memories/$n.md" "knowledge/$n.md"; do
+          [ -f "$p" ] || continue
+          grep -qx 'visibility: local' "$p" && continue
+          ashared=$((ashared + 1))
+          grep -q "\[\[$n\]\]" hub/published/packet.md 2>/dev/null \
+            || { no "archived SHARED item [[$n]] is MISSING from the published packet — cloud providers lost it"; amiss=1; }
+          if [ -f surface.md ]; then
+            grep -q "\[\[$n\]\]" surface.md \
+              || { no "archived SHARED item [[$n]] is MISSING from surface.md — paste hosts lost it (re-run ./make-surface.sh)"; amiss=1; }
+          fi
+        done
+      done < <(grep -oP '(?<=^- \[\[)[^]]+' INDEX-ARCHIVE.md 2>/dev/null)
+      [ "$amiss" = "0" ] && [ "$ashared" -gt 0 ] && ok "all $ashared archived shared item(s) still reach the packet and surface.md"
+    fi
   fi
 fi
 
