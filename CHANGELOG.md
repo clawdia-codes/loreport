@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.18.2] — 2026-08-14
+
+### Fixed — Pass 2 was writing the brain back to itself
+
+The drafting prompt carried the existing brain index so the model could deduplicate. The
+model used it as a **template for what to write**. Exactly one of 90 index lines contained
+the phrase "plain-language"; **106 of 183 drafts echoed it**, bolted onto quotes about
+phone cameras, dice probabilities and Fusion 360. The funnel was not extracting thinly —
+it was reflecting the index back and counting it as new material, which from the outside
+is indistinguishable from a productive run.
+
+Generation and dedup are now separate. `build_prompt()` sees the cluster and nothing else,
+and takes no index parameter at all, so the contamination cannot be reintroduced by
+accident. `dedup_against_brain()` compares the *finished* draft afterwards, by Jaccard over
+description tokens — no model, so nothing can be echoed or argued into a verdict.
+
+Measured on the same corpus after the fix:
+
+| | before | after |
+|---|---|---|
+| drafts echoing "plain-language" | 106/183 | **0/175** |
+| distinct draft names | heavily duplicated | 166/175 |
+| drafts mislabelled `person` | 146 | 0 |
+
+⚠ **`relation: new` is not a claim of novelty.** All 93 real index descriptions self-match
+as duplicates, so the deduper is not inert — but a realistic *paraphrase* scores 0.19 and
+returns "new". Word overlap catches restatements, not rewordings. All 175 came back "new",
+which means no near-verbatim match and nothing more. Do not close that gap by lowering the
+thresholds; that suppresses real new items to hide the symptom.
+
+Also: 9 drafts came back literally named `kebab-case-slug`, the JSON template's own example
+value. A placeholder that reads as a plausible answer gets returned as one; it is now
+unmistakably a placeholder, with a test.
+
+### Fixed — the secret redactor only knew named shapes
+
+Every entry in `SECRET_PATTERNS` is anchored to a vendor prefix (`sk-`, `ghp_`, `AKIA`) or
+one of four keywords before a colon. A 43-character setup code pasted after "send me this
+on telegram:" matched none of them and survived into three corpus files, and from there
+into a session transcript.
+
+Added a shape rule — length ≥ 28, mixed lower/upper/digit, Shannon entropy ≥ 3.5
+bits/char. The guards are the point: mixed-case excludes git SHAs and UUIDs, which are not
+secrets and whose redaction would corrupt real technical content, and the length floor
+leaves absolute file paths alone — the user has a standing rule that those must be given in
+full, so a scrubber that ate them would break the thing he asked for.
+`tests/test_redaction.py` asserts six must-not-redact cases against one must-redact, and
+dropping the mixed-case guard reddens four of them.
+
 ## [1.18.1] — 2026-08-13
 
 ### Fixed — Pass 3's directive carve-out never fired

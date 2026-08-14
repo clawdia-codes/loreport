@@ -37,6 +37,21 @@ valuable precisely because the user only had to say it once.
 Everything else is counted and reported as `weak_singletons`, never silently dropped. A
 cap nobody can see reads as "we covered everything" when it did not.
 
+DEDUP MUST NOT SHARE A PROMPT WITH GENERATION
+----------------------------------------------
+The first version handed the existing brain index to the drafting model so it could
+answer "do we already know this?". The model used it as a template for what to write.
+
+Measured on the 2026-08-13 run: exactly ONE of 90 index lines contained the phrase
+"plain-language", and **106 of 183 drafts echoed that phrase**, bolted onto quotes about
+phone cameras, dice probabilities and Fusion 360. The funnel was not extracting thinly —
+it was reflecting the brain's own index back and counting it as new. From the outside
+that is indistinguishable from a productive run.
+
+So the prompt now sees the cluster and nothing else (`build_prompt`), and dedup happens
+afterwards against the finished draft, deterministically (`dedup_against_brain`). Text
+that never enters a prompt cannot be echoed out of one.
+
 VISIBILITY IS FORCED, NOT SUGGESTED
 ------------------------------------
 Every draft is stamped `visibility: local` by this code, regardless of what the model
@@ -228,11 +243,9 @@ def is_draftable(members, stats):
 
 
 def brain_index_lines(brain_dir):
-    """The existing index, as `name — description` lines, for the dedup prompt.
+    """The existing index, as `name — description` lines, for DEDUP ONLY.
 
-    Descriptions are what the model needs to answer 'do we already know this?'. Reading
-    80 index lines is cheap; reading 80 whole memories is not, and would not answer the
-    question any better.
+    ⚠ These lines must never enter the drafting prompt. See `dedup_against_brain`.
     """
     lines = []
     mem_dir = os.path.join(brain_dir, "memories")
@@ -262,18 +275,13 @@ actually typed.
 CLUSTER (evidence: {evidence} distinct conversations, {first_seen} to {last_seen}):
 {cluster_text}
 
-The brain ALREADY contains these items (name — description):
-{index_text}
-
 Write ONE draft memory as a single JSON object, no prose, no code fence:
 
-{{"name": "kebab-case-slug",
+{{"name": "<replace-with-a-short-hyphenated-slug-describing-THIS-memory>",
   "type": "user|feedback|project|reference|decision|person",
   "description": "one line, under 160 chars",
   "body": "2-5 sentences stating the durable fact. For feedback/project include why it \
 matters and how to apply it.",
-  "relation": "new|update|duplicate",
-  "relates_to": "existing name if relation is update or duplicate, else empty",
   "confidence": "high|medium|low",
   "behavioral_impact": "high|medium|low"}}
 
@@ -287,27 +295,78 @@ What each type means — pick from these, and note that most drafts are `user` o
 colleague. NEVER use `person` for a fact about the subject of this brain themselves.
 
 Rules:
+- "name" must describe THIS memory. Never emit the placeholder text itself.
 - The description line is the product. It is injected into every future session; the body \
 is rarely read. Make it specific and useful on its own.
 - State what is DURABLY true about this person, not what happened in one conversation.
-- If the brain already covers this, say relation "duplicate" and name it.
-- If the brain covers it but this adds or corrects something, say "update".
+- Write ONLY what these quotes support. If the quotes are a handful of unrelated \
+questions, say so plainly in the description rather than inventing a trait to cover them.
 - Do not invent anything the quotes do not support.
 - behavioral_impact is how much knowing this would change an assistant's behaviour."""
 
 
-def draft_cluster(members, stats, index_text, model, endpoint, timeout):
+def build_prompt(members, stats):
+    """The drafting prompt. Takes the cluster and NOTHING ELSE — see the module docstring.
+
+    Split out from `draft_cluster` so a test can assert directly that no brain content
+    reaches it, rather than inferring that from output.
+    """
     lines = []
     for m in members[:12]:
         q = (m.get("verbatim_quote") or "").replace("\n", " ")[:240]
         lines.append(f'- [{m.get("kind")}] {m.get("claim")}\n  quote: "{q}"')
-    prompt = PROMPT.format(
+    return PROMPT.format(
         evidence=stats["evidence"],
         first_seen=stats["first_seen"],
         last_seen=stats["last_seen"],
         cluster_text="\n".join(lines),
-        index_text="\n".join(index_text) or "(the brain is empty)",
     )
+
+
+def dedup_against_brain(draft, index_lines, dup_at=0.5, update_at=0.3):
+    """Compare a FINISHED draft to the existing index, deterministically.
+
+    Deliberately not a model call. The previous design handed the index to the drafting
+    model so it could answer "do we already know this?", and the model used it as a
+    template instead: one index line contained the phrase "plain-language" and 106 of 183
+    drafts came back echoing it, attached to quotes about phone cameras and dice. The
+    brain was being written back to itself and counted as new.
+
+    Similarity is Jaccard over description tokens. It cannot echo anything, cannot be
+    talked into a verdict, and costs nothing.
+
+    ⚠ IT IS ALSO INSENSITIVE, AND `relation: new` MUST NOT BE READ AS "GENUINELY NEW".
+    Measured 2026-08-14: all 93 real index descriptions self-match as duplicates, so the
+    rule is not inert — but a realistic *paraphrase* of an existing memory scores 0.19 and
+    comes back "new". Word overlap catches restatements, not rewordings. On the full run
+    every one of 175 drafts came back "new", which reflects the absence of near-verbatim
+    matches and nothing more. Catching semantic duplicates needs either embeddings or the
+    human review step; do not close that gap by lowering the thresholds, which would
+    suppress real new items to hide the symptom.
+    """
+    dtoks = content_tokens(draft.get("description", ""))
+    best_name, best_score = "", 0.0
+    for line in index_lines:
+        name, _, desc = line.partition(" — ")
+        itoks = content_tokens(desc)
+        if not dtoks or not itoks:
+            continue
+        score = len(dtoks & itoks) / len(dtoks | itoks)
+        if score > best_score:
+            best_name, best_score = name.strip(), score
+    if best_score >= dup_at:
+        relation = "duplicate"
+    elif best_score >= update_at:
+        relation = "update"
+    else:
+        relation = "new"
+    return {"relation": relation,
+            "relates_to": best_name if relation != "new" else "",
+            "similarity": round(best_score, 3)}
+
+
+def draft_cluster(members, stats, model, endpoint, timeout):
+    prompt = build_prompt(members, stats)
     raw = oe.call_ollama(prompt, model, endpoint, timeout)
     text = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.MULTILINE).strip()
     start, end = text.find("{"), text.rfind("}")
@@ -359,13 +418,15 @@ def main():
     todo = draftable[:args.limit] if args.limit else draftable
     drafts, failures = [], 0
     for i, (members, stats) in enumerate(todo, 1):
-        obj = draft_cluster(members, stats, index_text, args.model, args.endpoint, args.timeout)
+        obj = draft_cluster(members, stats, args.model, args.endpoint, args.timeout)
         if not obj:
             failures += 1
             continue
         # The privacy wall is enforced here, not requested from the model.
         obj["visibility"] = "local"
         obj["stability"] = stats
+        # Dedup AFTER drafting, deterministically. The index never touches the prompt.
+        obj.update(dedup_against_brain(obj, index_text))
         obj["evidence_quotes"] = [
             {"quote": m.get("verbatim_quote"), "source": m.get("source"), "date": m.get("date")}
             for m in members[:5]

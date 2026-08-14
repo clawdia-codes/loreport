@@ -23,6 +23,7 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -120,10 +121,50 @@ DISPATCH_PREFIXES = ("you are ", "you're ", "your task is")
 MAX_CANDIDATE_CHARS = 1200
 
 
+# Every pattern above is anchored to a KNOWN shape — a vendor prefix (`sk-`, `ghp_`,
+# `AKIA`) or one of four keywords before a colon. A credential wearing neither slips
+# through, and one did: a 43-character setup code pasted after the words "send me this on
+# telegram:" survived into three corpus files during the 2026-08-13 knowledge grab, and
+# from there into a session transcript.
+#
+# Adding "telegram" to the keyword list would fix that one sentence and nothing else. The
+# general shape is what matters: a long, high-entropy, mixed-alphabet token is not
+# something a human types in prose.
+#
+# The guards below exist to keep this from becoming a false-positive machine, because a
+# redactor that mangles ordinary text gets switched off:
+#   - length >= 28, so ordinary words and short identifiers are untouched
+#   - must mix lower, upper AND digit, which excludes git SHAs and UUIDs (lower+digit
+#     only) — those are not secrets and redacting them would corrupt real content
+#   - Shannon entropy >= 3.5 bits/char, which excludes long repetitive strings
+_HIGH_ENTROPY_CANDIDATE = re.compile(r"\b[A-Za-z0-9_\-]{28,}\b")
+
+
+def _shannon_bits_per_char(s):
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def looks_like_secret(token):
+    """True for a token whose shape says 'machine-generated credential', not 'word'."""
+    if len(token) < 28:
+        return False
+    if not (any(c.islower() for c in token)
+            and any(c.isupper() for c in token)
+            and any(c.isdigit() for c in token)):
+        return False
+    return _shannon_bits_per_char(token) >= 3.5
+
+
 def redact_secrets(text):
     out = text
     for pat in SECRET_PATTERNS:
         out = re.sub(pat, "[REDACTED]", out)
+    out = _HIGH_ENTROPY_CANDIDATE.sub(
+        lambda m: "[REDACTED]" if looks_like_secret(m.group(0)) else m.group(0), out)
     return out
 
 
